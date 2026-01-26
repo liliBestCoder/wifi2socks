@@ -1,0 +1,114 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="源文件">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="头文件">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="资源文件">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="头文件\worker">
+      <UniqueIdentifier>{3f2072c7-d350-4ab0-bc13-efffa175e67c}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\protocol">
+      <UniqueIdentifier>{e8fa7d2c-1183-4e0b-9ab3-d623970794b0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\protocol\tcp">
+      <UniqueIdentifier>{a26e2478-8d60-428e-a264-353d54d2fb3b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\protocol\udp">
+      <UniqueIdentifier>{95f4ed05-4718-4033-8936-388a8082e0dd}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\queue">
+      <UniqueIdentifier>{c91f296b-257e-4454-8653-a08d1a1b6f17}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\utils">
+      <UniqueIdentifier>{36bcd7b6-8887-46b0-bfd5-09fb43009aec}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\worker">
+      <UniqueIdentifier>{354a6604-a5f9-4a5a-b7c7-0afb4d749952}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\protocol">
+      <UniqueIdentifier>{7d0da9e9-cf90-45a6-8b77-66333f0da11e}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\protocol\tcp">
+      <UniqueIdentifier>{a1e1786b-bd6b-42ba-bf75-1b0c1252c5bb}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\protocol\udp">
+      <UniqueIdentifier>{df7b0eff-002c-4c5b-97b5-860ea82fcd04}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\queue">
+      <UniqueIdentifier>{51b4c82a-ec2b-451a-ba06-1d52a485ed14}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\utils">
+      <UniqueIdentifier>{ff69b82a-7b09-4c93-b316-546c0b556551}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="头文件\protocol\arp">
+      <UniqueIdentifier>{1057c235-d2ed-4514-a74e-38aa1111a405}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="源文件\protocol\arp">
+      <UniqueIdentifier>{14122e82-d12e-4fbf-a7d5-a7178957e82a}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="wifi2socks.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="worker.cpp">
+      <Filter>源文件\worker</Filter>
+    </ClCompile>
+    <ClCompile Include="tcb.cpp">
+      <Filter>源文件\protocol\tcp</Filter>
+    </ClCompile>
+    <ClCompile Include="ucb.cpp">
+      <Filter>源文件\protocol\udp</Filter>
+    </ClCompile>
+    <ClCompile Include="packet.cpp">
+      <Filter>源文件\protocol</Filter>
+    </ClCompile>
+    <ClCompile Include="queue.cpp">
+      <Filter>源文件\queue</Filter>
+    </ClCompile>
+    <ClCompile Include="utils.cpp">
+      <Filter>源文件\utils</Filter>
+    </ClCompile>
+    <ClCompile Include="arp.cpp">
+      <Filter>源文件\protocol\arp</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="worker.h">
+      <Filter>头文件\worker</Filter>
+    </ClInclude>
+    <ClInclude Include="tcb.h">
+      <Filter>头文件\protocol\tcp</Filter>
+    </ClInclude>
+    <ClInclude Include="tcb_utils.h">
+      <Filter>头文件\protocol\tcp</Filter>
+    </ClInclude>
+    <ClInclude Include="ucb.h">
+      <Filter>头文件\protocol\udp</Filter>
+    </ClInclude>
+    <ClInclude Include="ucb_utils.h">
+      <Filter>头文件\protocol\udp</Filter>
+    </ClInclude>
+    <ClInclude Include="packet.h">
+      <Filter>头文件\protocol</Filter>
+    </ClInclude>
+    <ClInclude Include="queue.h">
+      <Filter>头文件\queue</Filter>
+    </ClInclude>
+    <ClInclude Include="utils.h">
+      <Filter>头文件\utils</Filter>
+    </ClInclude>
+    <ClInclude Include="arp.h">
+      <Filter>头文件\protocol\arp</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
