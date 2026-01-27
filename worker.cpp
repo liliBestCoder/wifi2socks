@@ -17,6 +17,12 @@ void Worker::worker_loop() {
 		while (in_queue->pop(ev)) {
 			process_event(ev);
 		}
+		
+		// Poll for outgoing data
+		for (auto& kv : tcb_map) {
+			flush_output(*kv.second, tap);
+		}
+
 		std::this_thread::sleep_for(std::chrono::microseconds(50)); 
 	}
 }
@@ -29,8 +35,8 @@ void Worker::process_event(const Event& ev) {
 				tcb_map[ev.pkt.quad] = std::make_unique<TCB>(ev.pkt.quad);
 			}
 			TCB* t = tcb_map[ev.pkt.quad].get();
-			process_tcp_packet(*t, ev.pkt);
-			flush_output(*t);
+			process_tcp_packet(*t, ev.pkt, this->tap);
+			flush_output(*t, this->tap);
 		}
 		else if (ev.proto == IPPROTO_UDP) {
 			auto it = ucb_map.find(ev.pkt.quad);
@@ -38,8 +44,7 @@ void Worker::process_event(const Event& ev) {
 				ucb_map[ev.pkt.quad] = std::make_unique<UCB>(ev.pkt.quad);
 			}
 			UCB* t = ucb_map[ev.pkt.quad].get();
-			process_tcp_packet(*t, ev.pkt, this->tap);
-			flush_output(*t);
+			process_udp_packet(*t, ev.pkt, this->tap);
 		}
 	}
 	else if (ev.type == EventType::TimerRTO) {
@@ -49,7 +54,7 @@ void Worker::process_event(const Event& ev) {
 			if (!t->send_buf.empty()) {
 				std::cout << "[worker" << id << "] RTO triggered for "
 					<< t->quad.saddr << ":" << t->quad.sport << "\n";
-				flush_output(*t); // ÖØÐÂ·¢ËÍ
+				flush_output(*t, this->tap); // 重发
 			}
 		}
 	}
@@ -119,17 +124,17 @@ void dispatch(uint8_t* buffer, DWORD bytesRead) {
 			dispatch_ip_packet(ip->src, ip->dst, tcp->src_port, tcp->dst_port, IPPROTO_TCP, tcp_vec, tcp_payload_len, queues);
 		}
 		else if (ip->protocol == 17) { // UDP
-			constexpr int UdpHdr = 8;
-			uint16_t sport = ntohs(*(uint16_t*)(buffer + 0));
-			uint16_t dport = ntohs(*(uint16_t*)(buffer + 2));
+			UdpHdr* udp = (UdpHdr*)payload;
+			uint16_t sport = udp->src_port;
+			uint16_t dport = udp->dst_port;
 
 			/* 本地服务/组播/广播 直接丢弃 */
-			if (sport == 137 || sport == 138 || sport == 5353 || sport == 5355 ||
-				dport == 137 || dport == 138 || dport == 5353 || dport == 5355 ||
+			if (ntohs(sport) == 137 || ntohs(sport) == 138 || ntohs(sport) == 5353 || ntohs(sport) == 5355 ||
+				ntohs(dport) == 137 || ntohs(dport) == 138 || ntohs(dport) == 5353 || ntohs(dport) == 5355 ||
 				(ip->dst & 0xF0000000) == 0xE0000000 ||   // 224.0.0.0/4
 				(ip->dst & 0xFF) == 0xFF)                 // 广播
 				return;
-
+			
 			int udp_payload_len = payload_len - sizeof(UdpHdr);
 			if (udp_payload_len < 0) udp_payload_len = 0;
 			std::vector<uint8_t> udp_vec(payload + sizeof(UdpHdr), payload + sizeof(UdpHdr) + udp_payload_len);

@@ -3,6 +3,47 @@
 #define PACKET_H
 
 #include <cstdint>
+#include <vector>
+
+#pragma pack(push, 1)
+struct EthHeader {
+	uint8_t dst_mac[6];
+	uint8_t src_mac[6];
+	uint16_t type;
+};
+
+struct IpHdr {
+	uint8_t ver_ihl;
+	uint8_t tos;
+	uint16_t tot_len;
+	uint16_t id;
+	uint16_t frag_off;
+	uint8_t ttl;
+	uint8_t protocol;
+	uint16_t checksum;
+	uint32_t src;
+	uint32_t dst;
+};
+
+struct TcpHdr {
+	uint16_t src_port;
+	uint16_t dst_port;
+	uint32_t seq;
+	uint32_t ack_seq;
+	uint8_t data_offset;
+	uint8_t flags;
+	uint16_t window;
+	uint16_t checksum;
+	uint16_t urgent;
+};
+
+struct UdpHdr {
+	uint16_t src_port;
+	uint16_t dst_port;
+	uint16_t len;
+	uint16_t checksum;
+};
+#pragma pack(pop)
 
 struct Quad {
     uint32_t saddr;

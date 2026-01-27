@@ -15,12 +15,7 @@ struct ArpEvent {
     DWORD len;
 };
 
-#pragma pack(push, 1)
-struct EthHeader {
-    uint8_t dst[6];
-    uint8_t src[6];
-    uint16_t type;
-};
+
 
 struct ArpPacket {
     uint16_t htype;

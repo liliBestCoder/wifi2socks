@@ -9,6 +9,8 @@
 #include "ucb.h"
 #include "queue.h"
 #include "packet.h"
+#include "tcb_utils.h"
+#include "ucb_utils.h"
 
 enum class EventType { PacketIn, TimerRTO };
 
@@ -33,31 +35,6 @@ struct Worker {
 	void run();
 	void worker_loop();
 	void process_event(const Event& ev);
-};
-
-struct IpHdr {
-	BYTE ver_ihl;
-	BYTE tos;
-	WORD tot_len;
-	WORD id;
-	WORD frag_off;
-	BYTE ttl;
-	BYTE protocol;
-	WORD checksum;
-	DWORD src;
-	DWORD dst;
-};
-
-struct TcpHdr {
-	WORD src_port;
-	WORD dst_port;
-	DWORD seq;
-	DWORD ack_seq;
-	BYTE data_offset;
-	BYTE flags;
-	WORD window;
-	WORD checksum;
-	WORD urgent;
 };
 
 void init_workers(HANDLE tap);

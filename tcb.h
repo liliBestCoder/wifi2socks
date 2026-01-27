@@ -1,36 +1,51 @@
-﻿#ifndef TCB_H
+#ifndef TCB_H
 #define TCB_H
 #include <cstdint>
 #include <vector>
+#include <thread>
+#include <mutex>
+#include <deque>
+#include <atomic>
+#include <ws2tcpip.h>
 #include "packet.h"
 
-
-struct TCB {
-	Quad quad;
-	uint32_t seq, ack;
-	std::vector<Packet> send_buf; 
-
-	TCB(const Quad& q) : quad(q), seq(0), ack(0) {}
-
-
-	void on_packet(const Packet& pkt);
-
-
-	void flush_output();
-
-
-	bool is_rto_expired(uint64_t now);
-	void on_timeout();
+enum class TcpState {
+    CLOSED,
+    LISTEN,
+    SYN_SENT,
+    SYN_RCVD,
+    ESTABLISHED,
+    FIN_WAIT_1,
+    FIN_WAIT_2,
+    CLOSE_WAIT,
+    CLOSING,
+    LAST_ACK,
+    TIME_WAIT
 };
 
-inline void process_tcp_packet(TCB& t, const Packet& pkt) {
-	t.on_packet(pkt);
-}
+struct TCB {
+    Quad quad;
+    uint32_t local_seq; // My sequence number
+    uint32_t local_ack; // What I expect from remote
+    uint32_t remote_seq; // Received from remote
+    
+    TcpState state;
+    
+    // SOCKS5 & Backend
+    SOCKET client_sock;
+    std::thread backend_th;
+    std::atomic<bool> stop_thread;
+    
+    // Buffers
+    std::mutex mtx;
+    std::deque<uint8_t> data_to_tap;   // Data received from SOCKS, waiting to be sent to TAP (TCP Payload)
+    std::deque<uint8_t> data_to_socks; // Data received from TAP, waiting to be sent to SOCKS
 
-inline void flush_output(TCB& t) {
-	for (auto& p : t.send_buf) {
-	}
-	t.send_buf.clear();
-}
+    // Retransmission & Window
+    uint16_t window;
+    
+    TCB(const Quad& q);
+    ~TCB();
+};
 
 #endif
