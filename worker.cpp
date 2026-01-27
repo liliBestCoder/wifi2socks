@@ -67,6 +67,7 @@ std::unique_ptr<RingQueue<ArpEvent>> arp_queue = std::make_unique<RingQueue<ArpE
 std::unique_ptr<ArpWorker> arp_worker;
 
 void init_workers(HANDLE tap) {
+	InitIOCPSystem();
 	for (int i = 0; i < NUM_WORKERS; ++i) {
 		queues.push_back(std::make_unique<RingQueue<Event>>(1024));
 		workers.push_back(std::make_unique<Worker>(i, tap, queues[i].get()));

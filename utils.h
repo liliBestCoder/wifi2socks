@@ -14,7 +14,7 @@ uint16_t tcp_cksum(uint32_t s, uint32_t d, const uint8_t* tcp, int len);
 uint16_t udp_cksum(uint32_t s, uint32_t d, const uint8_t* udp, int len);
 
 // SOCKS5 Configuration
-#define SOCKS_SERVER_IP "127.0.0.1"
+#define SOCKS_SERVER_IP "192.168.11.250"
 #define SOCKS_SERVER_PORT 3080
 
 #include <windows.h>
