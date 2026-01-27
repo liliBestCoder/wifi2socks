@@ -50,12 +50,13 @@ void Worker::process_event(const Event& ev) {
 	else if (ev.type == EventType::TimerRTO) {
 		auto it = tcb_map.find(ev.quad);
 		if (it != tcb_map.end()) {
-			TCB* t = it->second.get();
-			if (!t->send_buf.empty()) {
-				std::cout << "[worker" << id << "] RTO triggered for "
-					<< t->quad.saddr << ":" << t->quad.sport << "\n";
-				flush_output(*t, this->tap); // 重发
-			}
+			// TCB* t = it->second.get();
+			// Retransmission logic not implemented in simplified TCB
+            // if (!t->send_buf.empty()) {
+            //    std::cout << "[worker" << id << "] RTO triggered for "
+            //        << t->quad.saddr << ":" << t->quad.sport << "\n";
+            //    flush_output(*t, this->tap); // 重发
+            // }
 		}
 	}
 }

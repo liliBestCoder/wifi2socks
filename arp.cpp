@@ -51,8 +51,8 @@ bool ArpWorker::send_arp_reply(ArpEvent ev) {
     uint8_t reply[42] = { 0 };
 
     EthHeader* reth = (EthHeader*)reply;
-    memcpy(reth->dst, eth->src, 6);
-    memcpy(reth->src, TAP_MAC, 6);
+    memcpy(reth->dst_mac, eth->src_mac, 6);
+    memcpy(reth->src_mac, TAP_MAC, 6);
     reth->type = htons(0x0806);
 
     ArpPacket* rarp = (ArpPacket*)(reply + sizeof(EthHeader));
