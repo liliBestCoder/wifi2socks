@@ -8,6 +8,7 @@
 #include <mutex>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #define UDP_ADDR "192.168.21.5"
 
@@ -20,28 +21,34 @@ static void log_line(const char* fmt, Args... a) {
     fflush(stdout);
 }
 
-// Helper to parse DNS name
+// Helper to parse DNS name with compression support
 static std::string parse_dns_name(const uint8_t* buf, int len, int& pos) {
     std::string name;
     int jumps = 0;
     int p = pos;
+    
     while (p < len) {
         uint8_t c = buf[p];
-        if (c == 0) { p++; if (jumps == 0) pos = p; return name; }
-        if ((c & 0xC0) == 0xC0) { 
-            if (p + 1 >= len) return "";
-            if (jumps == 0) pos = p + 2;
+        if (c == 0) {
+            p++;
+            if (jumps == 0) pos = p;
+            return name;
+        }
+        if ((c & 0xC0) == 0xC0) { // Pointer
+            if (p + 1 >= len) return "<err-ptr-len>";
             int offset = ((c & 0x3F) << 8) | buf[p + 1];
+            if (jumps == 0) pos = p + 2;
             p = offset;
-            jumps++; if (jumps > 5) return "";
-        } else {
-            if (p + 1 + c > len) return "";
+            jumps++;
+            if (jumps > 10) return "<err-loop>"; // Loop protection
+        } else { // Label
+            if (p + 1 + c > len) return "<err-label-len>";
             if (!name.empty()) name += ".";
             name.append((char*)buf + p + 1, c);
             p += 1 + c;
         }
     }
-    return "";
+    return "<err-overflow>";
 }
 
 // Helper: recv N bytes strictly
@@ -73,7 +80,7 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
     }
 
     // 2. Auth
-    uint8_t buf[2048];
+    uint8_t buf[4096]; // Increased buffer size
     uint8_t handshake[] = { 0x05, 0x01, 0x00 };
     send(tcp, (char*)handshake, 3, 0);
     if (!recv_all(tcp, buf, 2) || buf[1] != 0x00) {
@@ -106,11 +113,6 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
         if (!recv_all(tcp, buf, 1)) { closesocket(tcp); return; }
         int len = buf[0];
         if (!recv_all(tcp, buf, len + 2)) { closesocket(tcp); return; }
-        // We simplified here: assumes proxy returns IPv4 for UDP relay. 
-        // If it returns domain, we'd need to resolve it. 
-        // For now, let's assume if it's domain, we can't handle it easily without gethostbyname block.
-        // Try fallback: Use the SOCKS_SERVER_IP but with the port given? 
-        // Often proxies return 0.0.0.0 or the domain of the proxy itself.
         relay_ip = inet_addr(SOCKS_SERVER_IP); 
         relay_port = *(uint16_t*)(buf + len);
     } else {
@@ -118,7 +120,6 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
         closesocket(tcp); return;
     }
 
-    // If relay IP is 0.0.0.0, use the TCP server IP
     if (relay_ip == 0) relay_ip = inet_addr(SOCKS_SERVER_IP);
 
     printf("[UCB] UDP ASSOCIATE Success. Relay: %u.%u.%u.%u:%u\n", 
@@ -130,10 +131,10 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
 
     // 5. Setup UDP Socket
     SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
-    sockaddr_in local{};
+    sockaddr_in local {};
     local.sin_family = AF_INET;
-    local.sin_addr.s_addr = htonl(INADDR_ANY); // Bind to 0.0.0.0 to let OS pick correct Source IP (e.g. 127.0.0.1)
-    local.sin_port = htons(0); // Any port
+    local.sin_addr.s_addr = htonl(INADDR_ANY); 
+    local.sin_port = htons(0); 
     bind(udp, (sockaddr*)&local, sizeof(local));
     ucb->udpSock = udp;
 
@@ -146,15 +147,14 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
         FD_SET(tcp, &rd_set);
         FD_SET(udp, &rd_set);
 
-        // Check if we have data to send (don't block select too long)
-        timeval tv = { 0, 5000 }; // 5ms
+        timeval tv = { 0, 5000 }; 
         int n = select(0, &rd_set, NULL, NULL, &tv);
 
-        if (n < 0) break; // Error
+        if (n < 0) break; 
 
-        // Check TCP (Control channel closed?)
+        // Check TCP
         if (FD_ISSET(tcp, &rd_set)) {
-            int r = recv(tcp, (char*)buf, 1, 0); // Peek?
+            int r = recv(tcp, (char*)buf, 1, 0); 
             if (r <= 0) {
                 printf("[UCB] TCP Control closed.\n");
                 break;
@@ -163,24 +163,22 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
 
         // Check UDP (Incoming data from Proxy)
         if (FD_ISSET(udp, &rd_set)) {
-            int r = recvfrom(udp, (char*)buf, 2048, 0, NULL, NULL);
-            if (r > 0) {
-                if (r < 10) continue; 
-                
-                int offset = 0;
+            int r = recvfrom(udp, (char*)buf, 4096, 0, NULL, NULL);
+            if (r > 10) { 
+                // Basic Validation
                 if (buf[0] != 0 || buf[1] != 0) continue; 
                 
+                int offset = 0;
                 uint32_t src_ip = 0;
                 uint16_t src_port = 0;
                 uint8_t atyp = buf[3];
                 
-                // Parse SOCKS header to get offset and port, but IGNORE src_ip for reply construction
                 if (atyp == 0x01) { // IPv4
                     src_ip = *(uint32_t*)(buf + 4); 
                     src_port = *(uint16_t*)(buf + 8); 
                     offset = 10;
                 } else if (atyp == 0x04) { // IPv6
-                    src_port = *(uint16_t*)(buf + 20); // Port is at end of 16-byte IP
+                    src_port = *(uint16_t*)(buf + 20); 
                     offset = 22;
                 } else {
                     continue; 
@@ -189,31 +187,49 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
                 uint8_t* payload = buf + offset;
                 int payload_len = r - offset;
 
-                if (offset > 0) {
-                    // Log DNS Response
-                    if (ntohs(src_port) == 53 && payload_len > 12) {
+                if (offset > 0 && payload_len > 12) {
+                    // Enhanced DNS Parsing and Logging
+                    if (ntohs(src_port) == 53) {
                          int pos = 12; // Skip Header
                          std::string qname = parse_dns_name(payload, payload_len, pos);
-                         pos += 4; // Skip QTYPE, QCLASS
                          
+                         // Check flags
+                         uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
+                         uint16_t qdcount = ntohs(*(uint16_t*)(payload + 4));
                          uint16_t ancount = ntohs(*(uint16_t*)(payload + 6));
-                         if (!qname.empty()) {
-                             std::string ips;
-                             for (int i=0; i<ancount && pos < payload_len; ++i) {
-                                 parse_dns_name(payload, payload_len, pos); // Skip Answer Name
-                                 if (pos + 10 > payload_len) break;
-                                 uint16_t type = ntohs(*(uint16_t*)(payload + pos));
-                                 uint16_t data_len = ntohs(*(uint16_t*)(payload + pos + 8));
-                                 pos += 10;
-                                 if (type == 1 && data_len == 4 && pos + 4 <= payload_len) { // A Record
-                                     char ip_str[INET_ADDRSTRLEN];
-                                     inet_ntop(AF_INET, payload + pos, ip_str, sizeof(ip_str));
-                                     ips += std::string(ip_str) + " ";
-                                 }
-                                 pos += data_len;
-                             }
-                             printf("[DNS-RES] %s -> %s(via UDP Relay)\n", qname.c_str(), ips.empty() ? "No A Record (IPv6/CNAME)" : ips.c_str());
+                         
+                         // Skip Questions (usually 1)
+                         pos = 12; 
+                         for(int k=0; k<qdcount; ++k) {
+                             parse_dns_name(payload, payload_len, pos);
+                             pos += 4; // QTYPE, QCLASS
                          }
+
+                         std::string info = "";
+                         for (int i=0; i<ancount && pos < payload_len; ++i) {
+                             parse_dns_name(payload, payload_len, pos); // Skip Name
+                             if (pos + 10 > payload_len) break;
+                             
+                             uint16_t type = ntohs(*(uint16_t*)(payload + pos));
+                             uint16_t data_len = ntohs(*(uint16_t*)(payload + pos + 8));
+                             pos += 10;
+                             
+                             if (pos + data_len > payload_len) break;
+
+                             if (type == 1 && data_len == 4) { // A
+                                 char ip_str[INET_ADDRSTRLEN];
+                                 inet_ntop(AF_INET, payload + pos, ip_str, sizeof(ip_str));
+                                 info += "A:" + std::string(ip_str) + " ";
+                             } else if (type == 5) { // CNAME
+                                 info += "CNAME ";
+                             } else if (type == 28) { // AAAA
+                                 info += "AAAA ";
+                             }
+                             pos += data_len;
+                         }
+                         
+                         if (info.empty()) info = "No Records/Parse Error";
+                         printf("[DNS-RES] %s -> %s (via UDP Relay)\n", qname.c_str(), info.c_str());
                     }
 
                     // Send to TAP
@@ -228,24 +244,18 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
                     memset(ip, 0, 20);
                     ip[0] = 0x45;
                     *(uint16_t*)(ip + 2) = htons(20 + 8 + payload_len);
-                    ip[8] = 64;
-                    ip[9] = 17; // UDP
+                    ip[8] = 64; ip[9] = 17; // UDP
                     
-                    // CRITICAL FIX: Use original destination IP as Source IP
-                    // The client sent to ucb->quad.daddr (e.g. 192.168.1.1), so it expects reply from there.
                     *(uint32_t*)(ip + 12) = ucb->quad.daddr;   
-                    
-                    *(uint32_t*)(ip + 16) = ucb->quad.saddr;  // Dst IP (Client)
+                    *(uint32_t*)(ip + 16) = ucb->quad.saddr;  
                     *(uint16_t*)(ip + 10) = checksum(ip, 20);
 
-                    *(uint16_t*)(udp_hdr + 0) = src_port; // Src Port (usually 53)
-                    *(uint16_t*)(udp_hdr + 2) = ucb->quad.sport;   // Dst Port
+                    *(uint16_t*)(udp_hdr + 0) = src_port; 
+                    *(uint16_t*)(udp_hdr + 2) = ucb->quad.sport;   
                     *(uint16_t*)(udp_hdr + 4) = htons(8 + payload_len);
-                    *(uint16_t*)(udp_hdr + 6) = 0; // Checksum optional
+                    *(uint16_t*)(udp_hdr + 6) = 0; 
                     
                     memcpy(udp_hdr + 8, payload, payload_len);
-                    
-                    // Pseudo header checksum
                     *(uint16_t*)(udp_hdr + 6) = udp_cksum(ucb->quad.daddr, ucb->quad.saddr, udp_hdr, 8 + payload_len);
 
                     platform_send_frame(tap, frame, 14 + 20 + 8 + payload_len);
@@ -260,13 +270,11 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
                 Packet pkt = ucb->send_queue.front();
                 ucb->send_queue.pop_front();
                 
-                // Construct SOCKS5 UDP Header
                 std::vector<uint8_t> sbuf;
                 sbuf.push_back(0); sbuf.push_back(0); // RSV
                 sbuf.push_back(0); // FRAG
                 sbuf.push_back(1); // ATYP IPv4
                 
-                // DNS Hijack
                 uint32_t target_ip = pkt.quad.daddr;
                 if (ntohs(pkt.quad.dport) == 53) {
                     target_ip = inet_addr("8.8.8.8");
@@ -280,7 +288,6 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
                 uint8_t* pIP = (uint8_t*)&target_ip;
                 sbuf.push_back(pIP[0]); sbuf.push_back(pIP[1]); sbuf.push_back(pIP[2]); sbuf.push_back(pIP[3]);
                 
-                // Original Dst Port (Packet Quad is Net Order)
                 uint16_t dport = pkt.quad.dport;
                 uint8_t* pPort = (uint8_t*)&dport;
                 sbuf.push_back(pPort[0]); sbuf.push_back(pPort[1]);
@@ -290,7 +297,7 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
                 sockaddr_in relay_addr;
                 relay_addr.sin_family = AF_INET;
                 relay_addr.sin_addr.s_addr = ucb->relay_ip;
-                relay_addr.sin_port = ucb->relay_port; // Already Net Order from buf
+                relay_addr.sin_port = ucb->relay_port; 
                 
                 sendto(udp, (char*)sbuf.data(), (int)sbuf.size(), 0, (sockaddr*)&relay_addr, sizeof(relay_addr));
             }
@@ -319,7 +326,13 @@ void process_udp_packet(UCB& ucb, const Packet& pkt, HANDLE tap) {
     }
 
     // 2. Start Thread if needed
-    if (!ucb.worker_th.joinable()) {
-        ucb.worker_th = std::thread(ucb_worker_loop, &ucb, tap);
+    if (!ucb.is_running) {
+        if (ucb.worker_th.joinable()) ucb.worker_th.join(); // Clean up old thread if any
+        ucb.is_running = true;
+        // 使用 ThreadGuard 的逻辑被移到了线程内部手动管理，为了简单起见，这里直接启动
+        ucb.worker_th = std::thread([&ucb, tap]() {
+            ucb_worker_loop(&ucb, tap);
+            ucb.is_running = false; // 线程退出时重置标志
+        });
     }
 }
