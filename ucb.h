@@ -24,6 +24,7 @@ struct UCB {
     std::thread worker_th;
     std::atomic<bool> stop_thread;
     std::atomic<bool> ready_to_send;
+    std::atomic<bool> is_running; // <--- 新增：标记线程是否实际在运行
 
     // Data Queue (Packets waiting for handshake to complete)
     std::mutex mtx;

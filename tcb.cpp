@@ -230,6 +230,7 @@ TCB::~TCB() {
 }
 
 void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
+    if (pkt.payload.size() < 20) return; // Drop too short packets
     TcpHdr* tcp = (TcpHdr*)pkt.payload.data();
     uint32_t seq = ntohl(tcp->seq);
     uint32_t ack = ntohl(tcp->ack_seq);
