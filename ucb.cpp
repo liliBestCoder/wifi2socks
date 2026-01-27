@@ -130,7 +130,7 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
 
     // 5. Setup UDP Socket
     SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
-    sockaddr_in local{};
+    sockaddr_in local {};
     local.sin_family = AF_INET;
     local.sin_addr.s_addr = htonl(INADDR_ANY); // Bind to 0.0.0.0 to let OS pick correct Source IP (e.g. 127.0.0.1)
     local.sin_port = htons(0); // Any port
@@ -166,7 +166,7 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
             int r = recvfrom(udp, (char*)buf, 2048, 0, NULL, NULL);
             if (r > 10) { // Valid SOCKS5 UDP header size
                 // buf[0-2]: RSV, FRAG. buf[3]: ATYP.
-                if (buf[2] != 0) { /* Frag not supported */ }
+                if (buf[2] != 0) { /* Frag not supported */ } 
                 else {
                     int offset = 0;
                     uint32_t src_ip = 0;
@@ -244,8 +244,8 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
                 uint8_t* pIP = (uint8_t*)&target_ip;
                 sbuf.push_back(pIP[0]); sbuf.push_back(pIP[1]); sbuf.push_back(pIP[2]); sbuf.push_back(pIP[3]);
                 
-                uint16_t dport = pkt.quad.dport;
-                uint8_t* pPort = (uint8_t*)&dport;
+                uint16_t dport_val = pkt.quad.dport;
+                uint8_t* pPort = (uint8_t*)&dport_val;
                 sbuf.push_back(pPort[0]); sbuf.push_back(pPort[1]);
                 
                 sbuf.insert(sbuf.end(), pkt.payload.begin(), pkt.payload.end());

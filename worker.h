@@ -1,4 +1,4 @@
-﻿// ===== include/worker.h =====
+// ===== include/worker.h =====
 #ifndef WORKER_H
 #define WORKER_H
 #include <ws2tcpip.h>

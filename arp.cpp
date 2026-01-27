@@ -1,4 +1,4 @@
-﻿#include "arp.h"
+#include "arp.h"
 #include <thread>
 
 uint32_t GATEWAY_IP = (10 << 24) | (0 << 16) | (0 << 8) | 1;   // 10.0.0.1 (host order)
@@ -22,7 +22,7 @@ void ArpWorker::run() {
 }
 
 bool ArpWorker::send_arp_reply(ArpEvent ev) {
-	DWORD len = ev.len;
+	dword len = ev.len;
 	uint8_t* req = ev.buffer;
 	HANDLE tap = this->tap;
 

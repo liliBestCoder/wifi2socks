@@ -1,4 +1,4 @@
-﻿#include "worker.h"
+#include "worker.h"
 #include <iostream>
 #include "arp.h"
 
@@ -154,4 +154,3 @@ void dispatch(uint8_t* buffer, DWORD bytesRead) {
 		break;
 	}
 }
-
