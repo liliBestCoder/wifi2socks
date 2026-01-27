@@ -2,6 +2,9 @@
 #include <vector>
 #include <string>
 #include <thread>
+#include <cstdio>
+#include <windows.h>
+#include <winioctl.h>
 #include "packet.h"
 #include "queue.h"
 #include "worker.h"
