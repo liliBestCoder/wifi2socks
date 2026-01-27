@@ -22,7 +22,7 @@ void ArpWorker::run() {
 }
 
 bool ArpWorker::send_arp_reply(ArpEvent ev) {
-	dword len = ev.len;
+	DWORD len = ev.len;
 	uint8_t* req = ev.buffer;
 	HANDLE tap = this->tap;
 
