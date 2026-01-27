@@ -53,6 +53,9 @@ static void udp_relay_to_tap(HANDLE tap, Quad q, SOCKET udpSock) {
         uint8_t* payload = buf + offset;
         int payload_len = r - offset;
 
+        // Log receive
+        // printf("[UCB] Decapsulate UDP <- SOCKS (Payload: %d)\n", payload_len);
+
         uint8_t frame[2048];
         if (14 + 20 + 8 + payload_len > 2048) continue;
 
@@ -99,6 +102,9 @@ void process_udp_packet(UCB& ucb, const Packet& pkt, HANDLE tap) {
 
         std::thread(udp_relay_to_tap, tap, ucb.quad, udp).detach();
     }
+
+    // Log Send
+    // printf("[UCB] Encapsulate UDP -> SOCKS %s:%d (Payload: %zu)\n", SOCKS_SERVER_IP, SOCKS_SERVER_PORT, pkt.payload.size());
 
     std::vector<uint8_t> buf;
     buf.push_back(0x00); buf.push_back(0x00); 

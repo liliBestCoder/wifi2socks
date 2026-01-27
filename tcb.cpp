@@ -58,8 +58,9 @@ static void tcb_backend_loop(TCB* tcb) {
     addr.sin_addr.s_addr = inet_addr(SOCKS_SERVER_IP);
     addr.sin_port = htons(SOCKS_SERVER_PORT);
 
+    printf("[TCB] Connecting to SOCKS5 %s:%d...\n", SOCKS_SERVER_IP, SOCKS_SERVER_PORT);
     if (connect(s, (sockaddr*)&addr, sizeof(addr)) != 0) {
-        printf("SOCKS5 connect failed\n");
+        printf("[TCB] SOCKS5 connect failed: %d\n", WSAGetLastError());
         closesocket(s);
         return;
     }
@@ -70,11 +71,13 @@ static void tcb_backend_loop(TCB* tcb) {
     uint8_t buf[2048];
     int r = recv(s, (char*)buf, 2, 0);
     if (r != 2 || buf[1] != 0x00) {
+        printf("[TCB] SOCKS5 handshake failed\n");
         closesocket(s);
         return;
     }
 
     // SOCKS5 Connect
+    printf("[TCB] SOCKS5 Handshake OK. Requesting connection...\n");
     uint8_t req[10];
     req[0] = 0x05; req[1] = 0x01; req[2] = 0x00; req[3] = 0x01; // IPv4
     *(uint32_t*)(req + 4) = tcb->quad.daddr;
@@ -83,10 +86,12 @@ static void tcb_backend_loop(TCB* tcb) {
     
     r = recv(s, (char*)buf, 10, 0);
     if (r < 10 || buf[1] != 0x00) {
+        printf("[TCB] SOCKS5 connect request failed or rejected.\n");
         closesocket(s);
         return;
     }
 
+    printf("[TCB] SOCKS5 Tunnel ESTABLISHED.\n");
     tcb->client_sock = s;
 
     // Relay Loop
@@ -116,6 +121,7 @@ static void tcb_backend_loop(TCB* tcb) {
                     chunk.push_back(tcb->data_to_socks.front());
                     tcb->data_to_socks.pop_front();
                 }
+                // printf("[TCB] Sending %zu bytes to SOCKS\n", chunk.size());
                 send(s, (char*)chunk.data(), (int)chunk.size(), 0);
             }
         }
@@ -145,17 +151,20 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
 
     // Simple State Machine
     if (flags & 0x02) { // SYN
-        if (tcb.state == TcpState::CLOSED) {
+        if (tcb.state == TcpState::CLOSED || tcb.state == TcpState::SYN_RCVD) {
+            printf("[TCB] Recv SYN. Sending SYN-ACK.\n");
             tcb.remote_seq = seq + 1;
-            tcb.state = TcpState::SYN_RCVD;
-            send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x12, NULL, 0); // SYN|ACK
-            tcb.local_seq++;
             
-            // Start backend
-            tcb.backend_th = std::thread(tcb_backend_loop, &tcb);
+            if (tcb.state == TcpState::CLOSED) {
+                tcb.state = TcpState::SYN_RCVD;
+                tcb.backend_th = std::thread(tcb_backend_loop, &tcb);
+            }
+            send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x12, NULL, 0); // SYN|ACK
+            if (tcb.state == TcpState::CLOSED) tcb.local_seq++; 
         }
     }
     else if (flags & 0x01) { // FIN
+        printf("[TCB] Recv FIN.\n");
         tcb.remote_seq = seq + 1;
         tcb.state = TcpState::CLOSE_WAIT;
         send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x10, NULL, 0); // ACK
@@ -163,13 +172,14 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
     }
     else if (flags & 0x10) { // ACK
         if (tcb.state == TcpState::SYN_RCVD) {
-            if (ack == tcb.local_seq) {
-                tcb.state = TcpState::ESTABLISHED;
-            }
+            // Allow loose ACK check for now to be robust
+            printf("[TCB] Recv ACK. State ESTABLISHED.\n");
+            tcb.state = TcpState::ESTABLISHED;
         }
         
         if (tcb.state == TcpState::ESTABLISHED) {
             if (pay_len > 0) {
+                // printf("[TCB] Recv Data %d bytes. Spooling to SOCKS.\n", pay_len);
                 tcb.remote_seq = seq + pay_len;
                 // Buffer data for SOCKS
                 {
@@ -183,6 +193,7 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
         }
     }
     else if (flags & 0x04) { // RST
+         printf("[TCB] Recv RST.\n");
          tcb.state = TcpState::CLOSED;
          tcb.stop_thread = true;
     }
@@ -197,6 +208,7 @@ void flush_output(TCB& tcb, HANDLE tap) {
                 buf.push_back(tcb.data_to_tap.front());
                 tcb.data_to_tap.pop_front();
             }
+            // printf("[TCB] Flushing %zu bytes to TAP\n", buf.size());
             send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x18, buf.data(), (int)buf.size()); // PSH|ACK
             tcb.local_seq += (uint32_t)buf.size();
         }
