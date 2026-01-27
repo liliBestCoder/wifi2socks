@@ -144,7 +144,7 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
     TcpHdr* tcp = (TcpHdr*)pkt.payload.data();
     uint32_t seq = ntohl(tcp->seq);
     uint32_t ack = ntohl(tcp->ack_seq);
-    int head_len = tcp->data_offset * 4;
+    int head_len = (tcp->data_offset >> 4) * 4;
     int pay_len = pkt.pay_len - head_len;
     if (pay_len < 0) pay_len = 0;
     uint8_t flags = tcp->flags;
