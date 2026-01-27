@@ -25,9 +25,9 @@ enum class TcpState {
 
 struct TCB {
     Quad quad;
-    uint32_t local_seq; // My sequence number
-    uint32_t local_ack; // What I expect from remote
-    uint32_t remote_seq; // Received from remote
+    uint32_t local_seq; // Next sequence number to send (SEQ)
+    uint32_t local_ack; // Next sequence number expected (ACK)
+    uint32_t remote_seq; // Highest sequence number received
     
     TcpState state;
     
@@ -40,6 +40,11 @@ struct TCB {
     std::mutex mtx;
     std::deque<uint8_t> data_to_tap;   // Data received from SOCKS, waiting to be sent to TAP (TCP Payload)
     std::deque<uint8_t> data_to_socks; // Data received from TAP, waiting to be sent to SOCKS
+
+    // Retransmission Support
+    std::deque<uint8_t> unacked_data; // Data sent but not yet acknowledged
+    uint32_t unacked_seq_start;       // SEQ of the first byte in unacked_data
+    uint64_t last_send_time;          // Timestamp of last send (in milliseconds)
 
     // Retransmission & Window
     uint16_t window;

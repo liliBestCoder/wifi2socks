@@ -6,9 +6,22 @@
 #include <iostream>
 #include <chrono>
 
+// Helper: Get current time in ms
+static uint64_t get_now_ms() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
 // Helper: Construct and send a TCP packet
-static void send_tcp(HANDLE tap, const Quad& q, uint32_t seq, uint32_t ack, uint8_t flags, const void* data, int len) {
+// mss: if > 0, adds MSS option
+static void send_tcp(HANDLE tap, const Quad& q, uint32_t seq, uint32_t ack, uint8_t flags, const void* data, int len, uint16_t mss = 0) {
     uint8_t frame[1514];
+    
+    // Calculate Option Length
+    int opt_len = (mss > 0) ? 4 : 0;
+    int tcp_header_len = 20 + opt_len;
+    // Pad header to 4-byte boundary if needed (MSS option is 4 bytes, so usually aligned) 
+    
     // Ethernet
     memcpy(frame, TAP_MAC, 6);
     memcpy(frame + 6, TAP_MAC, 6); 
@@ -19,31 +32,42 @@ static void send_tcp(HANDLE tap, const Quad& q, uint32_t seq, uint32_t ack, uint
     uint8_t* tcp = ip + 20;
     memset(ip, 0, 20);
     ip[0] = 0x45;
-    uint16_t tot_len = 20 + 20 + len;
+    uint16_t tot_len = 20 + tcp_header_len + len;
     *(uint16_t*)(ip + 2) = htons(tot_len);
     ip[8] = 64; // TTL
     ip[9] = 6; // TCP
-    // Quad is Network Order. IP Header expects Network Order. Copy directly.
-    *(uint32_t*)(ip + 12) = q.daddr; // Src IP (Server)
-    *(uint32_t*)(ip + 16) = q.saddr; // Dst IP (Client)
+    *(uint32_t*)(ip + 12) = q.daddr; 
+    *(uint32_t*)(ip + 16) = q.saddr; 
     *(uint16_t*)(ip + 10) = checksum(ip, 20);
 
     // TCP
-    memset(tcp, 0, 20);
-    // Quad is Network Order. TCP Header expects Network Order. Copy directly.
-    *(uint16_t*)(tcp + 0) = q.dport; // Src Port
-    *(uint16_t*)(tcp + 2) = q.sport; // Dst Port
-    *(uint32_t*)(tcp + 4) = htonl(seq); // seq/ack are Host Order in TCB, need htonl
+    memset(tcp, 0, 20 + opt_len); // Clear header + options
+    *(uint16_t*)(tcp + 0) = q.dport; 
+    *(uint16_t*)(tcp + 2) = q.sport; 
+    *(uint32_t*)(tcp + 4) = htonl(seq); 
     *(uint32_t*)(tcp + 8) = htonl(ack);
-    tcp[12] = 0x50; // Header len 20 bytes
-    tcp[13] = flags;
-    *(uint16_t*)(tcp + 14) = htons(64240); // Window
+    
+    // Data Offset: header len / 4. 
+    // If len is 20, 20/4 = 5 (0x50). If 24, 24/4 = 6 (0x60).
+    uint8_t offset_val = (tcp_header_len / 4) << 4;
+    tcp[12] = offset_val; 
+    
+tcp[13] = flags;
+    *(uint16_t*)(tcp + 14) = htons(64240); 
 
-    if (len > 0) {
-        memcpy(tcp + 20, data, len);
+    // TCP Options
+    if (mss > 0) {
+        tcp[20] = 0x02; // Kind: MSS
+        tcp[21] = 0x04; // Len: 4
+        *(uint16_t*)(tcp + 22) = htons(mss);
     }
 
-    *(uint16_t*)(tcp + 16) = tcp_cksum(q.daddr, q.saddr, tcp, 20 + len);
+    // Payload
+    if (len > 0) {
+        memcpy(tcp + tcp_header_len, data, len);
+    }
+
+    *(uint16_t*)(tcp + 16) = tcp_cksum(q.daddr, q.saddr, tcp, tcp_header_len + len);
 
     platform_send_frame(tap, frame, 14 + tot_len);
 }
@@ -81,7 +105,7 @@ static void tcb_backend_loop(TCB* tcb) {
     uint8_t req[10];
     req[0] = 0x05; req[1] = 0x01; req[2] = 0x00; req[3] = 0x01; // IPv4
     *(uint32_t*)(req + 4) = tcb->quad.daddr;
-    *(uint16_t*)(req + 8) = tcb->quad.dport; // Quad is Net Order, Packet expects Net Order
+    *(uint16_t*)(req + 8) = tcb->quad.dport; 
     send(s, (char*)req, 10, 0);
     
     r = recv(s, (char*)buf, 10, 0);
@@ -111,17 +135,15 @@ static void tcb_backend_loop(TCB* tcb) {
             for (int i = 0; i < r; ++i) tcb->data_to_tap.push_back(buf[i]);
         }
 
-        // Send pending data
+        // Send pending data to SOCKS
         {
             std::lock_guard<std::mutex> lk(tcb->mtx);
             while (!tcb->data_to_socks.empty()) {
-                // Send in chunks
                 std::vector<uint8_t> chunk;
                 while (!tcb->data_to_socks.empty() && chunk.size() < 1400) {
                     chunk.push_back(tcb->data_to_socks.front());
                     tcb->data_to_socks.pop_front();
                 }
-                // printf("[TCB] Sending %zu bytes to SOCKS\n", chunk.size());
                 send(s, (char*)chunk.data(), (int)chunk.size(), 0);
             }
         }
@@ -131,7 +153,7 @@ static void tcb_backend_loop(TCB* tcb) {
     tcb->state = TcpState::CLOSED; 
 }
 
-TCB::TCB(const Quad& q) : quad(q), state(TcpState::CLOSED), local_seq(0), local_ack(0), remote_seq(0), client_sock(INVALID_SOCKET), stop_thread(false) {
+TCB::TCB(const Quad& q) : quad(q), state(TcpState::CLOSED), local_seq(0), local_ack(0), remote_seq(0), client_sock(INVALID_SOCKET), stop_thread(false), last_send_time(0) {
     local_seq = 0x12345678; 
 }
 
@@ -145,14 +167,14 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
     uint32_t seq = ntohl(tcp->seq);
     uint32_t ack = ntohl(tcp->ack_seq);
     
-    // Correctly calculate head length: Data Offset is high 4 bits
+    // Correctly calculate head length
     int head_len = (tcp->data_offset >> 4) * 4;
     int pay_len = pkt.pay_len - head_len;
     if (pay_len < 0) pay_len = 0;
     
     uint8_t flags = tcp->flags;
 
-    // RST: Reset connection
+    // RST
     if (flags & 0x04) { 
          printf("[TCB] Recv RST. Closing TCB.\n");
          tcb.state = TcpState::CLOSED;
@@ -160,7 +182,7 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
          return;
     }
 
-    // SYN: Establish connection
+    // SYN
     if (flags & 0x02) { 
         if (tcb.state == TcpState::CLOSED || tcb.state == TcpState::SYN_RCVD) {
             printf("[TCB] Recv SYN. Sending SYN-ACK. (seq=%u)\n", seq);
@@ -171,22 +193,16 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
                 tcb.backend_th = std::thread(tcb_backend_loop, &tcb);
             }
             
-            // Retransmission Logic: Use original local_seq if retransmitting
-            // But we don't store original ISN separately. 
-            // Simplified: Just resend with current local_seq.
-            // Note: local_seq was incremented after first SYN. So we must decrement it to send SYN-ACK?
-            // No, local_seq tracks NEXT byte to send. SYN-ACK uses ISN. 
-            // So seq number in SYN-ACK should be (local_seq - 1).
             uint32_t syn_ack_seq = (tcb.state == TcpState::SYN_RCVD) ? tcb.local_seq - 1 : tcb.local_seq;
-            
-            send_tcp(tap, tcb.quad, syn_ack_seq, tcb.remote_seq, 0x12, NULL, 0); // SYN|ACK
+            // Send MSS option 1360 to avoid fragmentation
+            send_tcp(tap, tcb.quad, syn_ack_seq, tcb.remote_seq, 0x12, NULL, 0, 1360); 
             
             if (tcb.state == TcpState::CLOSED) tcb.local_seq++; 
         }
         return; 
     }
 
-    // ACK: Process Acknowledgement and Data
+    // ACK Processing
     if (flags & 0x10) { 
         if (tcb.state == TcpState::SYN_RCVD) {
             if (ack == tcb.local_seq) {
@@ -196,45 +212,89 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
         }
         
         if (tcb.state == TcpState::ESTABLISHED) {
+            // Check if this ACK confirms any of our sent data
+            // unacked_data stores the LAST N bytes sent.
+            // So seq of first byte in unacked_data is: local_seq - unacked_data.size()
+            
+            std::lock_guard<std::mutex> lk(tcb.mtx);
+            uint32_t unacked_start_seq = tcb.local_seq - (uint32_t)tcb.unacked_data.size();
+            
+            // Ack is what client expects NEXT. So acknowledged bytes = ack - unacked_start_seq.
+            if (!tcb.unacked_data.empty()) {
+                int acked_bytes = ack - unacked_start_seq;
+                if (acked_bytes > 0 && acked_bytes <= (int)tcb.unacked_data.size()) {
+                    // Remove confirmed bytes
+                    // printf("[TCB] Client ACKed %d bytes.\n", acked_bytes);
+                    for(int i=0; i<acked_bytes; ++i) tcb.unacked_data.pop_front();
+                }
+            }
+
+            // Receive New Data
             if (pay_len > 0) {
                 printf("[TCB] Recv Data %d bytes. Spooling to SOCKS.\n", pay_len);
                 tcb.remote_seq = seq + pay_len;
+                const uint8_t* data_ptr = pkt.payload.data() + head_len;
+                for(int i=0; i<pay_len; ++i) tcb.data_to_socks.push_back(data_ptr[i]);
                 
-                // Buffer data for SOCKS
-                {
-                    std::lock_guard<std::mutex> lk(tcb.mtx);
-                    const uint8_t* data_ptr = pkt.payload.data() + head_len;
-                    for(int i=0; i<pay_len; ++i) tcb.data_to_socks.push_back(data_ptr[i]);
-                }
-                // Send ACK immediately to keep flow going
+                // Send ACK immediately
                 send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x10, NULL, 0);
             }
         }
     }
 
-    // FIN: Close connection
+    // FIN
     if (flags & 0x01) { 
         printf("[TCB] Recv FIN. (seq=%u)\n", seq);
-        // Consume FIN sequence
         tcb.remote_seq = seq + pay_len + 1; 
         tcb.state = TcpState::CLOSE_WAIT;
-        send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x10, NULL, 0); // ACK the FIN
+        send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x10, NULL, 0); 
         tcb.stop_thread = true;
     }
 }
 
 void flush_output(TCB& tcb, HANDLE tap) {
     if (tcb.state == TcpState::ESTABLISHED) {
+        uint64_t now = get_now_ms();
         std::lock_guard<std::mutex> lk(tcb.mtx);
+
+        // 1. Send New Data
         if (!tcb.data_to_tap.empty()) {
             std::vector<uint8_t> buf;
-            while (!tcb.data_to_tap.empty() && buf.size() < 1400) {
+            while (!tcb.data_to_tap.empty() && buf.size() < 1360) {
                 buf.push_back(tcb.data_to_tap.front());
                 tcb.data_to_tap.pop_front();
             }
-            // printf("[TCB] Flushing %zu bytes to TAP\n", buf.size());
+            
+            // Store for retransmission
+            for(uint8_t b : buf) tcb.unacked_data.push_back(b);
+            
+            // Send
+            printf("[TCB] Sending %zu bytes to TAP. Seq=%u\n", buf.size(), tcb.local_seq);
             send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x18, buf.data(), (int)buf.size()); // PSH|ACK
+            
             tcb.local_seq += (uint32_t)buf.size();
+            tcb.last_send_time = now;
+        }
+        
+        // 2. Retransmission Check
+        // If we have unacked data, and timeout passed
+        else if (!tcb.unacked_data.empty()) {
+            if (now - tcb.last_send_time > 300) { // 300ms RTO
+                printf("[TCB] *** RTO! Retransmitting %zu bytes. ***\n", tcb.unacked_data.size());
+                
+                // Calculate SEQ for retransmission
+                uint32_t seq = tcb.local_seq - (uint32_t)tcb.unacked_data.size();
+                
+                // Convert deque to vector
+                std::vector<uint8_t> buf(tcb.unacked_data.begin(), tcb.unacked_data.end());
+                
+                // Limit retransmission size (MTU safe)
+                if (buf.size() > 1360) buf.resize(1360);
+
+                send_tcp(tap, tcb.quad, seq, tcb.remote_seq, 0x18, buf.data(), (int)buf.size());
+                
+                tcb.last_send_time = now; // Reset timer
+            }
         }
     }
 }
