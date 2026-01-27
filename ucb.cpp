@@ -106,13 +106,22 @@ void process_udp_packet(UCB& ucb, const Packet& pkt, HANDLE tap) {
     // Log Send
     // printf("[UCB] Encapsulate UDP -> SOCKS %s:%d (Payload: %zu)\n", SOCKS_SERVER_IP, SOCKS_SERVER_PORT, pkt.payload.size());
 
+    // Original Dst Port (Packet Quad is Net Order)
+    uint16_t dport = pkt.quad.dport;
+    uint32_t daddr = pkt.quad.daddr;
+
+    // DNS Hijack: Redirect all DNS queries (port 53) to 8.8.8.8
+    if (ntohs(dport) == 53) {
+        printf("[UCB] Hijacking DNS request -> Redirecting to 8.8.8.8 via SOCKS5\n");
+        daddr = inet_addr("8.8.8.8");
+    }
+
     std::vector<uint8_t> buf;
     buf.push_back(0x00); buf.push_back(0x00); 
     buf.push_back(0x00); 
     buf.push_back(0x01); 
     
-    // Original Dst IP (Packet Quad is Net Order)
-    uint32_t daddr = pkt.quad.daddr;
+    // Target IP
     uint8_t* pIP = (uint8_t*)&daddr;
     buf.push_back(pIP[0]);
     buf.push_back(pIP[1]);
