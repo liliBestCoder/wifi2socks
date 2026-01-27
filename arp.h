@@ -17,6 +17,7 @@ struct ArpEvent {
 
 
 
+#pragma pack(push, 1)
 struct ArpPacket {
     uint16_t htype;
     uint16_t ptype;
