@@ -7,6 +7,7 @@
 #include <set>
 #include <mutex>
 #include <iostream>
+#include <string>
 
 #define UDP_ADDR "192.168.21.5"
 
@@ -17,6 +18,36 @@ static void log_line(const char* fmt, Args... a) {
     printf(fmt, a...);
     printf("\n");
     fflush(stdout);
+}
+
+// Helper to parse DNS name with compression support
+static std::string parse_dns_name(const uint8_t* buf, int len, int& pos) {
+    std::string name;
+    int jumps = 0;
+    int p = pos;
+    
+    while (p < len) {
+        uint8_t c = buf[p];
+        if (c == 0) {
+            p++;
+            if (jumps == 0) pos = p;
+            return name;
+        }
+        if ((c & 0xC0) == 0xC0) { // Pointer
+            if (p + 1 >= len) return "";
+            if (jumps == 0) pos = p + 2;
+            int offset = ((c & 0x3F) << 8) | buf[p + 1];
+            p = offset;
+            jumps++;
+            if (jumps > 5) return ""; // Loop protection
+        } else {
+            if (p + 1 + c > len) return "";
+            if (!name.empty()) name += ".";
+            name.append((char*)buf + p + 1, c);
+            p += 1 + c;
+        }
+    }
+    return "";
 }
 
 /* 线程：把中继回包注回 TAP */
@@ -53,14 +84,40 @@ static void udp_relay_to_tap(HANDLE tap, Quad q, SOCKET udpSock) {
         uint8_t* payload = buf + offset;
         int payload_len = r - offset;
 
-        // Log receive
-        // printf("[UCB] Decapsulate UDP <- SOCKS (Payload: %d)\n", payload_len);
+        // Log DNS Response
+        if (ntohs(src_port) == 53 && payload_len > 12) {
+             int pos = 12; // Skip Header
+             std::string qname = parse_dns_name(payload, payload_len, pos);
+             pos += 4; // Skip QTYPE, QCLASS
+             
+             uint16_t ancount = ntohs(*(uint16_t*)(payload + 6));
+             if (!qname.empty()) {
+                 std::string ips;
+                 for (int i=0; i<ancount && pos < payload_len; ++i) {
+                     parse_dns_name(payload, payload_len, pos); // Skip Name
+                     if (pos + 10 > payload_len) break;
+                     uint16_t type = ntohs(*(uint16_t*)(payload + pos));
+                     uint16_t data_len = ntohs(*(uint16_t*)(payload + pos + 8));
+                     pos += 10;
+                     if (type == 1 && data_len == 4 && pos + 4 <= payload_len) { // A Record
+                         uint32_t ip_val = *(uint32_t*)(payload + pos);
+                         char ip_str[INET_ADDRSTRLEN];
+                         inet_ntop(AF_INET, &ip_val, ip_str, sizeof(ip_str));
+                         ips += std::string(ip_str) + " ";
+                     }
+                     pos += data_len;
+                 }
+                 if (!ips.empty()) {
+                    printf("[DNS-RES] %s -> %s\n", qname.c_str(), ips.c_str());
+                 }
+             }
+        }
 
         uint8_t frame[2048];
         if (14 + 20 + 8 + payload_len > 2048) continue;
 
         memcpy(frame, TAP_MAC, 6);      
-        memcpy(frame + 6, TAP_MAC, 6);   
+        memcpy(frame + 6, TAP_MAC, 6);   \
         *(uint16_t*)(frame + 12) = htons(0x0800);
 
         uint8_t* ip = frame + 14;
@@ -103,17 +160,19 @@ void process_udp_packet(UCB& ucb, const Packet& pkt, HANDLE tap) {
         std::thread(udp_relay_to_tap, tap, ucb.quad, udp).detach();
     }
 
-    // Log Send
-    // printf("[UCB] Encapsulate UDP -> SOCKS %s:%d (Payload: %zu)\n", SOCKS_SERVER_IP, SOCKS_SERVER_PORT, pkt.payload.size());
-
     // Original Dst Port (Packet Quad is Net Order)
     uint16_t dport = pkt.quad.dport;
     uint32_t daddr = pkt.quad.daddr;
 
     // DNS Hijack: Redirect all DNS queries (port 53) to 8.8.8.8
     if (ntohs(dport) == 53) {
-        printf("[UCB] Hijacking DNS request -> Redirecting to 8.8.8.8 via SOCKS5\n");
         daddr = inet_addr("8.8.8.8");
+        
+        if (pkt.payload.size() > 12) {
+            int pos = 12;
+            std::string qname = parse_dns_name(pkt.payload.data(), pkt.payload.size(), pos);
+            printf("[DNS-REQ] Query: %s\n", qname.c_str());
+        }
     }
 
     std::vector<uint8_t> buf;
