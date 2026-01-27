@@ -118,11 +118,10 @@ void dispatch(uint8_t* buffer, DWORD bytesRead) {
 
 		if (ip->protocol == 6) { // TCP
 			TcpHdr* tcp = (TcpHdr*)payload;
-			int tcp_payload_len = payload_len - tcp->data_offset * 4;
-			if (tcp_payload_len < 0) tcp_payload_len = 0;
-			std::vector<uint8_t> tcp_vec(payload + tcp->data_offset * 4, payload + tcp->data_offset * 4 + tcp_payload_len);
+			// FIXED: Pass the full TCP segment (Header + Data) so process_tcp_packet can read flags/seq
+			std::vector<uint8_t> tcp_vec(payload, payload + payload_len);
 
-			dispatch_ip_packet(ip->src, ip->dst, tcp->src_port, tcp->dst_port, IPPROTO_TCP, tcp_vec, tcp_payload_len, queues);
+			dispatch_ip_packet(ip->src, ip->dst, tcp->src_port, tcp->dst_port, IPPROTO_TCP, tcp_vec, payload_len, queues);
 		}
 		else if (ip->protocol == 17) { // UDP
 			UdpHdr* udp = (UdpHdr*)payload;
