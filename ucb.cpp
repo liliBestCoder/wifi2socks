@@ -183,11 +183,29 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
                         uint8_t* payload = buf + offset;
                         int pay_len = r - offset;
                         
-                        // Log DNS
+                        // Log DNS Response
                         if (ntohs(src_port) == 53 && pay_len > 12) {
                             int pos = 12; 
                             std::string qname = parse_dns_name(payload, pay_len, pos);
-                            printf("[DNS-RES] %s (via UDP Relay)\n", qname.c_str());
+                            pos += 4; // Skip QTYPE, QCLASS
+                            
+                            uint16_t ancount = ntohs(*(uint16_t*)(payload + 6));
+                            std::string ips;
+                            
+                            for (int i=0; i<ancount && pos < pay_len; ++i) {
+                                parse_dns_name(payload, pay_len, pos); // Skip Answer Name
+                                if (pos + 10 > pay_len) break;
+                                uint16_t type = ntohs(*(uint16_t*)(payload + pos));
+                                uint16_t data_len = ntohs(*(uint16_t*)(payload + pos + 8));
+                                pos += 10;
+                                if (type == 1 && data_len == 4 && pos + 4 <= pay_len) { // A Record
+                                    char ip_str[INET_ADDRSTRLEN];
+                                    inet_ntop(AF_INET, payload + pos, ip_str, sizeof(ip_str));
+                                    ips += std::string(ip_str) + " ";
+                                }
+                                pos += data_len;
+                            }
+                            printf("[DNS-RES] %s -> %s(via UDP Relay)\n", qname.c_str(), ips.empty() ? "No A Record" : ips.c_str());
                         }
 
                         // Send to TAP
@@ -238,7 +256,11 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
                 uint32_t target_ip = pkt.quad.daddr;
                 if (ntohs(pkt.quad.dport) == 53) {
                     target_ip = inet_addr("8.8.8.8");
-                    printf("[DNS-REQ] Hijacking to 8.8.8.8\n");
+                    if (pkt.payload.size() > 12) {
+                        int pos = 12;
+                        std::string qname = parse_dns_name(pkt.payload.data(), (int)pkt.payload.size(), pos);
+                        printf("[DNS-REQ] Query: %s (Hijacking to 8.8.8.8)\n", qname.c_str());
+                    }
                 }
                 
                 uint8_t* pIP = (uint8_t*)&target_ip;

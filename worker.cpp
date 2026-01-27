@@ -18,12 +18,10 @@ void Worker::worker_loop() {
 			process_event(ev);
 		}
 		
-		// Poll for outgoing data (TCP flush disabled for debugging)
-		/*
+		// Poll for outgoing data
 		for (auto& kv : tcb_map) {
 			flush_output(*kv.second, tap);
 		}
-		*/
 
 		std::this_thread::sleep_for(std::chrono::microseconds(50)); 
 	}
@@ -32,7 +30,6 @@ void Worker::worker_loop() {
 void Worker::process_event(const Event& ev) {
 	if (ev.type == EventType::PacketIn) {
 		if (ev.proto == IPPROTO_TCP) {
-			/*
 			auto it = tcb_map.find(ev.pkt.quad);
 			if (it == tcb_map.end()) {
 				tcb_map[ev.pkt.quad] = std::make_unique<TCB>(ev.pkt.quad);
@@ -40,7 +37,6 @@ void Worker::process_event(const Event& ev) {
 			TCB* t = tcb_map[ev.pkt.quad].get();
 			process_tcp_packet(*t, ev.pkt, this->tap);
 			flush_output(*t, this->tap);
-			*/
 		}
 		else if (ev.proto == IPPROTO_UDP) {
 			auto it = ucb_map.find(ev.pkt.quad);
@@ -121,13 +117,11 @@ void dispatch(uint8_t* buffer, DWORD bytesRead) {
 		std::vector<uint8_t> vec(payload, payload + payload_len);
 
 		if (ip->protocol == 6) { // TCP
-			/*
 			TcpHdr* tcp = (TcpHdr*)payload;
 			// FIXED: Pass the full TCP segment (Header + Data) so process_tcp_packet can read flags/seq
 			std::vector<uint8_t> tcp_vec(payload, payload + payload_len);
 
 			dispatch_ip_packet(ip->src, ip->dst, tcp->src_port, tcp->dst_port, IPPROTO_TCP, tcp_vec, payload_len, queues);
-			*/
 		}
 		else if (ip->protocol == 17) { // UDP
 			UdpHdr* udp = (UdpHdr*)payload;
