@@ -144,58 +144,82 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
     TcpHdr* tcp = (TcpHdr*)pkt.payload.data();
     uint32_t seq = ntohl(tcp->seq);
     uint32_t ack = ntohl(tcp->ack_seq);
+    
+    // Correctly calculate head length: Data Offset is high 4 bits
     int head_len = (tcp->data_offset >> 4) * 4;
     int pay_len = pkt.pay_len - head_len;
     if (pay_len < 0) pay_len = 0;
+    
     uint8_t flags = tcp->flags;
 
-    // Simple State Machine
-    if (flags & 0x02) { // SYN
+    // RST: Reset connection
+    if (flags & 0x04) { 
+         printf("[TCB] Recv RST. Closing TCB.\n");
+         tcb.state = TcpState::CLOSED;
+         tcb.stop_thread = true;
+         return;
+    }
+
+    // SYN: Establish connection
+    if (flags & 0x02) { 
         if (tcb.state == TcpState::CLOSED || tcb.state == TcpState::SYN_RCVD) {
-            printf("[TCB] Recv SYN. Sending SYN-ACK.\n");
+            printf("[TCB] Recv SYN. Sending SYN-ACK. (seq=%u)\n", seq);
             tcb.remote_seq = seq + 1;
             
             if (tcb.state == TcpState::CLOSED) {
                 tcb.state = TcpState::SYN_RCVD;
                 tcb.backend_th = std::thread(tcb_backend_loop, &tcb);
             }
-            send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x12, NULL, 0); // SYN|ACK
+            
+            // Retransmission Logic: Use original local_seq if retransmitting
+            // But we don't store original ISN separately. 
+            // Simplified: Just resend with current local_seq.
+            // Note: local_seq was incremented after first SYN. So we must decrement it to send SYN-ACK?
+            // No, local_seq tracks NEXT byte to send. SYN-ACK uses ISN. 
+            // So seq number in SYN-ACK should be (local_seq - 1).
+            uint32_t syn_ack_seq = (tcb.state == TcpState::SYN_RCVD) ? tcb.local_seq - 1 : tcb.local_seq;
+            
+            send_tcp(tap, tcb.quad, syn_ack_seq, tcb.remote_seq, 0x12, NULL, 0); // SYN|ACK
+            
             if (tcb.state == TcpState::CLOSED) tcb.local_seq++; 
         }
+        return; 
     }
-    else if (flags & 0x01) { // FIN
-        printf("[TCB] Recv FIN.\n");
-        tcb.remote_seq = seq + 1;
-        tcb.state = TcpState::CLOSE_WAIT;
-        send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x10, NULL, 0); // ACK
-        tcb.stop_thread = true;
-    }
-    else if (flags & 0x10) { // ACK
+
+    // ACK: Process Acknowledgement and Data
+    if (flags & 0x10) { 
         if (tcb.state == TcpState::SYN_RCVD) {
-            // Allow loose ACK check for now to be robust
-            printf("[TCB] Recv ACK. State ESTABLISHED.\n");
-            tcb.state = TcpState::ESTABLISHED;
+            if (ack == tcb.local_seq) {
+                printf("[TCB] Recv ACK (Handshake). State ESTABLISHED.\n");
+                tcb.state = TcpState::ESTABLISHED;
+            }
         }
         
         if (tcb.state == TcpState::ESTABLISHED) {
             if (pay_len > 0) {
-                // printf("[TCB] Recv Data %d bytes. Spooling to SOCKS.\n", pay_len);
+                printf("[TCB] Recv Data %d bytes. Spooling to SOCKS.\n", pay_len);
                 tcb.remote_seq = seq + pay_len;
+                
                 // Buffer data for SOCKS
                 {
                     std::lock_guard<std::mutex> lk(tcb.mtx);
                     const uint8_t* data_ptr = pkt.payload.data() + head_len;
                     for(int i=0; i<pay_len; ++i) tcb.data_to_socks.push_back(data_ptr[i]);
                 }
-                // Send ACK immediately
+                // Send ACK immediately to keep flow going
                 send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x10, NULL, 0);
             }
         }
     }
-    else if (flags & 0x04) { // RST
-         printf("[TCB] Recv RST.\n");
-         tcb.state = TcpState::CLOSED;
-         tcb.stop_thread = true;
+
+    // FIN: Close connection
+    if (flags & 0x01) { 
+        printf("[TCB] Recv FIN. (seq=%u)\n", seq);
+        // Consume FIN sequence
+        tcb.remote_seq = seq + pay_len + 1; 
+        tcb.state = TcpState::CLOSE_WAIT;
+        send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x10, NULL, 0); // ACK the FIN
+        tcb.stop_thread = true;
     }
 }
 
