@@ -52,7 +52,7 @@ static void send_tcp(HANDLE tap, const Quad& q, uint32_t seq, uint32_t ack, uint
     uint8_t offset_val = (tcp_header_len / 4) << 4;
     tcp[12] = offset_val; 
     
-tcp[13] = flags;
+    tcp[13] = flags;
     *(uint16_t*)(tcp + 14) = htons(64240); 
 
     // TCP Options
@@ -72,17 +72,6 @@ tcp[13] = flags;
     platform_send_frame(tap, frame, 14 + tot_len);
 }
 
-// Helper to read N bytes strictly
-static bool recv_all(SOCKET s, uint8_t* buf, int len) {
-    int total = 0;
-    while (total < len) {
-        int r = recv(s, (char*)buf + total, len - total, 0);
-        if (r <= 0) return false;
-        total += r;
-    }
-    return true;
-}
-
 // Backend Thread: Connects to SOCKS5 and relays data
 static void tcb_backend_loop(TCB* tcb) {
     SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
@@ -100,17 +89,19 @@ static void tcb_backend_loop(TCB* tcb) {
         return;
     }
 
-    // SOCKS5 Handshake (Auth Negotiation)
+    // SOCKS5 Handshake
     uint8_t handshake[] = { 0x05, 0x01, 0x00 };
     send(s, (char*)handshake, 3, 0);
     uint8_t buf[2048];
     
     // Read 2 bytes (VER, METHOD)
-    if (!recv_all(s, buf, 2)) {
-        printf("[TCB] SOCKS5 handshake recv failed\n");
-        closesocket(s);
-        return;
+    int total_read = 0;
+    while(total_read < 2) {
+        int r = recv(s, (char*)buf + total_read, 2 - total_read, 0);
+        if (r <= 0) { closesocket(s); return; }
+        total_read += r;
     }
+
     if (buf[1] != 0x00) {
         printf("[TCB] SOCKS5 auth failed (method=%02x)\n", buf[1]);
         closesocket(s);
@@ -118,19 +109,24 @@ static void tcb_backend_loop(TCB* tcb) {
     }
 
     // SOCKS5 Connect Request
-    printf("[TCB] SOCKS5 Handshake OK. Requesting connection...\n");
+    // Log the target IP we are requesting
+    char target_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &tcb->quad.daddr, target_ip, sizeof(target_ip));
+    printf("[TCB] SOCKS5 Handshake OK. Requesting connection to %s:%d...\n", target_ip, ntohs(tcb->quad.dport));
+
     uint8_t req[10];
     req[0] = 0x05; req[1] = 0x01; req[2] = 0x00; req[3] = 0x01; // IPv4
     *(uint32_t*)(req + 4) = tcb->quad.daddr;
     *(uint16_t*)(req + 8) = tcb->quad.dport; 
     send(s, (char*)req, 10, 0);
     
-    // SOCKS5 Connect Reply Parsing (Robust)
+    // SOCKS5 Connect Reply Parsing
     // 1. Read header (4 bytes): VER, REP, RSV, ATYP
-    if (!recv_all(s, buf, 4)) {
-        printf("[TCB] SOCKS5 reply header recv failed\n");
-        closesocket(s);
-        return;
+    total_read = 0;
+    while(total_read < 4) {
+        int r = recv(s, (char*)buf + total_read, 4 - total_read, 0);
+        if (r <= 0) { closesocket(s); return; }
+        total_read += r;
     }
 
     if (buf[1] != 0x00) {
@@ -148,33 +144,51 @@ static void tcb_backend_loop(TCB* tcb) {
         addr_to_read = 16;
     } else if (atyp == 0x03) { // Domain
         // Read 1 byte length
-        if (!recv_all(s, buf, 1)) {
-            closesocket(s); return;
+        total_read = 0;
+        while(total_read < 1) {
+            int r = recv(s, (char*)buf, 1, 0);
+            if(r<=0) { closesocket(s); return; }
+            total_read += r;
         }
-        addr_to_read = buf[0]; // Domain length
+        addr_to_read = buf[0]; 
     } else {
-        printf("[TCB] Unknown ATYP %02x\n", atyp);
         closesocket(s);
         return;
     }
 
     // Read Address
-    if (addr_to_read > 0) {
-        if (!recv_all(s, buf, addr_to_read)) {
-            closesocket(s); return;
-        }
+    total_read = 0;
+    while(total_read < addr_to_read) {
+        int r = recv(s, (char*)buf + total_read, addr_to_read - total_read, 0);
+        if(r<=0) { closesocket(s); return; }
+        total_read += r;
     }
 
     // Read Port (2 bytes)
-    if (!recv_all(s, buf, 2)) {
-        closesocket(s); return;
+    total_read = 0;
+    while(total_read < 2) {
+        int r = recv(s, (char*)buf + total_read, 2 - total_read, 0);
+        if(r<=0) { closesocket(s); return; }
+        total_read += r;
     }
 
     printf("[TCB] SOCKS5 Tunnel ESTABLISHED. Ready for data.\n");
     tcb->client_sock = s;
 
     // Relay Loop
-    while (!tcb->stop_thread) {
+    while (true) {
+        // Check exit condition BUT continue if we have data to write
+        bool should_stop = tcb->stop_thread;
+        bool has_data_to_send;
+        {
+            std::lock_guard<std::mutex> lk(tcb->mtx);
+            has_data_to_send = !tcb->data_to_socks.empty();
+        }
+
+        if (should_stop && !has_data_to_send) {
+            break;
+        }
+
         fd_set rd_set;
         FD_ZERO(&rd_set);
         FD_SET(s, &rd_set);
@@ -184,13 +198,13 @@ static void tcb_backend_loop(TCB* tcb) {
 
         if (n > 0) {
             int r = recv(s, (char*)buf, sizeof(buf), 0);
-            if (r <= 0) break;
+            if (r <= 0) break; // Remote closed
             
             std::lock_guard<std::mutex> lk(tcb->mtx);
             for (int i = 0; i < r; ++i) tcb->data_to_tap.push_back(buf[i]);
         }
 
-        // Send pending data to SOCKS
+        // Send pending data to SOCKS (Flush even if stopping)
         {
             std::lock_guard<std::mutex> lk(tcb->mtx);
             while (!tcb->data_to_socks.empty()) {
@@ -199,7 +213,6 @@ static void tcb_backend_loop(TCB* tcb) {
                     chunk.push_back(tcb->data_to_socks.front());
                     tcb->data_to_socks.pop_front();
                 }
-                // printf("[TCB] Sending %zu bytes to SOCKS\n", chunk.size());
                 send(s, (char*)chunk.data(), (int)chunk.size(), 0);
             }
         }
@@ -223,14 +236,13 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
     uint32_t seq = ntohl(tcp->seq);
     uint32_t ack = ntohl(tcp->ack_seq);
     
-    // Correctly calculate head length: Data Offset is high 4 bits
     int head_len = (tcp->data_offset >> 4) * 4;
     int pay_len = pkt.pay_len - head_len;
     if (pay_len < 0) pay_len = 0;
     
     uint8_t flags = tcp->flags;
 
-    // RST: Reset connection
+    // RST
     if (flags & 0x04) { 
          printf("[TCB] Recv RST. Closing TCB.\n");
          tcb.state = TcpState::CLOSED;
@@ -238,7 +250,7 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
          return;
     }
 
-    // SYN: Establish connection
+    // SYN
     if (flags & 0x02) { 
         if (tcb.state == TcpState::CLOSED || tcb.state == TcpState::SYN_RCVD) {
             printf("[TCB] Recv SYN. Sending SYN-ACK. (seq=%u)\n", seq);
@@ -249,10 +261,7 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
                 tcb.backend_th = std::thread(tcb_backend_loop, &tcb);
             }
             
-            // Retransmission Logic: Use original local_seq if retransmitting
             uint32_t syn_ack_seq = (tcb.state == TcpState::SYN_RCVD) ? tcb.local_seq - 1 : tcb.local_seq;
-            
-            // Send MSS option 1360 to avoid fragmentation
             send_tcp(tap, tcb.quad, syn_ack_seq, tcb.remote_seq, 0x12, NULL, 0, 1360); 
             
             if (tcb.state == TcpState::CLOSED) tcb.local_seq++; 
@@ -260,7 +269,7 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
         return; 
     }
 
-    // ACK Processing
+    // ACK
     if (flags & 0x10) { 
         if (tcb.state == TcpState::SYN_RCVD) {
             if (ack == tcb.local_seq) {
@@ -270,41 +279,36 @@ void process_tcp_packet(TCB& tcb, const Packet& pkt, HANDLE tap) {
         }
         
         if (tcb.state == TcpState::ESTABLISHED) {
-            // Check if this ACK confirms any of our sent data
-            
+            // ACK Processing
             std::lock_guard<std::mutex> lk(tcb.mtx);
             uint32_t unacked_start_seq = tcb.local_seq - (uint32_t)tcb.unacked_data.size();
             
-            // Ack is what client expects NEXT. So acknowledged bytes = ack - unacked_start_seq.
             if (!tcb.unacked_data.empty()) {
                 int acked_bytes = ack - unacked_start_seq;
                 if (acked_bytes > 0 && acked_bytes <= (int)tcb.unacked_data.size()) {
-                    // Remove confirmed bytes
-                    // printf("[TCB] Client ACKed %d bytes.\n", acked_bytes);
                     for(int i=0; i<acked_bytes; ++i) tcb.unacked_data.pop_front();
                 }
             }
 
-            // Receive New Data
+            // Data Processing
             if (pay_len > 0) {
                 printf("[TCB] Recv Data %d bytes. Spooling to SOCKS.\n", pay_len);
                 tcb.remote_seq = seq + pay_len;
                 const uint8_t* data_ptr = pkt.payload.data() + head_len;
                 for(int i=0; i<pay_len; ++i) tcb.data_to_socks.push_back(data_ptr[i]);
                 
-                // Send ACK immediately
+                // Send ACK
                 send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x10, NULL, 0);
             }
         }
     }
 
-    // FIN: Close connection
+    // FIN
     if (flags & 0x01) { 
         printf("[TCB] Recv FIN. (seq=%u)\n", seq);
-        // Consume FIN sequence
         tcb.remote_seq = seq + pay_len + 1; 
         tcb.state = TcpState::CLOSE_WAIT;
-        send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x10, NULL, 0); // ACK the FIN
+        send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x10, NULL, 0); 
         tcb.stop_thread = true;
     }
 }
@@ -322,10 +326,8 @@ void flush_output(TCB& tcb, HANDLE tap) {
                 tcb.data_to_tap.pop_front();
             }
             
-            // Store for retransmission
             for(uint8_t b : buf) tcb.unacked_data.push_back(b);
             
-            // Send
             printf("[TCB] Sending %zu bytes to TAP. Seq=%u\n", buf.size(), tcb.local_seq);
             send_tcp(tap, tcb.quad, tcb.local_seq, tcb.remote_seq, 0x18, buf.data(), (int)buf.size()); // PSH|ACK
             
@@ -333,24 +335,17 @@ void flush_output(TCB& tcb, HANDLE tap) {
             tcb.last_send_time = now;
         }
         
-        // 2. Retransmission Check
-        // If we have unacked data, and timeout passed
-        else if (!tcb.unacked_data.empty()) {
-            if (now - tcb.last_send_time > 300) { // 300ms RTO
+        // 2. Retransmission Check (Independent check)
+        if (!tcb.unacked_data.empty()) {
+            if (now - tcb.last_send_time > 300) { 
                 printf("[TCB] *** RTO! Retransmitting %zu bytes. ***\n", tcb.unacked_data.size());
                 
-                // Calculate SEQ for retransmission
                 uint32_t seq = tcb.local_seq - (uint32_t)tcb.unacked_data.size();
-                
-                // Convert deque to vector
                 std::vector<uint8_t> buf(tcb.unacked_data.begin(), tcb.unacked_data.end());
-                
-                // Limit retransmission size (MTU safe)
                 if (buf.size() > 1360) buf.resize(1360);
 
                 send_tcp(tap, tcb.quad, seq, tcb.remote_seq, 0x18, buf.data(), (int)buf.size());
-                
-                tcb.last_send_time = now; // Reset timer
+                tcb.last_send_time = now; 
             }
         }
     }
