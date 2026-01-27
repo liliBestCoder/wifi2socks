@@ -129,7 +129,7 @@ void process_udp_packet(UCB& ucb, const Packet& pkt, HANDLE tap) {
     buf.push_back(pIP[3]);
     
     // Original Dst Port (Packet Quad is Net Order)
-    uint16_t dport = pkt.quad.dport;
+    // uint16_t dport = pkt.quad.dport; // Already defined above
     uint8_t* pPort = (uint8_t*)&dport;
     buf.push_back(pPort[0]);
     buf.push_back(pPort[1]);
