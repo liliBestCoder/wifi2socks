@@ -63,41 +63,71 @@ static bool recv_all(SOCKET s, uint8_t* buf, int len) {
 }
 
 static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
+    // 0. Prepare UDP Socket FIRST to get the port
+    SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp == INVALID_SOCKET) return;
+
+    sockaddr_in local {};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_ANY); 
+    local.sin_port = htons(0); // Let OS pick port
+    if (bind(udp, (sockaddr*)&local, sizeof(local)) != 0) {
+        printf("[UCB] UDP Bind failed\n");
+        closesocket(udp);
+        return;
+    }
+
+    // Get the assigned port
+    sockaddr_in my_addr;
+    int my_addr_len = sizeof(my_addr);
+    getsockname(udp, (sockaddr*)&my_addr, &my_addr_len);
+    // Force IP to 127.0.0.1 because we are localhost
+    my_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
     // 1. Establish TCP Control Connection
     SOCKET tcp = socket(AF_INET, SOCK_STREAM, 0);
-    if (tcp == INVALID_SOCKET) return;
+    if (tcp == INVALID_SOCKET) {
+        closesocket(udp);
+        return;
+    }
 
     sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = inet_addr(SOCKS_SERVER_IP);
     addr.sin_port = htons(SOCKS_SERVER_PORT);
 
-    printf("[UCB] Connecting TCP to SOCKS5 %s:%d for UDP ASSOCIATE...\n", SOCKS_SERVER_IP, SOCKS_SERVER_PORT);
+    printf("[UCB] Connecting TCP to SOCKS5 %s:%d for UDP ASSOCIATE (My Port: %d)...\n", 
+        SOCKS_SERVER_IP, SOCKS_SERVER_PORT, ntohs(my_addr.sin_port));
+        
     if (connect(tcp, (sockaddr*)&addr, sizeof(addr)) != 0) {
         printf("[UCB] TCP connect failed: %d\n", WSAGetLastError());
         closesocket(tcp);
+        closesocket(udp);
         return;
     }
 
     // 2. Auth
-    uint8_t buf[4096]; // Increased buffer size
+    uint8_t buf[4096]; 
     uint8_t handshake[] = { 0x05, 0x01, 0x00 };
     send(tcp, (char*)handshake, 3, 0);
     if (!recv_all(tcp, buf, 2) || buf[1] != 0x00) {
         printf("[UCB] Auth failed\n");
-        closesocket(tcp); return;
+        closesocket(tcp); closesocket(udp); return;
     }
 
     // 3. UDP ASSOCIATE Request
-    // cmd=0x03 (UDP ASSOCIATE), addr=0.0.0.0, port=0
-    uint8_t req[] = { 0x05, 0x03, 0x00, 0x01, 0,0,0,0, 0,0 };
+    // Tell proxy OUR IP and PORT
+    uint8_t req[10];
+    req[0] = 0x05; req[1] = 0x03; req[2] = 0x00; req[3] = 0x01; // IPv4
+    *(uint32_t*)(req + 4) = my_addr.sin_addr.s_addr;
+    *(uint16_t*)(req + 8) = my_addr.sin_port;
     send(tcp, (char*)req, 10, 0);
 
     // 4. Read Reply
-    if (!recv_all(tcp, buf, 4)) { closesocket(tcp); return; }
+    if (!recv_all(tcp, buf, 4)) { closesocket(tcp); closesocket(udp); return; }
     if (buf[1] != 0x00) {
         printf("[UCB] UDP ASSOCIATE rejected: %02x\n", buf[1]);
-        closesocket(tcp); return;
+        closesocket(tcp); closesocket(udp); return;
     }
     
     // Parse Relay Address
@@ -106,18 +136,18 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
     uint8_t atyp = buf[3];
     
     if (atyp == 0x01) { // IPv4
-        if (!recv_all(tcp, buf, 4 + 2)) { closesocket(tcp); return; }
+        if (!recv_all(tcp, buf, 4 + 2)) { closesocket(tcp); closesocket(udp); return; }
         relay_ip = *(uint32_t*)buf;
         relay_port = *(uint16_t*)(buf + 4);
     } else if (atyp == 0x03) { // Domain
-        if (!recv_all(tcp, buf, 1)) { closesocket(tcp); return; }
+        if (!recv_all(tcp, buf, 1)) { closesocket(tcp); closesocket(udp); return; }
         int len = buf[0];
-        if (!recv_all(tcp, buf, len + 2)) { closesocket(tcp); return; }
+        if (!recv_all(tcp, buf, len + 2)) { closesocket(tcp); closesocket(udp); return; }
         relay_ip = inet_addr(SOCKS_SERVER_IP); 
         relay_port = *(uint16_t*)(buf + len);
     } else {
         printf("[UCB] Unsupported ATYP in UDP ASSOCIATE: %02x\n", atyp);
-        closesocket(tcp); return;
+        closesocket(tcp); closesocket(udp); return;
     }
 
     if (relay_ip == 0) relay_ip = inet_addr(SOCKS_SERVER_IP);
@@ -128,16 +158,7 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
     ucb->relay_ip = relay_ip;
     ucb->relay_port = relay_port;
     ucb->tcpSock = tcp;
-
-    // 5. Setup UDP Socket
-    SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
-    sockaddr_in local {};
-    local.sin_family = AF_INET;
-    local.sin_addr.s_addr = htonl(INADDR_ANY); 
-    local.sin_port = htons(0); 
-    bind(udp, (sockaddr*)&local, sizeof(local));
     ucb->udpSock = udp;
-
     ucb->ready_to_send = true;
 
     // 6. Main Loop
@@ -164,11 +185,15 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
         // Check UDP (Incoming data from Proxy)
         if (FD_ISSET(udp, &rd_set)) {
             int r = recvfrom(udp, (char*)buf, 4096, 0, NULL, NULL);
-            if (r > 10) { 
-                // Basic Validation
-                if (buf[0] != 0 || buf[1] != 0) continue; 
+            if (r > 0) { 
+                // UNCOMMENTED DEBUG LOG
+                // printf("[UCB-DEBUG] Recv UDP %d bytes. Header: %02X %02X %02X %02X\n", r, buf[0], buf[1], buf[2], buf[3]);
+
+                if (r < 10) continue; 
                 
                 int offset = 0;
+                if (buf[0] != 0 || buf[1] != 0) continue; 
+                
                 uint32_t src_ip = 0;
                 uint16_t src_port = 0;
                 uint8_t atyp = buf[3];
@@ -193,21 +218,18 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
                          int pos = 12; // Skip Header
                          std::string qname = parse_dns_name(payload, payload_len, pos);
                          
-                         // Check flags
-                         uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
-                         uint16_t qdcount = ntohs(*(uint16_t*)(payload + 4));
                          uint16_t ancount = ntohs(*(uint16_t*)(payload + 6));
-                         
-                         // Skip Questions (usually 1)
+                         // Skip Questions
                          pos = 12; 
+                         uint16_t qdcount = ntohs(*(uint16_t*)(payload + 4));
                          for(int k=0; k<qdcount; ++k) {
                              parse_dns_name(payload, payload_len, pos);
-                             pos += 4; // QTYPE, QCLASS
+                             pos += 4; 
                          }
 
                          std::string info = "";
                          for (int i=0; i<ancount && pos < payload_len; ++i) {
-                             parse_dns_name(payload, payload_len, pos); // Skip Name
+                             parse_dns_name(payload, payload_len, pos); 
                              if (pos + 10 > payload_len) break;
                              
                              uint16_t type = ntohs(*(uint16_t*)(payload + pos));
@@ -288,8 +310,8 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
                 uint8_t* pIP = (uint8_t*)&target_ip;
                 sbuf.push_back(pIP[0]); sbuf.push_back(pIP[1]); sbuf.push_back(pIP[2]); sbuf.push_back(pIP[3]);
                 
-                uint16_t dport = pkt.quad.dport;
-                uint8_t* pPort = (uint8_t*)&dport;
+                uint16_t dport_val = pkt.quad.dport;
+                uint8_t* pPort = (uint8_t*)&dport_val;
                 sbuf.push_back(pPort[0]); sbuf.push_back(pPort[1]);
                 
                 sbuf.insert(sbuf.end(), pkt.payload.begin(), pkt.payload.end());
@@ -329,10 +351,10 @@ void process_udp_packet(UCB& ucb, const Packet& pkt, HANDLE tap) {
     if (!ucb.is_running) {
         if (ucb.worker_th.joinable()) ucb.worker_th.join(); // Clean up old thread if any
         ucb.is_running = true;
-        // 使用 ThreadGuard 的逻辑被移到了线程内部手动管理，为了简单起见，这里直接启动
+        
         ucb.worker_th = std::thread([&ucb, tap]() {
             ucb_worker_loop(&ucb, tap);
-            ucb.is_running = false; // 线程退出时重置标志
+            ucb.is_running = false; 
         });
     }
 }
