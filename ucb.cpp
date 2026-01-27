@@ -132,7 +132,7 @@ static void ucb_worker_loop(UCB* ucb, HANDLE tap) {
     SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
     sockaddr_in local{};
     local.sin_family = AF_INET;
-    local.sin_addr.s_addr = inet_addr(UDP_ADDR);
+    local.sin_addr.s_addr = htonl(INADDR_ANY); // Bind to 0.0.0.0 to let OS pick correct Source IP (e.g. 127.0.0.1)
     local.sin_port = htons(0); // Any port
     bind(udp, (sockaddr*)&local, sizeof(local));
     ucb->udpSock = udp;
