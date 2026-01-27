@@ -63,11 +63,20 @@ static void udp_relay_to_tap(HANDLE tap, Quad q, SOCKET udpSock) {
         }
 
         // SOCKS5 UDP Unpack
-        if (r < 10) continue; 
+        if (r < 10) {
+            printf("[UCB] Recv too small packet: %d bytes\n", r);
+            continue; 
+        }
         
+        // Debug Log: Print header details
+        // Header: RSV(2) FRAG(1) ATYP(1)
+        printf("[UCB] Recv %d bytes. Header: %02X %02X %02X %02X\n", r, buf[0], buf[1], buf[2], buf[3]);
+
         int offset = 0;
-        if (buf[0] != 0 || buf[1] != 0) continue; 
-        if (buf[2] != 0) continue; 
+        if (buf[0] != 0 || buf[1] != 0) {
+             printf("[UCB] Bad RSV\n");
+             continue; 
+        }
         
         uint32_t src_ip = 0;
         uint16_t src_port = 0;
