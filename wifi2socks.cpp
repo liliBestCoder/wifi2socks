@@ -69,6 +69,9 @@ extern "C" {
 #define TAP_CONTROL_CODE(request, method) CTL_CODE(FILE_DEVICE_UNKNOWN, request, method, FILE_ANY_ACCESS)
 #define TAP_IOCTL_SET_MEDIA_STATUS TAP_CONTROL_CODE(6, METHOD_BUFFERED)
 
+// FIXED: Remove "Global" prefix for better compatibility
+#define TAP_WIN_PATH "\\\\.\\%s.tap"
+
 // --- Debug Logging ---
 void log_debug(const char* format, ...) {
     char buf[2048];
@@ -122,6 +125,7 @@ extern "C" void lwip_win32_platform_diag(const char *format, ...) {
 }
 
 // --- Helper Functions ---
+// Checksum helper
 uint16_t ip_chksum_simple(void* dataptr, int len) {
     uint32_t acc = 0;
     uint16_t* ptr = (uint16_t*)dataptr;
@@ -131,6 +135,7 @@ uint16_t ip_chksum_simple(void* dataptr, int len) {
     return (uint16_t)~(acc);
 }
 
+// DNS Parser (Minimal)
 std::string parse_dns_name(const uint8_t* buf, int len, int& pos) {
     std::string name;
     int jumps = 0;
@@ -143,7 +148,7 @@ std::string parse_dns_name(const uint8_t* buf, int len, int& pos) {
             int offset = ((c & 0x3F) << 8) | buf[p + 1];
             if (jumps == 0) pos = p + 2;
             p = offset;
-            jumps++; if (jumps > 10) return "";
+            jumps++; if (jumps > 5) return "";
         } else { 
             if (p + 1 + c > len) return "";
             if (!name.empty()) name += ".";
@@ -173,6 +178,7 @@ err_t proxy_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
         uint8_t* d = (uint8_t*)p->payload;
         if (p->len >= 2 && d[1] == 0x00) {
             uint8_t req[10] = { 0x05, 0x01, 0x00, 0x01 };
+            // Use Windows htonl/htons for SOCKS buffer creation
             *(uint32_t*)(req + 4) = ctx->target.original_dst_ip; 
             *(uint16_t*)(req + 8) = ctx->target.original_dst_port; 
             tcp_write(tpcb, req, 10, 1);
@@ -196,7 +202,7 @@ err_t proxy_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
 
 err_t client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
     ConnectionCtx* ctx = (ConnectionCtx*)arg;
-    if (!p) {
+    if (!p) { // Client closed
         if (ctx->proxy_pcb) { tcp_close(ctx->proxy_pcb); ctx->proxy_pcb = NULL; }
         tcp_close(tpcb); return ERR_OK;
     }
@@ -246,6 +252,7 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     tcp_arg(proxy_pcb, ctx);
     tcp_recv(proxy_pcb, proxy_recv);
     
+    // Convert PROXY_IP to LwIP IP type
     ip_addr_t proxy_ip;
     ip4_addr_set_u32(&proxy_ip, ::inet_addr(PROXY_IP)); 
     tcp_connect(proxy_pcb, &proxy_ip, PROXY_PORT, proxy_connected);
@@ -281,14 +288,14 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
 // Thread to handle DNS Direct
 void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_port) {
     SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udp == INVALID_SOCKET) return;
+    if (udp == INVALID_SOCKET) return; 
     
     DWORD timeout = 2000;
     setsockopt(udp, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
 
     sockaddr_in dest;
     dest.sin_family = AF_INET;
-    // FIXED: Use Windows API directly as macros are undef'd
+    // FIXED: Use S_un.S_addr because macro s_addr is undefined
     dest.sin_addr.S_un.S_addr = ::inet_addr("8.8.8.8");
     dest.sin_port = ::htons(53);
 
@@ -311,7 +318,7 @@ void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
         *(uint16_t*)(ip + 2) = ::htons((uint16_t)(20 + 8 + r));
         ip[8] = 64; ip[9] = 17; // UDP
         
-        // FIXED: Use Windows API struct members
+        // FIXED: Use S_un.S_addr
         *(uint32_t*)(ip + 12) = dest.sin_addr.S_un.S_addr;   
         *(uint32_t*)(ip + 16) = src_ip;  
         *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
@@ -331,47 +338,76 @@ void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
 }
 
 void process_tap_frame(uint8_t* buf, int len) {
+    if (len < 14) return;
+
+    // Check EtherType
+    uint16_t eth_type = ::ntohs(*(uint16_t*)(buf + 12));
+
+    // 1. ARP Handling (Pass to LwIP)
+    // 0x0806 is ARP. LwIP's ethernet_input handles ARP and IP.
+    if (eth_type == 0x0806) { // ARP
+        struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
+        if (p) {
+            pbuf_take(p, buf, len);
+            if (g_netif.input(p, &g_netif) != ERR_OK) {
+                pbuf_free(p);
+            }
+        }
+        return; // Done with ARP
+    }
+
     struct ip_hdr* ip = (struct ip_hdr*)(buf + 14);
     
-    // 1. DNS Intercept
-    if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_UDP) {
-        uint8_t* udp = buf + 14 + IPH_HL(ip) * 4;
-        uint16_t dport = *(uint16_t*)(udp + 2);
-        if (::ntohs(dport) == 53) {
-            uint8_t* payload = udp + 8;
-            int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
-            if (pay_len > 0) {
-                std::vector<uint8_t> data(payload, payload + pay_len);
-                std::thread(dns_direct_thread, data, ip->src.addr, *(uint16_t*)udp).detach();
+    // 2. DNS Direct Intercept (UDP 53)
+    if (eth_type == 0x0800) { 
+        if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_UDP) {
+            uint8_t* udp = buf + 14 + IPH_HL(ip) * 4;
+            uint16_t dport = *(uint16_t*)(udp + 2);
+            if (::ntohs(dport) == 53) {
+                uint8_t* payload = udp + 8;
+                int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
+                if (pay_len > 0) {
+                    std::vector<uint8_t> data(payload, payload + pay_len);
+                    std::thread(dns_direct_thread, data, ip->src.addr, *(uint16_t*)udp).detach();
+                }
+                return; // Consumed
             }
-            return; 
+        }
+
+        // 3. TCP NAT
+        if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
+            uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
+            uint16_t src_port = *(uint16_t*)(tcp_base); 
+            uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
+            uint32_t dst_ip = ip->dest.addr;
+
+            {
+                std::lock_guard<std::mutex> lk(g_nat_mtx);
+                NatEntry& e = g_nat_table[::ntohs(src_port)]; // Key is Host Order
+                e.original_dst_ip = dst_ip;
+                e.original_dst_port = dst_port; 
+                e.last_active = get_now_ms();
+            }
+
+            ip->dest.addr = ::inet_addr(TAP_GW);
+            *(uint16_t*)(tcp_base + 2) = ::htons(LWIP_LISTEN_PORT);
+
+            IPH_CHKSUM_SET(ip, 0);
+            IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+            
+            // Fallthrough to LwIP input
         }
     }
 
-    // 2. TCP NAT
-    if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
-        uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
-        uint16_t src_port = *(uint16_t*)(tcp_base); 
-        uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
-        uint32_t dst_ip = ip->dest.addr;
-
-        {
-            std::lock_guard<std::mutex> lk(g_nat_mtx);
-            NatEntry& e = g_nat_table[::ntohs(src_port)]; 
-            e.original_dst_ip = dst_ip;
-            e.original_dst_port = dst_port; 
-            e.last_active = get_now_ms();
-        }
-
-        ip->dest.addr = ::inet_addr(TAP_GW);
-        *(uint16_t*)(tcp_base + 2) = ::htons(LWIP_LISTEN_PORT);
-
-        IPH_CHKSUM_SET(ip, 0);
-        IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
-        
+    // 4. Pass to LwIP (TCP NATed packets, or other IP packets like ICMP)
+    if (eth_type == 0x0800) {
         struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
-        pbuf_take(p, buf, len);
-        if (g_netif.input(p, &g_netif) != ERR_OK) pbuf_free(p);
+        if (p) {
+            pbuf_take(p, buf, len);
+            if (g_netif.input(p, &g_netif) != ERR_OK) {
+                pbuf_free(p);
+            }
+        }
     }
 }
 
@@ -385,7 +421,8 @@ err_t netif_init_cb(struct netif* netif) {
 
 int main() {
     char devicePath[256];
-    sprintf_s(devicePath, sizeof(devicePath), "\\.\Global\%s.tap", "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}");
+    // FIXED: Removed "Global" prefix which caused Error Code 2 on some systems
+    sprintf_s(devicePath, sizeof(devicePath), "\\\\.\\%s.tap", "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}");
     log_debug("Opening TAP device: %s\n", devicePath);
 
     // KEY FIX: Use Overlapped I/O to avoid blocking LwIP timers
@@ -451,7 +488,6 @@ int main() {
                 }
                 pending = false;
                 ResetEvent(ol.hEvent);
-                ol.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL); // Recreate event for next pending operation
                 ol.Offset = 0; ol.OffsetHigh = 0;
             }
         }
