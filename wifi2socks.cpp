@@ -13,6 +13,7 @@
 #pragma comment(lib, "Ws2_32.lib")
 
 // --- CONFLICT RESOLUTION ---
+// Rename LwIP structs/funcs to avoid collision with Windows
 #define timeval     lwip_timeval
 #define fd_set      lwip_fd_set
 #define in_addr     lwip_in_addr
@@ -28,6 +29,7 @@
 #define inet_addr   lwip_inet_addr
 #define inet_ntoa   lwip_inet_ntoa
 
+// Undefine Macros that break LwIP structs
 #ifdef s_addr
 #undef s_addr
 #endif
@@ -41,6 +43,7 @@ extern "C" {
 #include "netif/etharp.h"
 }
 
+// Restore/Undefine
 #undef timeval
 #undef fd_set
 #undef in_addr
@@ -56,10 +59,9 @@ extern "C" {
 #undef inet_ntoa
 
 // --- Configuration ---
-// Gateway IP (LwIP address)
 #define TAP_IP          "10.0.0.1"
 #define TAP_NETMASK     "255.255.255.0"
-#define TAP_GW          "10.0.0.1" 
+#define TAP_GW          "10.0.0.1"
 #define PROXY_IP        "192.168.11.250"
 #define PROXY_PORT      3080
 #define LWIP_LISTEN_PORT 7000
@@ -67,6 +69,7 @@ extern "C" {
 #define TAP_CONTROL_CODE(request, method) CTL_CODE(FILE_DEVICE_UNKNOWN, request, method, FILE_ANY_ACCESS)
 #define TAP_IOCTL_SET_MEDIA_STATUS TAP_CONTROL_CODE(6, METHOD_BUFFERED)
 
+// FIXED: Remove "Global" prefix for better compatibility
 #define TAP_WIN_PATH "\\\\.\\%s.tap"
 
 // --- Headers for Manual Processing ---
@@ -93,7 +96,6 @@ struct ArpPacket {
 // --- Globals ---
 HANDLE g_tap = INVALID_HANDLE_VALUE;
 struct netif g_netif;
-// FIXED: Reverted to Real MAC as requested
 uint8_t TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C };
 
 // --- Debug Logging ---
@@ -103,11 +105,14 @@ void log_debug(const char* format, ...) {
     va_start(ap, format);
     vsnprintf(buf, sizeof(buf), format, ap);
     va_end(ap);
+    
+    // Output to VS Debugger Window
     OutputDebugStringA(buf);
+    // Output to Console
     printf("%s", buf);
 }
 
-// --- Helper Functions ---
+// --- Platform Helper ---
 uint32_t get_now_ms() { return (uint32_t)GetTickCount64(); }
 extern "C" u32_t sys_now() { return get_now_ms(); }
 extern "C" unsigned int sys_win_rand() { return (unsigned int)rand(); }
@@ -118,6 +123,47 @@ extern "C" void lwip_win32_platform_diag(const char *format, ...) {
     va_end(ap);
 }
 
+// --- ASYNC WRITE HELPER ---
+std::mutex g_write_mtx;
+void tap_send_async(const uint8_t* buf, int len) {
+    if (len <= 0) return; 
+    
+    // Protect overlapping writes if needed, though OVERLAPPED struct usually handles it per call
+    std::lock_guard<std::mutex> lk(g_write_mtx);
+
+    // Need to keep OVERLAPPED structure valid until completion? 
+    // Wait, if we use a local variable and wait, it's fine.
+    // Ideally we queue writes and have a write thread, but for quick fix, let's do Wait. 
+    
+    OVERLAPPED ol = {0};
+    ol.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!ol.hEvent) {
+        log_debug("CreateEvent failed for write\n");
+        return;
+    }
+
+    DWORD written = 0;
+    // Note: WriteFile returns FALSE if IO is pending (normal for Overlapped)
+    if (!WriteFile(g_tap, buf, len, &written, &ol)) {
+        DWORD err = GetLastError();
+        if (err == ERROR_IO_PENDING) {
+            // Wait for completion (Blocking here is fine for now as writing is usually fast, 
+            // or we could optimize queueing later. LwIP expects linkoutput to be synchronous-ish)
+            if (WaitForSingleObject(ol.hEvent, 1000) == WAIT_OBJECT_0) {
+                GetOverlappedResult(g_tap, &ol, &written, FALSE);
+            } else {
+                log_debug("Write timeout/failed\n");
+                CancelIo(g_tap);
+            }
+        } else {
+            log_debug("WriteFile failed imm. Err=%d\n", err);
+        }
+    }
+    CloseHandle(ol.hEvent);
+}
+
+// --- Helper Functions ---
+// Checksum helper
 uint16_t ip_chksum_simple(void* dataptr, int len) {
     uint32_t acc = 0;
     uint16_t* ptr = (uint16_t*)dataptr;
@@ -127,6 +173,7 @@ uint16_t ip_chksum_simple(void* dataptr, int len) {
     return (uint16_t)~(acc);
 }
 
+// DNS Parser (Minimal)
 std::string parse_dns_name(const uint8_t* buf, int len, int& pos) {
     std::string name;
     int jumps = 0;
@@ -135,13 +182,13 @@ std::string parse_dns_name(const uint8_t* buf, int len, int& pos) {
         uint8_t c = buf[p];
         if (c == 0) { p++; if (jumps == 0) pos = p; return name; }
         if ((c & 0xC0) == 0xC0) { 
-            if (p + 1 >= len) return "<err-ptr-len>";
+            if (p + 1 >= len) return "<err>";
             int offset = ((c & 0x3F) << 8) | buf[p + 1];
             if (jumps == 0) pos = p + 2;
             p = offset;
-            jumps++; if (jumps > 10) return "<err-loop>";
+            jumps++; if (jumps > 10) return "<loop>";
         } else { 
-            if (p + 1 + c > len) return "<err-label-len>";
+            if (p + 1 + c > len) return "<err>";
             if (!name.empty()) name += ".";
             name.append((char*)buf + p + 1, c);
             p += 1 + c;
@@ -160,13 +207,14 @@ void handle_arp_manual(uint8_t* buf, int len) {
     if (::ntohs(arp->oper) != 1) return;
 
     // Check if asking for Gateway IP
+    // FIXED: Use .S_un.S_addr
     if (arp->tpa != ::inet_addr(TAP_GW)) return;
 
     log_debug("[ARP] Request for %s from %02X:%02X:%02X:%02X:%02X:%02X\n", 
         TAP_GW, arp->sha[0], arp->sha[1], arp->sha[2], arp->sha[3], arp->sha[4], arp->sha[5]);
 
     uint8_t reply[64]; 
-    memset(reply, 0, sizeof(reply)); 
+    memset(reply, 0, sizeof(reply)); // Padding with zeros
 
     EthHeader* reth = (EthHeader*)reply;
     ArpPacket* rarp = (ArpPacket*)(reply + sizeof(EthHeader));
@@ -182,14 +230,15 @@ void handle_arp_manual(uint8_t* buf, int len) {
     rarp->oper = ::htons(2);
 
     memcpy(rarp->sha, TAP_MAC, 6);
+    // FIXED: Use .S_un.S_addr
     rarp->spa = ::inet_addr(TAP_GW);
 
     memcpy(rarp->tha, arp->sha, 6);
     rarp->tpa = arp->spa;
 
-    DWORD written;
-    WriteFile(g_tap, reply, 42, &written, NULL); 
-    log_debug("[ARP] Replied: I am %s (MAC: %02X:%02X...)\n", TAP_GW, TAP_MAC[0], TAP_MAC[1]);
+    // FIXED: Use Async Write Helper
+    tap_send_async(reply, 42); 
+    log_debug("[ARP] Replied: I am %s\n", TAP_GW);
 }
 
 // --- NAT & SOCKS5 Logic ---
@@ -211,15 +260,7 @@ struct ConnectionCtx {
     ConnectionCtx() : client_pcb(NULL), proxy_pcb(NULL), state(STATE_NONE) {}
 };
 
-bool recv_all(SOCKET s, uint8_t* buf, int len) {
-    int total = 0;
-    while (total < len) {
-        int r = recv(s, (char*)buf + total, len - total, 0);
-        if (r <= 0) return false;
-        total += r;
-    }
-    return true;
-}
+// --- LwIP Callbacks (SOCKS5 Logic) ---
 
 err_t proxy_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
     ConnectionCtx* ctx = (ConnectionCtx*)arg;
@@ -295,7 +336,7 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     NatEntry target = { 0 };
     {
         std::lock_guard<std::mutex> lk(g_nat_mtx);
-        auto it = g_nat_table.find(client_port); 
+        auto it = g_nat_table.find(ntohs(client_port)); 
         if (it != g_nat_table.end()) target = it->second;
     }
     if (target.original_dst_ip == 0) return ERR_ABRT;
@@ -312,6 +353,7 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     tcp_recv(proxy_pcb, proxy_recv);
     
     ip_addr_t proxy_ip;
+    // FIXED: Use .S_un.S_addr
     ip4_addr_set_u32(&proxy_ip, ::inet_addr(PROXY_IP)); 
     tcp_connect(proxy_pcb, &proxy_ip, PROXY_PORT, proxy_connected);
     return ERR_OK;
@@ -338,19 +380,22 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
             }
         }
     }
-    DWORD written;
-    WriteFile(g_tap, buf, len, &written, NULL);
+    // FIXED: Use Async Write Helper
+    tap_send_async(buf, len);
     return ERR_OK;
 }
 
+// Thread to handle DNS Direct
 void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_port) {
     SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
     if (udp == INVALID_SOCKET) return; 
     
     DWORD timeout = 2000;
     setsockopt(udp, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+
     sockaddr_in dest;
     dest.sin_family = AF_INET;
+    // FIXED: Use .S_un.S_addr
     dest.sin_addr.S_un.S_addr = ::inet_addr("8.8.8.8");
     dest.sin_port = ::htons(53);
 
@@ -378,6 +423,7 @@ void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
         *(uint16_t*)(ip + 2) = ::htons((uint16_t)(20 + 8 + r));
         ip[8] = 64; ip[9] = 17; 
         
+        // FIXED: Use .S_un.S_addr
         *(uint32_t*)(ip + 12) = dest.sin_addr.S_un.S_addr;   
         *(uint32_t*)(ip + 16) = src_ip;  
         *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
@@ -388,10 +434,10 @@ void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
         *(uint16_t*)(udp_hdr + 6) = 0; 
         
         memcpy(udp_hdr + 8, buf, r);
-        *(uint16_t*)(udp_hdr + 6) = 0; // Checksum ignore
+        *(uint16_t*)(udp_hdr + 6) = 0; 
 
-        DWORD written;
-        WriteFile(g_tap, frame, 14 + 20 + 8 + r, &written, NULL);
+        // FIXED: Use Async Write Helper
+        tap_send_async(frame, 14 + 20 + 8 + r);
     }
     closesocket(udp);
 }
@@ -437,6 +483,7 @@ void process_tap_frame(uint8_t* buf, int len) {
             e.last_active = get_now_ms();
         }
 
+        // FIXED: Use .S_un.S_addr
         ip->dest.addr = ::inet_addr(TAP_GW);
         *(uint16_t*)(tcp_base + 2) = ::htons(LWIP_LISTEN_PORT);
 
@@ -462,11 +509,9 @@ err_t netif_init_cb(struct netif* netif) {
 
 int main() {
     char devicePath[256];
-    // FIXED: Removed "Global" prefix which caused Error Code 2 on some systems
-    sprintf_s(devicePath, sizeof(devicePath), "\\\\.\\%s.tap", "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}");
+    sprintf_s(devicePath, sizeof(devicePath), TAP_WIN_PATH, "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}");
     log_debug("Opening TAP device: %s\n", devicePath);
 
-    // KEY FIX: Use Overlapped I/O to avoid blocking LwIP timers
     g_tap = CreateFileA(devicePath, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, 0);
     
     if (g_tap == INVALID_HANDLE_VALUE) { 
@@ -482,6 +527,7 @@ int main() {
     lwip_init();
 
     ip4_addr_t ip, mask, gw;
+    // FIXED: Use LwIP's ip4addr_aton which handles strings
     ip4addr_aton(TAP_IP, &ip);
     ip4addr_aton(TAP_NETMASK, &mask);
     ip4addr_aton(TAP_GW, &gw);
