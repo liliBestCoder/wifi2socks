@@ -288,7 +288,8 @@ void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
 
     sockaddr_in dest;
     dest.sin_family = AF_INET;
-    dest.sin_addr.s_addr = ::inet_addr("8.8.8.8");
+    // FIXED: Use Windows API directly as macros are undef'd
+    dest.sin_addr.S_un.S_addr = ::inet_addr("8.8.8.8");
     dest.sin_port = ::htons(53);
 
     sendto(udp, (char*)pkt.data(), (int)pkt.size(), 0, (sockaddr*)&dest, sizeof(dest));
@@ -310,7 +311,8 @@ void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
         *(uint16_t*)(ip + 2) = ::htons((uint16_t)(20 + 8 + r));
         ip[8] = 64; ip[9] = 17; // UDP
         
-        *(uint32_t*)(ip + 12) = dest.sin_addr.s_addr;   
+        // FIXED: Use Windows API struct members
+        *(uint32_t*)(ip + 12) = dest.sin_addr.S_un.S_addr;   
         *(uint32_t*)(ip + 16) = src_ip;  
         *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
 
@@ -383,7 +385,7 @@ err_t netif_init_cb(struct netif* netif) {
 
 int main() {
     char devicePath[256];
-    sprintf_s(devicePath, sizeof(devicePath), "\\\\.\\Global\\%s.tap", "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}");
+    sprintf_s(devicePath, sizeof(devicePath), "\\.\Global\%s.tap", "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}");
     log_debug("Opening TAP device: %s\n", devicePath);
 
     // KEY FIX: Use Overlapped I/O to avoid blocking LwIP timers
