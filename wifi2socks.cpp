@@ -93,7 +93,7 @@ struct ArpPacket {
 HANDLE g_tap = INVALID_HANDLE_VALUE;
 struct netif g_netif;
 // FIXED: Use the REAL MAC of the TAP adapter so the driver accepts packets sent to "Gateway"
-uint8_t TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C };
+uint8_t TAP_MAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 
 // --- Debug Logging ---
 void log_debug(const char* format, ...) {
