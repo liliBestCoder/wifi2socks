@@ -416,6 +416,10 @@ err_t netif_init_cb(struct netif* netif) {
     netif->output = etharp_output;
     netif->mtu = 1500;
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_LINK_UP | NETIF_FLAG_UP;
+    
+    netif->hwaddr_len = 6;
+    memcpy(netif->hwaddr, TAP_MAC, 6);
+
     return ERR_OK;
 }
 
