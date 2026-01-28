@@ -1,34 +1,22 @@
 #ifndef LWIP_LWIPOPTS_H
 #define LWIP_LWIPOPTS_H
 
-// --- 1. PREVENT WINDOWS HEADER CONFLICTS ---
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
-
-// Tell LwIP that we rely on system headers for these
-#define LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS 1
-#define LWIP_TIMEVAL_PRIVATE 0 
-#define LWIP_ERRNO_INCLUDE <errno.h>
-
-// --- 2. SYSTEM MODE ---
-#define NO_SYS                          1  // Raw API mode (Single threaded)
+// --- 1. SYSTEM MODE ---
+#define NO_SYS                          1  // Raw API mode
 #define SYS_LIGHTWEIGHT_PROT            0 
 #define LWIP_TIMERS                     1
 
-// --- 3. DISABLE UNUSED APIs (FIXES COMPILE ERRORS) ---
-#define LWIP_SOCKET                     0  // Disable Sockets API (Requires OS)
-#define LWIP_NETCONN                    0  // Disable Netconn API (Requires OS)
+// --- 2. DISABLE CONFLICTING APIs ---
+#define LWIP_SOCKET                     0  // Disable Sockets (We use Windows sockets for Proxy)
+#define LWIP_NETCONN                    0  // Disable Netconn
 #define LWIP_SEQUENTIAL_API             0
 
-// --- 4. MEMORY ---
+// --- 3. MEMORY ---
 #define MEM_LIBC_MALLOC                 1
 #define MEMP_MEM_MALLOC                 1
 #define MEM_ALIGNMENT                   4
 
-// --- 5. TCP/IP ---
+// --- 4. TCP/IP ---
 #define LWIP_TCP                        1
 #define TCP_MSS                         1400
 #define TCP_WND                         (32 * TCP_MSS) 
@@ -41,14 +29,18 @@
 #define LWIP_IPV4                       1
 #define IP_FORWARD                      0
 
-// --- 6. OPTIMIZATIONS ---
-// Disable checksum checking since TAP interface is virtual/reliable
+// --- 5. OPTIMIZATIONS ---
 #define CHECKSUM_CHECK_IP               0
 #define CHECKSUM_CHECK_UDP              0
 #define CHECKSUM_CHECK_TCP              0
-// Enable generation because peers need valid checksums
 #define CHECKSUM_GEN_IP                 1
 #define CHECKSUM_GEN_UDP                1
 #define CHECKSUM_GEN_TCP                1
 
+// --- 6. PLATFORM ---
+// Let LwIP define its own types for its core files
+#define LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS 0
+#define LWIP_TIMEVAL_PRIVATE 1
+
+// We do NOT include winsock2.h here to protect ip4_addr.c from macro pollution
 #endif
