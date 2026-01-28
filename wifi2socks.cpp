@@ -20,6 +20,7 @@
 #define sockaddr_in lwip_sockaddr_in
 #define sockaddr_storage lwip_sockaddr_storage
 #define linger      lwip_linger
+
 #define htonl       lwip_htonl
 #define ntohl       lwip_ntohl
 #define htons       lwip_htons
@@ -38,8 +39,6 @@ extern "C" {
 #include "lwip/ip.h"
 #include "lwip/timeouts.h"
 #include "netif/etharp.h"
-// Use ethernet_input for raw frames
-err_t ethernet_input(struct pbuf *p, struct netif *netif);
 }
 
 #undef timeval
@@ -57,9 +56,9 @@ err_t ethernet_input(struct pbuf *p, struct netif *netif);
 #undef inet_ntoa
 
 // --- Configuration ---
-#define TAP_IP          "10.0.0.1"
+#define TAP_IP          "10.0.0.2"
 #define TAP_NETMASK     "255.255.255.0"
-#define TAP_GW          "10.0.0.1"
+#define TAP_GW          "10.0.0.2" 
 #define PROXY_IP        "192.168.11.250"
 #define PROXY_PORT      3080
 #define LWIP_LISTEN_PORT 7000
@@ -93,6 +92,7 @@ struct ArpPacket {
 // --- Globals ---
 HANDLE g_tap = INVALID_HANDLE_VALUE;
 struct netif g_netif;
+// FIXED: Use the REAL MAC of the TAP adapter so the driver accepts packets sent to "Gateway"
 uint8_t TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C };
 
 // --- Debug Logging ---
@@ -158,12 +158,16 @@ void handle_arp_manual(uint8_t* buf, int len) {
 
     if (::ntohs(arp->oper) != 1) return;
 
+    // Check if asking for Gateway IP
     if (arp->tpa != ::inet_addr(TAP_GW)) return;
 
     log_debug("[ARP] Request for %s from %02X:%02X:%02X:%02X:%02X:%02X\n", 
         TAP_GW, arp->sha[0], arp->sha[1], arp->sha[2], arp->sha[3], arp->sha[4], arp->sha[5]);
 
-    uint8_t reply[sizeof(EthHeader) + sizeof(ArpPacket)];
+    // Use a larger buffer to ensure min ethernet frame size (60 bytes + CRC)
+    uint8_t reply[64]; 
+    memset(reply, 0, sizeof(reply)); // Padding with zeros
+
     EthHeader* reth = (EthHeader*)reply;
     ArpPacket* rarp = (ArpPacket*)(reply + sizeof(EthHeader));
 
@@ -184,8 +188,9 @@ void handle_arp_manual(uint8_t* buf, int len) {
     rarp->tpa = arp->spa;
 
     DWORD written;
-    WriteFile(g_tap, reply, sizeof(reply), &written, NULL);
-    log_debug("[ARP] Replied: I am %s\n", TAP_GW);
+    // Send 42 bytes is usually fine, but 60 is safer
+    WriteFile(g_tap, reply, 42, &written, NULL); 
+    log_debug("[ARP] Replied: I am %s (MAC: %02X:%02X...)\n", TAP_GW, TAP_MAC[0], TAP_MAC[1]);
 }
 
 // --- NAT & SOCKS5 Logic ---
@@ -479,7 +484,7 @@ int main() {
     ip4addr_aton(TAP_NETMASK, &mask);
     ip4addr_aton(TAP_GW, &gw);
 
-    netif_add(&g_netif, &ip, &mask, &gw, NULL, netif_init_cb, ethernet_input);
+    netif_add(&g_netif, &ip, &mask, &gw, NULL, netif_init_cb, netif_input);
     netif_set_default(&g_netif);
 
     struct tcp_pcb* pcb = tcp_new();
