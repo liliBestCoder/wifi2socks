@@ -69,12 +69,18 @@ extern "C" {
 #define TAP_CONTROL_CODE(request, method) CTL_CODE(FILE_DEVICE_UNKNOWN, request, method, FILE_ANY_ACCESS)
 #define TAP_IOCTL_SET_MEDIA_STATUS TAP_CONTROL_CODE(6, METHOD_BUFFERED)
 
-// --- Platform Impl ---
-uint32_t get_now_ms() { return (uint32_t)GetTickCount64(); }
-extern "C" u32_t sys_now() { return get_now_ms(); }
-extern "C" unsigned int sys_win_rand() { return (unsigned int)rand(); }
-extern "C" void lwip_win32_platform_diag(const char *format, ...) {
-    va_list ap; va_start(ap, format); vprintf(format, ap); va_end(ap);
+// --- Debug Logging ---
+void log_debug(const char* format, ...) {
+    char buf[2048];
+    va_list ap;
+    va_start(ap, format);
+    vsnprintf(buf, sizeof(buf), format, ap);
+    va_end(ap);
+    
+    // Output to VS Debugger Window
+    OutputDebugStringA(buf);
+    // Output to Console
+    printf("%s", buf);
 }
 
 // --- NAT State ---
@@ -101,8 +107,21 @@ HANDLE g_tap = INVALID_HANDLE_VALUE;
 struct netif g_netif;
 uint8_t TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C };
 
+// --- Time Helper ---
+uint32_t get_now_ms() {
+    return (uint32_t)GetTickCount64();
+}
+
+extern "C" u32_t sys_now() { return get_now_ms(); }
+extern "C" unsigned int sys_win_rand() { return (unsigned int)rand(); }
+extern "C" void lwip_win32_platform_diag(const char *format, ...) {
+    va_list ap; va_start(ap, format); 
+    char buf[1024]; vsnprintf(buf, sizeof(buf), format, ap);
+    OutputDebugStringA(buf); // Route LwIP logs to VS output
+    va_end(ap);
+}
+
 // --- Helper Functions ---
-// Checksum helper
 uint16_t ip_chksum_simple(void* dataptr, int len) {
     uint32_t acc = 0;
     uint16_t* ptr = (uint16_t*)dataptr;
@@ -112,7 +131,6 @@ uint16_t ip_chksum_simple(void* dataptr, int len) {
     return (uint16_t)~(acc);
 }
 
-// DNS Parser (Minimal)
 std::string parse_dns_name(const uint8_t* buf, int len, int& pos) {
     std::string name;
     int jumps = 0;
@@ -125,7 +143,7 @@ std::string parse_dns_name(const uint8_t* buf, int len, int& pos) {
             int offset = ((c & 0x3F) << 8) | buf[p + 1];
             if (jumps == 0) pos = p + 2;
             p = offset;
-            jumps++; if (jumps > 5) return "";
+            jumps++; if (jumps > 10) return "";
         } else { 
             if (p + 1 + c > len) return "";
             if (!name.empty()) name += ".";
@@ -141,7 +159,7 @@ std::string parse_dns_name(const uint8_t* buf, int len, int& pos) {
 err_t proxy_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
     ConnectionCtx* ctx = (ConnectionCtx*)arg;
     if (!p) { 
-        if (ctx->client_pcb) { tcp_close(ctx->client_pcb); ctx->client_pcb = NULL; }
+        if (ctx->client_pcb) { tcp_arg(ctx->client_pcb, NULL); tcp_close(ctx->client_pcb); ctx->client_pcb = NULL; }
         tcp_close(tpcb); delete ctx; return ERR_OK;
     }
     tcp_recved(tpcb, p->tot_len);
@@ -155,7 +173,6 @@ err_t proxy_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
         uint8_t* d = (uint8_t*)p->payload;
         if (p->len >= 2 && d[1] == 0x00) {
             uint8_t req[10] = { 0x05, 0x01, 0x00, 0x01 };
-            // Use Windows htonl/htons for SOCKS buffer creation
             *(uint32_t*)(req + 4) = ctx->target.original_dst_ip; 
             *(uint16_t*)(req + 8) = ctx->target.original_dst_port; 
             tcp_write(tpcb, req, 10, 1);
@@ -229,9 +246,8 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     tcp_arg(proxy_pcb, ctx);
     tcp_recv(proxy_pcb, proxy_recv);
     
-    // Convert PROXY_IP to LwIP IP type
     ip_addr_t proxy_ip;
-    ip4_addr_set_u32(&proxy_ip, ::inet_addr(PROXY_IP)); // Use Windows inet_addr with :: prefix
+    ip4_addr_set_u32(&proxy_ip, ::inet_addr(PROXY_IP)); 
     tcp_connect(proxy_pcb, &proxy_ip, PROXY_PORT, proxy_connected);
     return ERR_OK;
 }
@@ -244,18 +260,7 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
         struct ip_hdr* ip = (struct ip_hdr*)(buf + 14);
         if (IPH_PROTO(ip) == IP_PROTO_TCP) {
             uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
-            uint16_t dst_port = *(uint16_t*)(tcp_base + 2); // Client Port (LwIP sends to client)
-            // LwIP port is Host Order? No, Packet is Net Order.
-            // But LwIP usually handles endianness.
-            // Let's assume Net Order for packet modification.
-            
-            // Wait, we need to map back to original IP.
-            // But LwIP stack thinks it's 10.0.0.1.
-            // We need to verify if dst_port matches our table.
-            
-            // The dst_port in the packet is Net Order. 
-            // Our key in table is Host Order (from remote_port in accept).
-            // So we need ntohs.
+            uint16_t dst_port = *(uint16_t*)(tcp_base + 2); 
             uint16_t port_key = ::ntohs(dst_port); 
 
             std::lock_guard<std::mutex> lk(g_nat_mtx);
@@ -273,24 +278,75 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
     return ERR_OK;
 }
 
+// Thread to handle DNS Direct
+void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_port) {
+    SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp == INVALID_SOCKET) return;
+    
+    DWORD timeout = 2000;
+    setsockopt(udp, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+
+    sockaddr_in dest;
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = ::inet_addr("8.8.8.8");
+    dest.sin_port = ::htons(53);
+
+    sendto(udp, (char*)pkt.data(), (int)pkt.size(), 0, (sockaddr*)&dest, sizeof(dest));
+
+    char buf[2048];
+    int r = recvfrom(udp, buf, sizeof(buf), 0, NULL, NULL);
+    if (r > 0) {
+        // Construct Reply to TAP
+        uint8_t frame[2048];
+        memcpy(frame, TAP_MAC, 6);
+        memcpy(frame + 6, TAP_MAC, 6);
+        *(uint16_t*)(frame + 12) = ::htons(0x0800);
+
+        uint8_t* ip = frame + 14;
+        uint8_t* udp_hdr = ip + 20;
+        
+        memset(ip, 0, 20);
+        ip[0] = 0x45;
+        *(uint16_t*)(ip + 2) = ::htons((uint16_t)(20 + 8 + r));
+        ip[8] = 64; ip[9] = 17; // UDP
+        
+        *(uint32_t*)(ip + 12) = dest.sin_addr.s_addr;   
+        *(uint32_t*)(ip + 16) = src_ip;  
+        *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
+
+        *(uint16_t*)(udp_hdr + 0) = dest.sin_port;
+        *(uint16_t*)(udp_hdr + 2) = src_port;
+        *(uint16_t*)(udp_hdr + 4) = ::htons((uint16_t)(8 + r));
+        *(uint16_t*)(udp_hdr + 6) = 0; 
+        
+        memcpy(udp_hdr + 8, buf, r);
+        
+        DWORD written;
+        WriteFile(g_tap, frame, 14 + 20 + 8 + r, &written, NULL);
+        log_debug("[DNS] Direct Reply Sent %d bytes\n", r);
+    }
+    closesocket(udp);
+}
+
 void process_tap_frame(uint8_t* buf, int len) {
     struct ip_hdr* ip = (struct ip_hdr*)(buf + 14);
     
-    // DNS Direct (UDP 53)
+    // 1. DNS Intercept
     if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_UDP) {
         uint8_t* udp = buf + 14 + IPH_HL(ip) * 4;
         uint16_t dport = *(uint16_t*)(udp + 2);
         if (::ntohs(dport) == 53) {
-            // ... (Direct DNS logic omitted for brevity, focusing on LwIP compilation) ...
-            // You can paste the direct_dns_relay thread logic here if needed.
-            // For now, let's let it drop or simple print.
-            // printf("DNS Req\n");
-            // To restore: create thread, send to 8.8.8.8, inject back to TAP.
+            uint8_t* payload = udp + 8;
+            int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
+            if (pay_len > 0) {
+                std::vector<uint8_t> data(payload, payload + pay_len);
+                std::thread(dns_direct_thread, data, ip->src.addr, *(uint16_t*)udp).detach();
+            }
             return; 
         }
     }
 
-    // TCP NAT
+    // 2. TCP NAT
     if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
         uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
         uint16_t src_port = *(uint16_t*)(tcp_base); 
@@ -299,7 +355,7 @@ void process_tap_frame(uint8_t* buf, int len) {
 
         {
             std::lock_guard<std::mutex> lk(g_nat_mtx);
-            NatEntry& e = g_nat_table[::ntohs(src_port)]; // Key is Host Order
+            NatEntry& e = g_nat_table[::ntohs(src_port)]; 
             e.original_dst_ip = dst_ip;
             e.original_dst_port = dst_port; 
             e.last_active = get_now_ms();
@@ -327,10 +383,16 @@ err_t netif_init_cb(struct netif* netif) {
 
 int main() {
     char devicePath[256];
-    sprintf_s(devicePath, sizeof(devicePath), "\\.\Global\%s.tap", "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}");
-    g_tap = CreateFileA(devicePath, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, 0, 0);
+    sprintf_s(devicePath, sizeof(devicePath), "\\\\.\\Global\\%s.tap", "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}");
+    log_debug("Opening TAP device: %s\n", devicePath);
+
+    // KEY FIX: Use Overlapped I/O to avoid blocking LwIP timers
+    g_tap = CreateFileA(devicePath, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, 0);
     
-    if (g_tap == INVALID_HANDLE_VALUE) { printf("Error opening TAP\n"); return 1; }
+    if (g_tap == INVALID_HANDLE_VALUE) { 
+        log_debug("Error opening TAP. Code=%lu\n", GetLastError()); 
+        return 1; 
+    }
 
     ULONG status = TRUE; DWORD len;
     DeviceIoControl(g_tap, TAP_IOCTL_SET_MEDIA_STATUS, &status, sizeof(status), &status, sizeof(status), &len, NULL);
@@ -352,15 +414,49 @@ int main() {
     pcb = tcp_listen(pcb);
     tcp_accept(pcb, tcp_proxy_accept);
 
-    printf("LwIP Tun2Socks Running. Proxy: %s:%d\n", PROXY_IP, PROXY_PORT);
+    log_debug("LwIP Tun2Socks Running. Proxy: %s:%d\n", PROXY_IP, PROXY_PORT);
 
+    // Overlapped Read Buffer
     uint8_t buffer[65536];
+    OVERLAPPED ol = {0};
+    ol.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    DWORD bytesRead = 0;
+    bool pending = false;
+
     while (true) {
-        DWORD bytesRead = 0;
-        if (ReadFile(g_tap, buffer, sizeof(buffer), &bytesRead, NULL)) {
-            process_tap_frame(buffer, bytesRead);
+        // 1. Trigger Read if not pending
+        if (!pending) {
+            if (!ReadFile(g_tap, buffer, sizeof(buffer), &bytesRead, &ol)) {
+                if (GetLastError() != ERROR_IO_PENDING) {
+                    log_debug("TAP Read Error: %d\n", GetLastError());
+                    break;
+                }
+                pending = true;
+            } else {
+                // Completed immediately
+                process_tap_frame(buffer, bytesRead);
+                pending = false; // Stay ready
+                ol.Offset = 0; ol.OffsetHigh = 0; // Reset offset for TAP? Actually TAP ignores offset, but good practice.
+            }
         }
+
+        // 2. Wait with timeout (so LwIP timers can run)
+        if (pending) {
+            DWORD waitRes = WaitForSingleObject(ol.hEvent, 5); // 5ms timeout for LwIP granularity
+            if (waitRes == WAIT_OBJECT_0) {
+                if (GetOverlappedResult(g_tap, &ol, &bytesRead, FALSE)) {
+                    process_tap_frame(buffer, bytesRead);
+                }
+                pending = false;
+                ResetEvent(ol.hEvent);
+                ol.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL); // Recreate event for next pending operation
+                ol.Offset = 0; ol.OffsetHigh = 0;
+            }
+        }
+
+        // 3. Run LwIP Timers (Crucial for TCP!)
         sys_check_timeouts();
     }
+
     return 0;
 }
