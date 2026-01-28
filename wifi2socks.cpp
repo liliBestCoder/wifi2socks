@@ -56,9 +56,10 @@ extern "C" {
 #undef inet_ntoa
 
 // --- Configuration ---
-#define TAP_IP          "10.0.0.2"
+// Gateway IP (LwIP address)
+#define TAP_IP          "10.0.0.1"
 #define TAP_NETMASK     "255.255.255.0"
-#define TAP_GW          "10.0.0.2" 
+#define TAP_GW          "10.0.0.1" 
 #define PROXY_IP        "192.168.11.250"
 #define PROXY_PORT      3080
 #define LWIP_LISTEN_PORT 7000
@@ -92,8 +93,8 @@ struct ArpPacket {
 // --- Globals ---
 HANDLE g_tap = INVALID_HANDLE_VALUE;
 struct netif g_netif;
-// FIXED: Use the REAL MAC of the TAP adapter so the driver accepts packets sent to "Gateway"
-uint8_t TAP_MAC[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+// FIXED: Reverted to Real MAC as requested
+uint8_t TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C };
 
 // --- Debug Logging ---
 void log_debug(const char* format, ...) {
@@ -164,9 +165,8 @@ void handle_arp_manual(uint8_t* buf, int len) {
     log_debug("[ARP] Request for %s from %02X:%02X:%02X:%02X:%02X:%02X\n", 
         TAP_GW, arp->sha[0], arp->sha[1], arp->sha[2], arp->sha[3], arp->sha[4], arp->sha[5]);
 
-    // Use a larger buffer to ensure min ethernet frame size (60 bytes + CRC)
     uint8_t reply[64]; 
-    memset(reply, 0, sizeof(reply)); // Padding with zeros
+    memset(reply, 0, sizeof(reply)); 
 
     EthHeader* reth = (EthHeader*)reply;
     ArpPacket* rarp = (ArpPacket*)(reply + sizeof(EthHeader));
@@ -188,7 +188,6 @@ void handle_arp_manual(uint8_t* buf, int len) {
     rarp->tpa = arp->spa;
 
     DWORD written;
-    // Send 42 bytes is usually fine, but 60 is safer
     WriteFile(g_tap, reply, 42, &written, NULL); 
     log_debug("[ARP] Replied: I am %s (MAC: %02X:%02X...)\n", TAP_GW, TAP_MAC[0], TAP_MAC[1]);
 }
@@ -350,7 +349,6 @@ void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
     
     DWORD timeout = 2000;
     setsockopt(udp, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-
     sockaddr_in dest;
     dest.sin_family = AF_INET;
     dest.sin_addr.S_un.S_addr = ::inet_addr("8.8.8.8");
@@ -409,6 +407,7 @@ void process_tap_frame(uint8_t* buf, int len) {
 
     struct ip_hdr* ip = (struct ip_hdr*)(buf + 14);
     
+    // 1. DNS Direct Intercept
     if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_UDP) {
         uint8_t* udp = buf + 14 + IPH_HL(ip) * 4;
         uint16_t dport = *(uint16_t*)(udp + 2);
@@ -423,6 +422,7 @@ void process_tap_frame(uint8_t* buf, int len) {
         }
     }
 
+    // 2. TCP NAT
     if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
         uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
         uint16_t src_port = *(uint16_t*)(tcp_base); 
@@ -462,9 +462,11 @@ err_t netif_init_cb(struct netif* netif) {
 
 int main() {
     char devicePath[256];
+    // FIXED: Removed "Global" prefix which caused Error Code 2 on some systems
     sprintf_s(devicePath, sizeof(devicePath), "\\\\.\\%s.tap", "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}");
     log_debug("Opening TAP device: %s\n", devicePath);
 
+    // KEY FIX: Use Overlapped I/O to avoid blocking LwIP timers
     g_tap = CreateFileA(devicePath, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, 0);
     
     if (g_tap == INVALID_HANDLE_VALUE) { 
@@ -484,7 +486,7 @@ int main() {
     ip4addr_aton(TAP_NETMASK, &mask);
     ip4addr_aton(TAP_GW, &gw);
 
-    netif_add(&g_netif, &ip, &mask, &gw, NULL, netif_init_cb, netif_input);
+    netif_add(&g_netif, &ip, &mask, &gw, NULL, netif_init_cb, ethernet_input);
     netif_set_default(&g_netif);
 
     struct tcp_pcb* pcb = tcp_new();
