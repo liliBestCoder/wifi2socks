@@ -143,35 +143,22 @@ uint16_t ip_chksum_simple(void* dataptr, int len) {
 }
 
 void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len) {
+    struct pbuf p;
+    p.next = NULL;
+    p.payload = tcp_base;
+    p.len = (u16_t)tcp_len;
+    p.tot_len = (u16_t)tcp_len;
+    p.type = PBUF_REF; 
+
+    ip_addr_t src, dst;
+    ip4_addr_set_u32(&src, ip->src.addr);
+    ip4_addr_set_u32(&dst, ip->dest.addr);
+
     // Zero out the checksum field before calculation
     *(uint16_t*)(tcp_base + 16) = 0;
 
-    // Calculate checksum of the TCP data (Header + Payload)
-    // inet_chksum returns the inverted 16-bit sum
-    u16_t data_sum = inet_chksum(tcp_base, tcp_len);
-
-    // Calculate Pseudo Header Sum
-    // We can accumulate the pseudo header manually and combine.
-    // The pseudo header contains: SrcIP(4), DstIP(4), Zero(1), Proto(1), TCP_Len(2)
-    
-    uint32_t sum = 0;
-    sum += (ip->src.addr & 0xFFFF);
-    sum += (ip->src.addr >> 16) & 0xFFFF;
-    sum += (ip->dest.addr & 0xFFFF);
-    sum += (ip->dest.addr >> 16) & 0xFFFF;
-    sum += ::htons(IP_PROTO_TCP);
-    sum += ::htons((uint16_t)tcp_len);
-    
-    // Combine with the data checksum
-    // Note: inet_chksum returns ~Sum. We need Sum.
-    // So we add ~data_sum to our accumulator.
-    sum += (uint16_t)(~data_sum);
-
-    // Fold 32-bit sum to 16-bit
-    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
-    
-    // Store inverted result
-    *(uint16_t*)(tcp_base + 16) = (uint16_t)~sum;
+    // Use LwIP's standard function
+    *(uint16_t*)(tcp_base + 16) = inet_chksum_pseudo(&p, IP_PROTO_TCP, (u16_t)tcp_len, &src, &dst);
 }
 
 // --- ASYNC WRITE HELPER ---
@@ -566,51 +553,42 @@ void process_tap_frame(uint8_t* buf, int len) {
 
     struct ip_hdr* ip = (struct ip_hdr*)(buf + 14);
     
-    // 1. DNS Direct Intercept
-    if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_UDP) {
-        uint8_t* udp = buf + 14 + IPH_HL(ip) * 4;
-        uint16_t dport = *(uint16_t*)(udp + 2);
-        if (::ntohs(dport) == 53) {
-            uint8_t* payload = udp + 8;
-            int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
-            if (pay_len > 0) {
-                std::vector<uint8_t> data(payload, payload + pay_len);
-                std::thread(dns_direct_thread, data, ip->src.addr, *(uint16_t*)udp).detach();
+    // Check if it's IPv4
+    if (IPH_V(ip) == 4) {
+        // TCP NAT Logic
+        if (IPH_PROTO(ip) == IP_PROTO_TCP) {
+            uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
+            uint16_t src_port = *(uint16_t*)(tcp_base); 
+            uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
+            uint32_t dst_ip = ip->dest.addr;
+
+            {
+                std::lock_guard<std::mutex> lk(g_nat_mtx);
+                NatEntry& e = g_nat_table[::ntohs(src_port)]; 
+                e.original_dst_ip = dst_ip;
+                e.original_dst_port = dst_port; 
+                e.last_active = get_now_ms();
             }
-            return; 
-        }
-    }
 
-    // 2. TCP NAT
-    if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
-        uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
-        uint16_t src_port = *(uint16_t*)(tcp_base); 
-        uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
-        uint32_t dst_ip = ip->dest.addr;
+            ip->dest.addr = ::inet_addr(TAP_GW);
+            *(uint16_t*)(tcp_base + 2) = ::htons(LWIP_LISTEN_PORT);
 
-        {
-            std::lock_guard<std::mutex> lk(g_nat_mtx);
-            NatEntry& e = g_nat_table[::ntohs(src_port)]; 
-            e.original_dst_ip = dst_ip;
-            e.original_dst_port = dst_port; 
-            e.last_active = get_now_ms();
+            IPH_CHKSUM_SET(ip, 0);
+            IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+            
+            uint16_t ip_len = ::ntohs(*(uint16_t*)((uint8_t*)ip + 2));
+            int tcp_len = ip_len - IPH_HL(ip) * 4;
+            if (tcp_len > 0) {
+                recalculate_tcp_checksum(ip, tcp_base, tcp_len);
+            }
         }
 
-        ip->dest.addr = ::inet_addr(TAP_GW);
-        *(uint16_t*)(tcp_base + 2) = ::htons(LWIP_LISTEN_PORT);
-
-        IPH_CHKSUM_SET(ip, 0);
-        IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
-        
-        uint16_t ip_len = ::ntohs(*(uint16_t*)((uint8_t*)ip + 2));
-        int tcp_len = ip_len - IPH_HL(ip) * 4;
-        if (tcp_len > 0) {
-            recalculate_tcp_checksum(ip, tcp_base, tcp_len);
-        }
-        
+        // Pass ALL IPv4 packets to LwIP (TCP NAT'd, UDP/ICMP as is)
         struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
-        pbuf_take(p, buf, len);
-        if (g_netif.input(p, &g_netif) != ERR_OK) pbuf_free(p);
+        if (p) {
+            pbuf_take(p, buf, len);
+            if (g_netif.input(p, &g_netif) != ERR_OK) pbuf_free(p);
+        }
     }
 }
 
