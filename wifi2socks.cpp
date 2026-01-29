@@ -330,170 +330,87 @@ std::string parse_tls_sni(const uint8_t* data, size_t len) {
 
 
 
+// --- Thread Safety ---
+std::recursive_mutex g_lwip_mtx;
+
 // --- TCP Logic ---
-enum TcpProxyState {
-    TCP_STATE_NONE,
-    TCP_STATE_WAIT_CLIENT_HELLO, 
-    TCP_STATE_CONNECTING_PROXY,  
-    TCP_STATE_HANDSHAKE_SENT,    
-    TCP_STATE_ESTABLISHED        
-};
-
 struct TcpCtx {
-    struct tcp_pcb* client_pcb; 
-    struct tcp_pcb* proxy_pcb; 
-    TcpProxyState state;
+    struct tcp_pcb* client_pcb;
+    SOCKET proxy_socket;
+    std::atomic<bool> closed;
     NatEntry target;
-    std::vector<uint8_t> buffer; 
-    TcpCtx() : client_pcb(NULL), proxy_pcb(NULL), state(TCP_STATE_NONE) {}
+    std::vector<uint8_t> buffer;
+
+    TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false) {}
 };
 
-err_t tcp_proxy_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err);
-err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err);
-
-void tcp_close_both(TcpCtx* ctx) {
-    if (!ctx) return;
+void close_tcp_ctx(TcpCtx* ctx) {
+    if (!ctx || ctx->closed.exchange(true)) return;
+    std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
     if (ctx->client_pcb) {
         tcp_arg(ctx->client_pcb, NULL);
+        tcp_recv(ctx->client_pcb, NULL);
+        tcp_err(ctx->client_pcb, NULL);
         tcp_close(ctx->client_pcb);
         ctx->client_pcb = NULL;
     }
-    if (ctx->proxy_pcb) {
-        tcp_arg(ctx->proxy_pcb, NULL);
-        tcp_close(ctx->proxy_pcb);
-        ctx->proxy_pcb = NULL;
+    if (ctx->proxy_socket != INVALID_SOCKET) {
+        closesocket(ctx->proxy_socket);
+        ctx->proxy_socket = INVALID_SOCKET;
     }
-    delete ctx;
 }
 
-err_t on_proxy_connected(void* arg, struct tcp_pcb* tpcb, err_t err) {
-    TcpCtx* ctx = (TcpCtx*)arg;
-    if (err != ERR_OK) {
-        log_debug("[-] Proxy Connect Failed\n");
-        tcp_close_both(ctx);
-        return ERR_OK;
-    }
-
-    std::string sni = parse_tls_sni(ctx->buffer.data(), ctx->buffer.size());
-    std::string target_host;
-    
-    if (!sni.empty()) {
-        target_host = sni;
-        log_debug("[TCP] SNI Detected: %s\n", sni.c_str());
-    } else {
-        char ip_str[64];
-        struct in_addr ia;
-        ia.S_un.S_addr = ctx->target.original_dst_ip;
-        strcpy_s(ip_str, ::inet_ntoa(ia));
-        target_host = ip_str;
-        log_debug("[TCP] No SNI, using IP: %s\n", ip_str);
-    }
-
-    char cmd[512];
-    sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", 
-        target_host.c_str(), ::ntohs(ctx->target.original_dst_port),
-        target_host.c_str(), ::ntohs(ctx->target.original_dst_port));
-        
-    tcp_write(tpcb, cmd, (u16_t)strlen(cmd), 1);
-    tcp_output(tpcb);
-    
-    ctx->state = TCP_STATE_HANDSHAKE_SENT;
-    return ERR_OK;
-}
-
-err_t tcp_proxy_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
-    TcpCtx* ctx = (TcpCtx*)arg;
-    if (!p) { tcp_close_both(ctx); return ERR_OK; }
-    
-    tcp_recved(tpcb, p->tot_len);
-
-    if (ctx->state == TCP_STATE_ESTABLISHED) {
-        if (ctx->client_pcb) {
-            tcp_write(ctx->client_pcb, p->payload, p->len, 1);
-            tcp_output(ctx->client_pcb);
-        }
-    } else if (ctx->state == TCP_STATE_HANDSHAKE_SENT) {
-        char* data = (char*)p->payload;
-        if (p->len > 12 && strncmp(data, "HTTP/1.1 200", 12) == 0) {
-            uint8_t* body = NULL;
-            int body_len = 0;
-            for (int i = 0; i < p->len - 3; ++i) {
-                if (data[i] == '\r' && data[i+1] == '\n' && data[i+2] == '\r' && data[i+3] == '\n') {
-                    body = (uint8_t*)data + i + 4;
-                    body_len = p->len - (i + 4);
-                    break;
-                }
-            }
-            ctx->state = TCP_STATE_ESTABLISHED;
-            if (!ctx->buffer.empty()) {
-                tcp_write(tpcb, ctx->buffer.data(), (u16_t)ctx->buffer.size(), 1);
-                ctx->buffer.clear();
-            }
-            if (body && body_len > 0 && ctx->client_pcb) {
-                tcp_write(ctx->client_pcb, body, (u16_t)body_len, 1);
+void proxy_reader_loop(TcpCtx* ctx) {
+    char buf[8192];
+    while (!ctx->closed) {
+        int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
+        if (r <= 0) break;
+        std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
+        if (ctx->client_pcb && !ctx->closed) {
+            if (tcp_write(ctx->client_pcb, buf, (u16_t)r, 1) == ERR_OK) {
                 tcp_output(ctx->client_pcb);
-            }
-            tcp_output(tpcb);
-        } else {
-            tcp_close_both(ctx);
-            pbuf_free(p);
-            return ERR_OK;
-        }
+            } else break;
+        } else break;
     }
-    pbuf_free(p);
-    return ERR_OK;
+    close_tcp_ctx(ctx);
 }
 
 err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
     TcpCtx* ctx = (TcpCtx*)arg;
-    if (!p) { tcp_close_both(ctx); return ERR_OK; }
-    
+    if (!p) { close_tcp_ctx(ctx); return ERR_OK; }
     tcp_recved(tpcb, p->tot_len);
-
-    if (ctx->state == TCP_STATE_ESTABLISHED) {
-        if (ctx->proxy_pcb) {
-            tcp_write(ctx->proxy_pcb, p->payload, p->len, 1);
-            tcp_output(ctx->proxy_pcb);
-        }
-    } else if (ctx->state == TCP_STATE_WAIT_CLIENT_HELLO) {
-        uint8_t* d = (uint8_t*)p->payload;
-        ctx->buffer.insert(ctx->buffer.end(), d, d + p->len);
-        
-        log_debug("[TCP-RECV] Buffer size: %d. First byte: 0x%02X\n", (int)ctx->buffer.size(), ctx->buffer.empty() ? 0 : ctx->buffer[0]);
-
-        bool ready_to_connect = false;
-        
-        if (ctx->buffer.size() >= 2048) {
-            ready_to_connect = true;
-        } else if (ctx->buffer.size() >= 5) {
-            if (ctx->buffer[0] != 0x16) {
-                // Not TLS handshake, connect immediately
-                ready_to_connect = true;
-            } else {
-                // Is TLS, check length
-                uint16_t rec_len = ((uint16_t)ctx->buffer[3] << 8) | ctx->buffer[4];
-                log_debug("[TCP-RECV] TLS Record Length: %d\n", rec_len);
-                if (ctx->buffer.size() >= (size_t)(5 + rec_len)) {
-                    ready_to_connect = true;
-                }
-            }
-        }
-
-        if (ready_to_connect) {
-            log_debug("[TCP-RECV] Ready to connect proxy. State -> CONNECTING_PROXY\n");
-            ctx->state = TCP_STATE_CONNECTING_PROXY;
-            struct tcp_pcb* proxy_pcb = tcp_new();
-            ctx->proxy_pcb = proxy_pcb;
-            tcp_arg(proxy_pcb, ctx);
-            tcp_recv(proxy_pcb, tcp_proxy_recv);
-            
-            ip_addr_t proxy_ip;
-            ip4_addr_set_u32(&proxy_ip, ::inet_addr(PROXY_IP)); 
-            tcp_connect(proxy_pcb, &proxy_ip, PROXY_PORT, on_proxy_connected);
-        }
+    if (ctx->proxy_socket != INVALID_SOCKET) {
+        send(ctx->proxy_socket, (const char*)p->payload, p->len, 0);
     } else {
         uint8_t* d = (uint8_t*)p->payload;
         ctx->buffer.insert(ctx->buffer.end(), d, d + p->len);
+        bool ready = false;
+        if (ctx->buffer.size() >= 5) {
+            if (ctx->buffer[0] != 0x16) ready = true;
+            else {
+                uint16_t tls_len = (ctx->buffer[3] << 8) | ctx->buffer[4];
+                if (ctx->buffer.size() >= (size_t)5 + tls_len) ready = true;
+            }
+        }
+        if (ready) {
+            ctx->proxy_socket = socket(AF_INET, SOCK_STREAM, 0);
+            sockaddr_in addr;
+            addr.sin_family = AF_INET;
+            addr.sin_addr.S_un.S_addr = inet_addr(PROXY_IP);
+            addr.sin_port = htons(PROXY_PORT);
+            if (connect(ctx->proxy_socket, (sockaddr*)&addr, sizeof(addr)) == 0) {
+                char cmd[512], ip_str[64];
+                struct in_addr ia; ia.S_un.S_addr = ctx->target.original_dst_ip;
+                strcpy_s(ip_str, ::inet_ntoa(ia));
+                sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", 
+                    ip_str, ntohs(ctx->target.original_dst_port), ip_str, ntohs(ctx->target.original_dst_port));
+                send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
+                char resp[1024]; recv(ctx->proxy_socket, resp, sizeof(resp), 0);
+                send(ctx->proxy_socket, (const char*)ctx->buffer.data(), (int)ctx->buffer.size(), 0);
+                ctx->buffer.clear();
+                std::thread(proxy_reader_loop, ctx).detach();
+            } else close_tcp_ctx(ctx);
+        }
     }
     pbuf_free(p);
     return ERR_OK;
@@ -501,28 +418,19 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
 
 err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     uint16_t client_port = newpcb->remote_port;
-    log_debug("[TCP-ACCEPT] Incoming connection from port %d\n", client_port);
-
     NatEntry target = { 0 };
     {
         std::lock_guard<std::mutex> lk(g_nat_mtx);
         auto it = g_nat_table.find(client_port);
-        if (it != g_nat_table.end()) {
-            target = it->second;
-            log_debug("[TCP-ACCEPT] Found NAT target: %08x:%d\n", target.original_dst_ip, target.original_dst_port);
-        } else {
-            log_debug("[TCP-ACCEPT] No NAT entry found for port %d\n", client_port);
-        }
+        if (it != g_nat_table.end()) target = it->second;
     }
     if (target.original_dst_ip == 0) return ERR_ABRT;
-
     TcpCtx* ctx = new TcpCtx();
     ctx->client_pcb = newpcb;
     ctx->target = target;
-    ctx->state = TCP_STATE_WAIT_CLIENT_HELLO; 
-
     tcp_arg(newpcb, ctx);
     tcp_recv(newpcb, tcp_client_recv);
+    tcp_err(newpcb, [](void* arg, err_t err) { close_tcp_ctx((TcpCtx*)arg); });
     return ERR_OK;
 }
 
@@ -736,7 +644,10 @@ int main() {
                 }
                 pending = true;
             } else {
-                process_tap_frame(buffer, bytesRead);
+                {
+                    std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
+                    process_tap_frame(buffer, bytesRead);
+                }
                 pending = false; 
                 ol.Offset = 0; ol.OffsetHigh = 0; 
             }
@@ -746,6 +657,7 @@ int main() {
             DWORD waitRes = WaitForSingleObject(ol.hEvent, 5); 
             if (waitRes == WAIT_OBJECT_0) {
                 if (GetOverlappedResult(g_tap, &ol, &bytesRead, FALSE)) {
+                    std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
                     process_tap_frame(buffer, bytesRead);
                 }
                 pending = false;
@@ -753,7 +665,11 @@ int main() {
                 ol.Offset = 0; ol.OffsetHigh = 0;
             }
         }
-        sys_check_timeouts();
+
+        {
+            std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
+            sys_check_timeouts();
+        }
     }
     return 0;
 }
