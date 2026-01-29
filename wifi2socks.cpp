@@ -1,4 +1,5 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
+#define NOMINMAX
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -428,7 +429,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
             
             if (ctx->proxy_socket == INVALID_SOCKET) {
                 if (ctx->sni_buffer.size() < MAX_SNI_LEN) {
-                    size_t to_copy = std::min((size_t)p->len, (size_t)(MAX_SNI_LEN - ctx->sni_buffer.size()));
+                    size_t to_copy = (std::min)((size_t)p->len, (size_t)(MAX_SNI_LEN - ctx->sni_buffer.size()));
                     ctx->sni_buffer.insert(ctx->sni_buffer.end(), d, d + to_copy);
                 }
                 
