@@ -96,6 +96,15 @@ HANDLE g_tap = INVALID_HANDLE_VALUE;
 struct netif g_netif;
 uint8_t TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C }; // Real MAC
 
+// --- Global NAT Table ---
+struct NatEntry {
+    uint32_t original_dst_ip;
+    uint16_t original_dst_port;
+    uint64_t last_active;
+};
+std::map<uint16_t, NatEntry> g_nat_table;
+std::mutex g_nat_mtx;
+
 // --- Forward Declarations ---
 void handle_arp_manual(uint8_t* buf, int len);
 void tap_send_async(const uint8_t* buf, int len);
@@ -289,14 +298,7 @@ std::string parse_tls_sni(const uint8_t* data, size_t len) {
     return "";
 }
 
-// --- Global NAT Table ---
-struct NatEntry {
-    uint32_t original_dst_ip;
-    uint16_t original_dst_port;
-    uint64_t last_active;
-};
-std::map<uint16_t, NatEntry> g_nat_table;
-std::mutex g_nat_mtx;
+
 
 // --- TCP Logic ---
 enum TcpProxyState {
@@ -362,7 +364,7 @@ err_t on_proxy_connected(void* arg, struct tcp_pcb* tpcb, err_t err) {
         target_host.c_str(), ::ntohs(ctx->target.original_dst_port),
         target_host.c_str(), ::ntohs(ctx->target.original_dst_port));
         
-    tcp_write(tpcb, cmd, strlen(cmd), 1);
+    tcp_write(tpcb, cmd, (u16_t)strlen(cmd), 1);
     tcp_output(tpcb);
     
     ctx->state = TCP_STATE_HANDSHAKE_SENT;
@@ -394,11 +396,11 @@ err_t tcp_proxy_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err)
             }
             ctx->state = TCP_STATE_ESTABLISHED;
             if (!ctx->buffer.empty()) {
-                tcp_write(tpcb, ctx->buffer.data(), ctx->buffer.size(), 1);
+                tcp_write(tpcb, ctx->buffer.data(), (u16_t)ctx->buffer.size(), 1);
                 ctx->buffer.clear();
             }
             if (body && body_len > 0 && ctx->client_pcb) {
-                tcp_write(ctx->client_pcb, body, body_len, 1);
+                tcp_write(ctx->client_pcb, body, (u16_t)body_len, 1);
                 tcp_output(ctx->client_pcb);
             }
             tcp_output(tpcb);
