@@ -149,6 +149,47 @@ void tap_send_async(const uint8_t* buf, int len) {
     CloseHandle(ol.hEvent);
 }
 
+void handle_arp_manual(uint8_t* buf, int len) {
+    if (len < sizeof(EthHeader) + sizeof(ArpPacket)) return;
+
+    EthHeader* eth = (EthHeader*)buf;
+    ArpPacket* arp = (ArpPacket*)(buf + sizeof(EthHeader));
+
+    if (::ntohs(arp->htype) != 1 || ::ntohs(arp->ptype) != 0x0800 || 
+        arp->hlen != 6 || arp->plen != 4) return;
+
+    uint16_t oper = ::ntohs(arp->oper);
+    if (oper != 1) return; 
+
+    uint32_t target_ip = arp->tpa;
+    uint32_t my_ip = ::inet_addr(TAP_GW);
+    
+    if (target_ip != my_ip) return;
+
+    memcpy(eth->dst_mac, eth->src_mac, 6);
+    memcpy(eth->src_mac, TAP_MAC, 6);
+    
+    arp->oper = ::htons(2); 
+    
+    memcpy(arp->tha, arp->sha, 6);
+    arp->tpa = arp->spa;
+    
+    memcpy(arp->sha, TAP_MAC, 6);
+    arp->spa = my_ip;
+
+    tap_send_async(buf, len);
+}
+
+err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
+    std::vector<uint8_t> buf;
+    buf.reserve(p->tot_len);
+    for (struct pbuf* q = p; q != NULL; q = q->next) {
+        buf.insert(buf.end(), (uint8_t*)q->payload, (uint8_t*)q->payload + q->len);
+    }
+    tap_send_async(buf.data(), (int)buf.size());
+    return ERR_OK;
+}
+
 // --- SNI Parser ---
 std::string parse_tls_sni(const uint8_t* data, size_t len) {
     if (len < 5 || data[0] != 0x16) return ""; 
