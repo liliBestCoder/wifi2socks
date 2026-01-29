@@ -97,7 +97,9 @@ struct ArpPacket {
 // --- Globals ---
 HANDLE g_tap = INVALID_HANDLE_VALUE;
 struct netif g_netif;
-uint8_t TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C }; // Real MAC
+uint8_t TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C }; // Virtual Gateway MAC
+uint8_t HOST_MAC[6] = { 0 }; 
+std::atomic<bool> g_host_mac_known(false);
 
 // --- Global NAT Table ---
 struct NatEntry {
@@ -121,7 +123,6 @@ void log_debug(const char* format, ...) {
     vsnprintf(buf, sizeof(buf), format, ap);
     va_end(ap);
     OutputDebugStringA(buf);
-    printf("%s", buf);
 }
 
 // --- Platform Helper ---
@@ -145,7 +146,7 @@ uint16_t ip_chksum_simple(void* dataptr, int len) {
 }
 
 // --- Manual Checksum Implementation ---
-uint16_t checksum_raw_buffer(const void* data, int len) {
+uint32_t calculate_raw_sum(const void* data, int len) {
     uint32_t sum = 0;
     const uint16_t* ptr = (const uint16_t*)data;
     while (len > 1) {
@@ -153,12 +154,10 @@ uint16_t checksum_raw_buffer(const void* data, int len) {
         len -= 2;
     }
     if (len > 0) {
-        uint16_t temp = 0;
-        *(uint8_t*)&temp = *(const uint8_t*)ptr;
-        sum += temp;
+        // Handle the last byte: in TCP checksum it's treated as the high byte of a 16-bit word
+        sum += (uint16_t)(*(const uint8_t*)ptr << 8);
     }
-    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
-    return (uint16_t)~sum;
+    return sum;
 }
 
 void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len) {
@@ -175,16 +174,19 @@ void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len)
     sum += ip_dst[0];
     sum += ip_dst[1];
 
-    // Pseudo Header: Protocol (0x0006 in Network Order)
+    // Pseudo Header: Protocol (TCP = 6)
     sum += ::htons(IP_PROTO_TCP); 
 
     // Pseudo Header: Length
     sum += ::htons((uint16_t)tcp_len);
 
-    // TCP Segment
-    sum += checksum_raw_buffer(tcp_base, tcp_len);
+    // TCP Segment (Header + Data)
+    sum += calculate_raw_sum(tcp_base, tcp_len);
 
+    // Fold 32-bit sum to 16-bit
     while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    
+    // Final inversion
     *(uint16_t*)(tcp_base + 16) = (uint16_t)~sum;
 }
 
@@ -501,7 +503,7 @@ void udp_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
     SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
     if (udp == INVALID_SOCKET) return; 
     
-    DWORD timeout = 2000;
+    DWORD timeout = 1000;
     setsockopt(udp, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
 
     sockaddr_in dest;
@@ -516,11 +518,11 @@ void udp_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
     int from_len = sizeof(from_addr);
     int r = recvfrom(udp, buf, sizeof(buf), 0, (sockaddr*)&from_addr, &from_len);
     
-    if (r > 0) {
+    if (r > 0 && g_host_mac_known) {
         uint8_t frame[2048];
         if (14 + 20 + 8 + r > sizeof(frame)) { closesocket(udp); return; }
 
-        memcpy(frame, TAP_MAC, 6);
+        memcpy(frame, HOST_MAC, 6);
         memcpy(frame + 6, TAP_MAC, 6);
         *(uint16_t*)(frame + 12) = ::htons(0x0800);
 
@@ -536,8 +538,7 @@ void udp_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
         *(uint32_t*)(ip + 16) = src_ip;  
         *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
 
-        *(uint16_t*)(udp_hdr + 0) = dst_port;
-        *(uint16_t*)(udp_hdr + 2) = src_port;
+        *(uint16_t*)(udp_hdr + 0) = dst_port;\n        *(uint16_t*)(udp_hdr + 2) = src_port;
         *(uint16_t*)(udp_hdr + 4) = ::htons((uint16_t)(8 + r));
         *(uint16_t*)(udp_hdr + 6) = 0; 
         
@@ -551,6 +552,13 @@ void udp_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
 // --- Main Processing ---
 void process_tap_frame(uint8_t* buf, int len) {
     if (len < 14) return;
+
+    // Capture Host MAC from the first packet
+    if (!g_host_mac_known) {
+        memcpy(HOST_MAC, buf + 6, 6);
+        g_host_mac_known = true;
+    }
+
     uint16_t eth_type = ::ntohs(*(uint16_t*)(buf + 12));
 
     if (eth_type == 0x0806) {
@@ -594,7 +602,6 @@ void process_tap_frame(uint8_t* buf, int len) {
                 e.original_dst_ip = dst_ip;
                 e.original_dst_port = dst_port; 
                 e.last_active = get_now_ms();
-                log_debug("[NAT] Added/Updated entry for client port %d -> %08x:%d\n", ::ntohs(src_port), dst_ip, dst_port);
             }
 
             ip->dest.addr = ::inet_addr(TAP_GW);
@@ -614,9 +621,7 @@ void process_tap_frame(uint8_t* buf, int len) {
         struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         if (p) {
             pbuf_take(p, buf, len);
-            err_t err = g_netif.input(p, &g_netif);
-            if (err != ERR_OK) {
-                printf("[LwIP-IN] Input failed: %d\n", err);
+            if (g_netif.input(p, &g_netif) != ERR_OK) {
                 pbuf_free(p);
             }
         }
