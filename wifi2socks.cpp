@@ -250,9 +250,6 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
                  uint16_t src_port = *(uint16_t*)tcp_base;
                  uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
                  
-                 // Debug: LwIP is sending a packet
-                 printf("[LwIP-OUT] SrcPort=%d DstPort=%d\n", ::ntohs(src_port), ::ntohs(dst_port));
-
                  if (src_port == ::htons(LWIP_LISTEN_PORT)) {
                      NatEntry target = { 0 };
                      {
@@ -262,7 +259,6 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
                      }
                      
                      if (target.original_dst_ip != 0) {
-                         // Found NAT entry, Reverse NAT
                          ip->src.addr = target.original_dst_ip;
                          *(uint16_t*)tcp_base = target.original_dst_port;
                          
@@ -271,11 +267,7 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
                          
                          uint16_t ip_len = ::ntohs(*(uint16_t*)((uint8_t*)ip + 2));
                          int tcp_len = ip_len - IPH_HL(ip) * 4;
-                         
-                         printf("[NAT-REV] Restoring to SrcIP=%x SrcPort=%d\n", target.original_dst_ip, ::ntohs(target.original_dst_port));
                          recalculate_tcp_checksum(ip, tcp_base, tcp_len);
-                     } else {
-                         printf("[-] NAT entry not found for port %d\n", ::ntohs(dst_port));
                      }
                  }
              }
@@ -339,11 +331,15 @@ struct TcpCtx {
     struct tcp_pcb* client_pcb;
     SOCKET proxy_socket;
     std::atomic<bool> closed;
+    std::atomic<bool> connected;
     NatEntry target;
-    std::vector<uint8_t> buffer;
+    std::vector<uint8_t> sni_buffer;
+    std::vector<uint8_t> upstream_data;
+    std::mutex data_mtx;
 
-    TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false) {
-        buffer.reserve(MAX_SNI_LEN);
+    TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false) {
+        sni_buffer.reserve(MAX_SNI_LEN);
+        upstream_data.reserve(4096);
     }
 };
 
@@ -364,7 +360,7 @@ void close_tcp_ctx(TcpCtx* ctx) {
 }
 
 void proxy_reader_loop(TcpCtx* ctx) {
-    char buf[8192];
+    char buf[16384];
     while (!ctx->closed) {
         int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
         if (r <= 0) break;
@@ -378,63 +374,78 @@ void proxy_reader_loop(TcpCtx* ctx) {
     close_tcp_ctx(ctx);
 }
 
+void proxy_init_thread(TcpCtx* ctx) {
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_addr.S_un.S_addr = inet_addr(PROXY_IP);
+    addr.sin_port = htons(PROXY_PORT);
+
+    if (connect(ctx->proxy_socket, (sockaddr*)&addr, sizeof(addr)) == 0) {
+        std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());
+        std::string target_host;
+        if (!sni.empty()) target_host = sni;
+        else {
+            char ip_str[64]; struct in_addr ia; ia.S_un.S_addr = ctx->target.original_dst_ip;
+            strcpy_s(ip_str, ::inet_ntoa(ia)); target_host = ip_str;
+        }
+
+        char cmd[1024];
+        uint16_t port = ntohs(ctx->target.original_dst_port);
+        sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", target_host.c_str(), port, target_host.c_str(), port);
+        send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
+
+        char resp[1024];
+        recv(ctx->proxy_socket, resp, sizeof(resp), 0);
+
+        {
+            std::lock_guard<std::mutex> lock(ctx->data_mtx);
+            if (!ctx->upstream_data.empty()) {
+                send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
+                ctx->upstream_data.clear();
+            }
+            ctx->connected = true;
+        }
+        proxy_reader_loop(ctx);
+    } else {
+        close_tcp_ctx(ctx);
+    }
+}
+
 err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
     TcpCtx* ctx = (TcpCtx*)arg;
     if (!p) { close_tcp_ctx(ctx); return ERR_OK; }
     tcp_recved(tpcb, p->tot_len);
-    if (ctx->proxy_socket != INVALID_SOCKET) {
+
+    if (ctx->connected) {
         send(ctx->proxy_socket, (const char*)p->payload, p->len, 0);
     } else {
-        uint8_t* d = (uint8_t*)p->payload;
-        ctx->buffer.insert(ctx->buffer.end(), d, d + p->len);
-        bool ready = false;
-        if (ctx->buffer.size() >= MAX_SNI_LEN) {
-            ready = true;
-        } else if (ctx->buffer.size() >= 5) {
-            if (ctx->buffer[0] != 0x16) ready = true;
-            else {
-                uint16_t tls_len = (ctx->buffer[3] << 8) | ctx->buffer[4];
-                if (ctx->buffer.size() >= (size_t)5 + tls_len) ready = true;
-            }
-        }
-        if (ready) {
-            ctx->proxy_socket = socket(AF_INET, SOCK_STREAM, 0);
-            sockaddr_in addr;
-            addr.sin_family = AF_INET;
-            addr.sin_addr.S_un.S_addr = inet_addr(PROXY_IP);
-            addr.sin_port = htons(PROXY_PORT);
-            if (connect(ctx->proxy_socket, (sockaddr*)&addr, sizeof(addr)) == 0) {
-                // 尝试解析 SNI 域名
-                std::string sni = parse_tls_sni(ctx->buffer.data(), ctx->buffer.size());
-                std::string target_host;
-                
-                if (!sni.empty()) {
-                    target_host = sni;
-                    log_debug("[TCP] SNI Detected for CONNECT: %s\n", sni.c_str());
-                } else {
-                    char ip_str[64];
-                    struct in_addr ia; ia.S_un.S_addr = ctx->target.original_dst_ip;
-                    strcpy_s(ip_str, ::inet_ntoa(ia));
-                    target_host = ip_str;
+        std::lock_guard<std::mutex> lock(ctx->data_mtx);
+        if (ctx->connected) {
+            send(ctx->proxy_socket, (const char*)p->payload, p->len, 0);
+        } else {
+            uint8_t* d = (uint8_t*)p->payload;
+            ctx->upstream_data.insert(ctx->upstream_data.end(), d, d + p->len);
+            
+            if (ctx->proxy_socket == INVALID_SOCKET) {
+                if (ctx->sni_buffer.size() < MAX_SNI_LEN) {
+                    size_t to_copy = std::min((size_t)p->len, (size_t)(MAX_SNI_LEN - ctx->sni_buffer.size()));
+                    ctx->sni_buffer.insert(ctx->sni_buffer.end(), d, d + to_copy);
                 }
-
-                char cmd[1024];
-                uint16_t port = ntohs(ctx->target.original_dst_port);
-                sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", 
-                    target_host.c_str(), port, target_host.c_str(), port);
                 
-                send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
-                
-                // 简单的读取响应
-                char resp[1024];
-                int res = recv(ctx->proxy_socket, resp, sizeof(resp), 0);
-                
-                // 发送之前缓存的 Client Hello / 数据
-                send(ctx->proxy_socket, (const char*)ctx->buffer.data(), (int)ctx->buffer.size(), 0);
-                ctx->buffer.clear();
-                
-                std::thread(proxy_reader_loop, ctx).detach();
-            } else close_tcp_ctx(ctx);
+                bool ready = false;
+                if (ctx->sni_buffer.size() >= MAX_SNI_LEN) ready = true;
+                else if (ctx->sni_buffer.size() >= 5) {
+                    if (ctx->sni_buffer[0] != 0x16) ready = true;
+                    else {
+                        uint16_t tls_len = ((uint16_t)ctx->sni_buffer[3] << 8) | ctx->sni_buffer[4];
+                        if (ctx->sni_buffer.size() >= (size_t)5 + tls_len) ready = true;
+                    }
+                }
+                if (ready) {
+                    ctx->proxy_socket = socket(AF_INET, SOCK_STREAM, 0);
+                    std::thread(proxy_init_thread, ctx).detach();
+                }
+            }
         }
     }
     pbuf_free(p);
@@ -450,6 +461,8 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
         if (it != g_nat_table.end()) target = it->second;
     }
     if (target.original_dst_ip == 0) return ERR_ABRT;
+    
+    tcp_nagle_disable(newpcb);
     TcpCtx* ctx = new TcpCtx();
     ctx->client_pcb = newpcb;
     ctx->target = target;
