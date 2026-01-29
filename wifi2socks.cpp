@@ -459,6 +459,8 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         uint8_t* d = (uint8_t*)p->payload;
         ctx->buffer.insert(ctx->buffer.end(), d, d + p->len);
         
+        log_debug("[TCP-RECV] Buffer size: %d. First byte: 0x%02X\n", (int)ctx->buffer.size(), ctx->buffer.empty() ? 0 : ctx->buffer[0]);
+
         bool ready_to_connect = false;
         
         if (ctx->buffer.size() >= 2048) {
@@ -470,6 +472,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
             } else {
                 // Is TLS, check length
                 uint16_t rec_len = ((uint16_t)ctx->buffer[3] << 8) | ctx->buffer[4];
+                log_debug("[TCP-RECV] TLS Record Length: %d\n", rec_len);
                 if (ctx->buffer.size() >= (size_t)(5 + rec_len)) {
                     ready_to_connect = true;
                 }
@@ -477,6 +480,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         }
 
         if (ready_to_connect) {
+            log_debug("[TCP-RECV] Ready to connect proxy. State -> CONNECTING_PROXY\n");
             ctx->state = TCP_STATE_CONNECTING_PROXY;
             struct tcp_pcb* proxy_pcb = tcp_new();
             ctx->proxy_pcb = proxy_pcb;
@@ -497,11 +501,18 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
 
 err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     uint16_t client_port = newpcb->remote_port;
+    log_debug("[TCP-ACCEPT] Incoming connection from port %d\n", client_port);
+
     NatEntry target = { 0 };
     {
         std::lock_guard<std::mutex> lk(g_nat_mtx);
         auto it = g_nat_table.find(client_port);
-        if (it != g_nat_table.end()) target = it->second;
+        if (it != g_nat_table.end()) {
+            target = it->second;
+            log_debug("[TCP-ACCEPT] Found NAT target: %08x:%d\n", target.original_dst_ip, target.original_dst_port);
+        } else {
+            log_debug("[TCP-ACCEPT] No NAT entry found for port %d\n", client_port);
+        }
     }
     if (target.original_dst_ip == 0) return ERR_ABRT;
 
@@ -636,6 +647,7 @@ void process_tap_frame(uint8_t* buf, int len) {
                 e.original_dst_ip = dst_ip;
                 e.original_dst_port = dst_port; 
                 e.last_active = get_now_ms();
+                log_debug("[NAT] Added/Updated entry for client port %d -> %08x:%d\n", ::ntohs(src_port), dst_ip, dst_port);
             }
 
             ip->dest.addr = ::inet_addr(TAP_GW);
