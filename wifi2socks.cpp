@@ -9,7 +9,7 @@
 #include <mutex>
 #include <ctime>
 #include <stdarg.h>
-#include <string>
+#include <atomic>
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -21,6 +21,7 @@
 #define sockaddr_in lwip_sockaddr_in
 #define sockaddr_storage lwip_sockaddr_storage
 #define linger      lwip_linger
+
 #define htonl       lwip_htonl
 #define ntohl       lwip_ntohl
 #define htons       lwip_htons
@@ -65,6 +66,7 @@ extern "C" {
 
 #define TAP_CONTROL_CODE(request, method) CTL_CODE(FILE_DEVICE_UNKNOWN, request, method, FILE_ANY_ACCESS)
 #define TAP_IOCTL_SET_MEDIA_STATUS TAP_CONTROL_CODE(6, METHOD_BUFFERED)
+
 #define TAP_WIN_PATH "\\\\.\\%s.tap"
 
 // --- Headers ---
@@ -73,6 +75,17 @@ struct EthHeader {
     uint8_t dst_mac[6];
     uint8_t src_mac[6];
     uint16_t type;
+};
+struct ArpPacket {
+    uint16_t htype;
+    uint16_t ptype;
+    uint8_t hlen;
+    uint8_t plen;
+    uint16_t oper;
+    uint8_t sha[6];
+    uint32_t spa;
+    uint8_t tha[6];
+    uint32_t tpa;
 };
 #pragma pack(pop)
 
@@ -112,63 +125,57 @@ uint16_t ip_chksum_simple(void* dataptr, int len) {
     return (uint16_t)~(acc);
 }
 
+// --- ASYNC WRITE HELPER ---
+std::mutex g_write_mtx;
+void tap_send_async(const uint8_t* buf, int len) {
+    if (len <= 0) return; 
+    std::lock_guard<std::mutex> lk(g_write_mtx);
+    OVERLAPPED ol = {0};
+    ol.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!ol.hEvent) return;
+    DWORD written = 0;
+    if (!WriteFile(g_tap, buf, len, &written, &ol)) {
+        if (GetLastError() == ERROR_IO_PENDING) {
+            WaitForSingleObject(ol.hEvent, 1000); 
+        }
+    }
+    CloseHandle(ol.hEvent);
+}
+
 // --- SNI Parser ---
-// Returns extracted hostname or empty string
 std::string parse_tls_sni(const uint8_t* data, size_t len) {
-    if (len < 5) return "";
-    
-    // TLS Record Header: Type(1) Ver(2) Len(2)
-    if (data[0] != 0x16) return ""; // Content Type: Handshake
-    // uint16_t record_len = (data[3] << 8) | data[4];
-    
+    if (len < 5 || data[0] != 0x16) return ""; 
     size_t pos = 5;
     if (pos + 4 > len) return "";
-    
-    // Handshake Header: Type(1) Len(3)
-    if (data[pos] != 0x01) return ""; // Msg Type: Client Hello
-    pos += 4; // Skip Handshake Header
-    
-    // Client Hello
+    if (data[pos] != 0x01) return ""; 
+    pos += 4; 
     if (pos + 2 > len) return "";
-    // uint16_t client_ver = (data[pos] << 8) | data[pos+1];
-    pos += 2; // Skip Client Version
-    
-    pos += 32; // Skip Random
-    
+    pos += 2; 
+    pos += 32; 
     if (pos + 1 > len) return "";
     uint8_t session_id_len = data[pos];
     pos += 1 + session_id_len;
-    
     if (pos + 2 > len) return "";
     uint16_t cipher_suite_len = (data[pos] << 8) | data[pos+1];
     pos += 2 + cipher_suite_len;
-    
     if (pos + 1 > len) return "";
     uint8_t comp_method_len = data[pos];
     pos += 1 + comp_method_len;
-    
     if (pos + 2 > len) return "";
     uint16_t ext_len = (data[pos] << 8) | data[pos+1];
     pos += 2;
-    
     size_t ext_end = pos + ext_len;
     if (ext_end > len) ext_end = len;
-    
     while (pos + 4 <= ext_end) {
         uint16_t ext_type = (data[pos] << 8) | data[pos+1];
         uint16_t ext_data_len = (data[pos+2] << 8) | data[pos+3];
         pos += 4;
-        
-        if (ext_type == 0x0000) { // Server Name
-            if (pos + 2 > ext_end) return "";
-            // uint16_t list_len = (data[pos] << 8) | data[pos+1];
+        if (ext_type == 0x0000) { 
+            if (pos + 5 > ext_end) return "";
             pos += 2; 
-            
-            if (pos + 3 > ext_end) return "";
-            uint8_t name_type = data[pos]; // 0x00 host_name
+            uint8_t name_type = data[pos]; 
             uint16_t name_len = (data[pos+1] << 8) | data[pos+2];
             pos += 3;
-            
             if (name_type == 0 && pos + name_len <= ext_end) {
                 return std::string((const char*)(data + pos), name_len);
             }
@@ -178,7 +185,7 @@ std::string parse_tls_sni(const uint8_t* data, size_t len) {
     return "";
 }
 
-// --- Global NAT Table ---
+// --- NAT State ---
 struct NatEntry {
     uint32_t original_dst_ip;
     uint16_t original_dst_port;
@@ -190,10 +197,10 @@ std::mutex g_nat_mtx;
 // --- TCP Logic ---
 enum TcpProxyState {
     TCP_STATE_NONE,
-    TCP_STATE_WAIT_CLIENT_HELLO, // Buffering data from browser
-    TCP_STATE_CONNECTING_PROXY,  // Connecting to 2080
-    TCP_STATE_HANDSHAKE_SENT,    // Sent HTTP CONNECT
-    TCP_STATE_ESTABLISHED        // Transmit
+    TCP_STATE_WAIT_CLIENT_HELLO,
+    TCP_STATE_CONNECTING_PROXY,
+    TCP_STATE_HANDSHAKE_SENT,
+    TCP_STATE_ESTABLISHED
 };
 
 struct TcpCtx {
@@ -201,13 +208,12 @@ struct TcpCtx {
     struct tcp_pcb* proxy_pcb; 
     TcpProxyState state;
     NatEntry target;
-    std::vector<uint8_t> buffer; // Buffer for initial data
-    
+    std::vector<uint8_t> buffer;
     TcpCtx() : client_pcb(NULL), proxy_pcb(NULL), state(TCP_STATE_NONE) {}
 };
 
 err_t tcp_proxy_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err);
-er_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err);
+err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err);
 
 void tcp_close_both(TcpCtx* ctx) {
     if (!ctx) return;
@@ -232,7 +238,6 @@ err_t on_proxy_connected(void* arg, struct tcp_pcb* tpcb, err_t err) {
         return ERR_OK;
     }
 
-    // Try to parse SNI from buffered data
     std::string sni = parse_tls_sni(ctx->buffer.data(), ctx->buffer.size());
     std::string target_host;
     
@@ -240,7 +245,6 @@ err_t on_proxy_connected(void* arg, struct tcp_pcb* tpcb, err_t err) {
         target_host = sni;
         log_debug("[TCP] SNI Detected: %s\n", sni.c_str());
     } else {
-        // Fallback to IP
         char ip_str[64];
         struct in_addr ia;
         ia.S_un.S_addr = ctx->target.original_dst_ip;
@@ -249,11 +253,8 @@ err_t on_proxy_connected(void* arg, struct tcp_pcb* tpcb, err_t err) {
         log_debug("[TCP] No SNI, using IP: %s\n", ip_str);
     }
 
-    // Send HTTP CONNECT
-    // CONNECT target:port HTTP/1.1
-    // Host: target:port
     char cmd[512];
-    sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", 
+    sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\\n\r\\n", 
         target_host.c_str(), ::ntohs(ctx->target.original_dst_port),
         target_host.c_str(), ::ntohs(ctx->target.original_dst_port));
         
@@ -276,13 +277,10 @@ err_t tcp_proxy_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err)
             tcp_output(ctx->client_pcb);
         }
     } else if (ctx->state == TCP_STATE_HANDSHAKE_SENT) {
-        // Expect HTTP 200 OK
         char* data = (char*)p->payload;
         if (p->len > 12 && strncmp(data, "HTTP/1.1 200", 12) == 0) {
-            // Find end of header \r\n\r\n
             uint8_t* body = NULL;
             int body_len = 0;
-            
             for (int i = 0; i < p->len - 3; ++i) {
                 if (data[i] == '\r' && data[i+1] == '\n' && data[i+2] == '\r' && data[i+3] == '\n') {
                     body = (uint8_t*)data + i + 4;
@@ -290,14 +288,11 @@ err_t tcp_proxy_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err)
                     break;
                 }
             }
-            
             ctx->state = TCP_STATE_ESTABLISHED;
-            
             if (!ctx->buffer.empty()) {
                 tcp_write(tpcb, ctx->buffer.data(), ctx->buffer.size(), 1);
                 ctx->buffer.clear();
             }
-            
             if (body && body_len > 0 && ctx->client_pcb) {
                 tcp_write(ctx->client_pcb, body, body_len, 1);
                 tcp_output(ctx->client_pcb);
@@ -313,7 +308,7 @@ err_t tcp_proxy_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err)
     return ERR_OK;
 }
 
-er_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
+err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
     TcpCtx* ctx = (TcpCtx*)arg;
     if (!p) { tcp_close_both(ctx); return ERR_OK; }
     
@@ -330,7 +325,6 @@ er_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err)
         
         if (ctx->buffer.size() >= 2048 || (ctx->buffer.size() > 5 && ctx->buffer[0] != 0x16)) {
             ctx->state = TCP_STATE_CONNECTING_PROXY;
-            
             struct tcp_pcb* proxy_pcb = tcp_new();
             ctx->proxy_pcb = proxy_pcb;
             tcp_arg(proxy_pcb, ctx);
@@ -348,7 +342,7 @@ er_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err)
     return ERR_OK;
 }
 
-er_t tcp_accept_cb(void* arg, struct tcp_pcb* newpcb, err_t err) {
+err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     uint16_t client_port = newpcb->remote_port;
     NatEntry target = { 0 };
     {
@@ -365,12 +359,10 @@ er_t tcp_accept_cb(void* arg, struct tcp_pcb* newpcb, err_t err) {
 
     tcp_arg(newpcb, ctx);
     tcp_recv(newpcb, tcp_client_recv);
-    
     return ERR_OK;
 }
 
 // --- UDP Logic (Global UDP Relay for SOCKS5) ---
-// This thread handles ALL UDP traffic (including DNS) via SOCKS5 UDP Associate
 class UdpRelay {
     SOCKET tcpSock;
     SOCKET udpSock;
@@ -380,7 +372,7 @@ class UdpRelay {
     std::thread th;
     
 public:
-    UdpRelay() : tcpSock(INVALID_HANDLE_VALUE), udpSock(INVALID_HANDLE_VALUE), running(false) {}
+    UdpRelay() : tcpSock(INVALID_SOCKET), udpSock(INVALID_SOCKET), running(false) {}
     
     void Start() {
         if (!running) {
@@ -391,12 +383,12 @@ public:
     }
 
     void Send(const uint8_t* data, int len, uint32_t daddr, uint16_t dport) {
-        if (!running || udpSock == INVALID_HANDLE_VALUE) return; 
+        if (!running || udpSock == INVALID_SOCKET) return; 
         
         std::vector<uint8_t> buf(10 + len);
         buf[0] = 0; buf[1] = 0; buf[2] = 0; buf[3] = 1; // IPv4
-        *(uint32_t*)&buf[4] = daddr; // Original Dest IP
-        *(uint16_t*)&buf[8] = dport; // Original Dest Port (Net Order)
+        *(uint32_t*)&buf[4] = daddr; 
+        *(uint16_t*)&buf[8] = dport; 
         memcpy(&buf[10], data, len);
         
         sockaddr_in remote;
@@ -420,8 +412,8 @@ private:
 
     void Loop() {
         while (running) {
-            if (tcpSock != INVALID_HANDLE_VALUE) closesocket(tcpSock);
-            if (udpSock != INVALID_HANDLE_VALUE) closesocket(udpSock);
+            if (tcpSock != INVALID_SOCKET) closesocket(tcpSock);
+            if (udpSock != INVALID_SOCKET) closesocket(udpSock);
             
             tcpSock = socket(AF_INET, SOCK_STREAM, 0);
             udpSock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -490,7 +482,9 @@ private:
                     if (r > 10 && buf[2] == 0) {
                         int offset = (buf[3] == 1) ? 10 : ((buf[3] == 4) ? 22 : 0);
                         if (offset > 0) {
-                            // This part is complex: needs NAT table for UDP replies.
+                            uint32_t src_ip = *(uint32_t*)&buf[4]; 
+                            // Just forward to TAP (we need to map back to client)
+                            // But UDP is connectionless. We need a NAT table.
                             // For simplicity, we'll drop UDP packets that are not DNS for now.
                             // A full UDP NAT implementation is beyond the scope of this snippet.
                         }
@@ -501,106 +495,63 @@ private:
     }
 };
 
-// Output function
-er_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
-    uint8_t buf[2048];
-    int len = pbuf_copy_partial(p, buf, sizeof(buf), 0);
-    
-    if (len > 34) {
-        struct ip_hdr* ip = (struct ip_hdr*)(buf + 14);
-        if (IPH_PROTO(ip) == IP_PROTO_TCP) {
-            uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
-            uint16_t dst_port = *(uint16_t*)(tcp_base + 2); 
-            
-            std::lock_guard<std::mutex> lk(g_nat_mtx);
-            auto it = g_nat_table.find(ntohs(dst_port));
-            if (it != g_nat_table.end()) {
-                ip->src.addr = it->second.original_dst_ip;
-                *(uint16_t*)(tcp_base) = it->second.original_dst_port;
-                IPH_CHKSUM_SET(ip, 0);
-                IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
-            }
-        }
-    }
-    DWORD written;
-    WriteFile(g_tap, buf, len, &written, NULL);
-    return ERR_OK;
-}
+UdpRelay g_udpRelay;
 
-// Handle UDP (DNS Direct + Generic Drop for now to save space, or Direct for all?)
-void udp_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint16_t dst_port) {
-    SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
-    DWORD timeout = 2000;
-    setsockopt(udp, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+void handle_arp_manual(uint8_t* buf, int len) {
+    if (len < sizeof(EthHeader) + sizeof(ArpPacket)) return;
+    EthHeader* eth = (EthHeader*)buf;
+    ArpPacket* arp = (ArpPacket*)(buf + sizeof(EthHeader));
+    if (::ntohs(arp->oper) != 1) return;
+    if (arp->tpa != ::inet_addr(TAP_GW)) return;
 
-    sockaddr_in dest;
-    dest.sin_family = AF_INET;
-    dest.sin_addr.S_un.S_addr = dst_ip; 
-    dest.sin_port = dst_port;
+    uint8_t reply[64]; 
+    memset(reply, 0, sizeof(reply)); 
+    EthHeader* reth = (EthHeader*)reply;
+    ArpPacket* rarp = (ArpPacket*)(reply + sizeof(EthHeader));
 
-    sendto(udp, (char*)pkt.data(), (int)pkt.size(), 0, (sockaddr*)&dest, sizeof(dest));
+    memcpy(reth->dst_mac, eth->src_mac, 6);
+    memcpy(reth->src_mac, TAP_MAC, 6);
+    reth->type = eth->type;
 
-    char buf[2048];
-    sockaddr_in from;
-    int fromlen = sizeof(from);
-    int r = recvfrom(udp, buf, sizeof(buf), 0, (sockaddr*)&from, &fromlen);
-    if (r > 0) {
-        uint8_t frame[2048];
-        memcpy(frame, TAP_MAC, 6); memcpy(frame + 6, TAP_MAC, 6); *(uint16_t*)(frame + 12) = htons(0x0800);
-        uint8_t* ip = frame + 14;
-        uint8_t* udp_hdr = ip + 20;
-        
-        memset(ip, 0, 20);
-        ip[0] = 0x45;
-        *(uint16_t*)(ip + 2) = htons((uint16_t)(20 + 8 + r));
-        ip[8] = 64; ip[9] = 17; 
-        
-        *(uint32_t*)(ip + 12) = from.sin_addr.S_un.S_addr;   
-        *(uint32_t*)(ip + 16) = src_ip;  
-        *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
+    rarp->htype = arp->htype;
+    rarp->ptype = arp->ptype;
+    rarp->hlen = 6;
+    rarp->plen = 4;
+    rarp->oper = ::htons(2);
 
-        *(uint16_t*)(udp_hdr + 0) = from.sin_port;
-        *(uint16_t*)(udp_hdr + 2) = src_port;
-        *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + r));
-        *(uint16_t*)(udp_hdr + 6) = 0; 
-        
-        memcpy(udp_hdr + 8, buf, r);
-        *(uint16_t*)(udp_hdr + 6) = 0; 
+    memcpy(rarp->sha, TAP_MAC, 6);
+    rarp->spa = ::inet_addr(TAP_GW);
+    memcpy(rarp->tha, arp->sha, 6);
+    rarp->tpa = arp->spa;
 
-        DWORD written;
-        WriteFile(g_tap, frame, 14 + 20 + 8 + r, &written, NULL);
-    }
-    closesocket(udp);
+    tap_send_async(reply, 42); 
 }
 
 void process_tap_frame(uint8_t* buf, int len) {
     if (len < 14) return;
-    uint16_t eth_type = ntohs(*(uint16_t*)(buf + 12));
+    uint16_t eth_type = ::ntohs(*(uint16_t*)(buf + 12));
 
     if (eth_type == 0x0806) {
-        struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
-        if (p) {
-            pbuf_take(p, buf, len);
-            if (g_netif.input(p, &g_netif) != ERR_OK) pbuf_free(p);
-        }
+        handle_arp_manual(buf, len);
         return; 
     }
 
     struct ip_hdr* ip = (struct ip_hdr*)(buf + 14);
     
-    if (eth_type == 0x0800 && IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_UDP) {
+    // UDP Handling via Global Relay
+    if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_UDP) {
         uint8_t* udp = buf + 14 + IPH_HL(ip) * 4;
         uint16_t dport = *(uint16_t*)(udp + 2);
         uint8_t* payload = udp + 8;
         int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
         if (pay_len > 0) {
-            std::vector<uint8_t> data(payload, payload + pay_len);
-            std::thread(udp_direct_thread, data, ip->src.addr, *(uint16_t*)udp, ip->dest.addr, dport).detach();
+            g_udpRelay.Send(payload, pay_len, ip->dest.addr, dport);
         }
         return;
     }
 
-    if (eth_type == 0x0800 && IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
+    // TCP NAT
+    if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
         uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
         uint16_t src_port = *(uint16_t*)(tcp_base); 
         uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
@@ -608,14 +559,14 @@ void process_tap_frame(uint8_t* buf, int len) {
 
         {
             std::lock_guard<std::mutex> lk(g_nat_mtx);
-            NatEntry& e = g_nat_table[ntohs(src_port)]; 
+            NatEntry& e = g_nat_table[::ntohs(src_port)]; 
             e.original_dst_ip = dst_ip;
             e.original_dst_port = dst_port; 
             e.last_active = get_now_ms();
         }
 
-        ip->dest.addr = inet_addr(TAP_GW);
-        *(uint16_t*)(tcp_base + 2) = htons(LWIP_LISTEN_PORT);
+        ip->dest.addr = ::inet_addr(TAP_GW);
+        *(uint16_t*)(tcp_base + 2) = ::htons(LWIP_LISTEN_PORT);
 
         IPH_CHKSUM_SET(ip, 0);
         IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
@@ -626,7 +577,7 @@ void process_tap_frame(uint8_t* buf, int len) {
     }
 }
 
-er_t netif_init_cb(struct netif* netif) {
+err_t netif_init_cb(struct netif* netif) {
     netif->linkoutput = tap_linkoutput;
     netif->output = etharp_output;
     netif->mtu = 1500;
@@ -639,14 +590,20 @@ er_t netif_init_cb(struct netif* netif) {
 int main() {
     char devicePath[256];
     sprintf_s(devicePath, sizeof(devicePath), TAP_WIN_PATH, "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}");
-    
+    log_debug("Opening TAP device: %s\n", devicePath);
+
     g_tap = CreateFileA(devicePath, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, 0);
-    if (g_tap == INVALID_HANDLE_VALUE) { printf("Error opening TAP\n"); return 1; }
+    
+    if (g_tap == INVALID_HANDLE_VALUE) { 
+        log_debug("Error opening TAP. Code=%lu\n", GetLastError()); 
+        return 1; 
+    }
 
     ULONG status = TRUE; DWORD len;
     DeviceIoControl(g_tap, TAP_IOCTL_SET_MEDIA_STATUS, &status, sizeof(status), &status, sizeof(status), &len, NULL);
 
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
+
     lwip_init();
 
     ip4_addr_t ip, mask, gw;
@@ -662,7 +619,9 @@ int main() {
     pcb = tcp_listen(pcb);
     tcp_accept(pcb, tcp_proxy_accept);
 
-    log_debug("LwIP Tun2Socks Running. HTTP Proxy: %s:%d\n", PROXY_IP, PROXY_PORT);
+    log_debug("LwIP Tun2Socks Running. Proxy: %s:%d\n", PROXY_IP, PROXY_PORT);
+    
+    g_udpRelay.Start();
 
     uint8_t buffer[65536];
     OVERLAPPED ol = {0};
@@ -673,7 +632,10 @@ int main() {
     while (true) {
         if (!pending) {
             if (!ReadFile(g_tap, buffer, sizeof(buffer), &bytesRead, &ol)) {
-                if (GetLastError() != ERROR_IO_PENDING) break;
+                if (GetLastError() != ERROR_IO_PENDING) {
+                    log_debug("TAP Read Error: %d\n", GetLastError());
+                    break;
+                }
                 pending = true;
             } else {
                 process_tap_frame(buffer, bytesRead);
@@ -683,7 +645,8 @@ int main() {
         }
 
         if (pending) {
-            if (WaitForSingleObject(ol.hEvent, 5) == WAIT_OBJECT_0) {
+            DWORD waitRes = WaitForSingleObject(ol.hEvent, 5); 
+            if (waitRes == WAIT_OBJECT_0) {
                 if (GetOverlappedResult(g_tap, &ol, &bytesRead, FALSE)) {
                     process_tap_frame(buffer, bytesRead);
                 }
