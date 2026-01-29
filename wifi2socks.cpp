@@ -459,7 +459,24 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         uint8_t* d = (uint8_t*)p->payload;
         ctx->buffer.insert(ctx->buffer.end(), d, d + p->len);
         
-        if (ctx->buffer.size() >= 2048 || (ctx->buffer.size() > 5 && ctx->buffer[0] != 0x16)) {
+        bool ready_to_connect = false;
+        
+        if (ctx->buffer.size() >= 2048) {
+            ready_to_connect = true;
+        } else if (ctx->buffer.size() >= 5) {
+            if (ctx->buffer[0] != 0x16) {
+                // Not TLS handshake, connect immediately
+                ready_to_connect = true;
+            } else {
+                // Is TLS, check length
+                uint16_t rec_len = ((uint16_t)ctx->buffer[3] << 8) | ctx->buffer[4];
+                if (ctx->buffer.size() >= (size_t)(5 + rec_len)) {
+                    ready_to_connect = true;
+                }
+            }
+        }
+
+        if (ready_to_connect) {
             ctx->state = TCP_STATE_CONNECTING_PROXY;
             struct tcp_pcb* proxy_pcb = tcp_new();
             ctx->proxy_pcb = proxy_pcb;
