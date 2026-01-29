@@ -514,7 +514,7 @@ void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
 
     sockaddr_in dest;
     dest.sin_family = AF_INET;
-    dest.sin_addr.S_un.S_addr = ::inet_addr("8.8.8.8");
+    dest.sin_addr.S_un.S_addr = ::inet_addr("192.168.11.1");
     dest.sin_port = ::htons(53);
 
     sendto(udp, (char*)pkt.data(), (int)pkt.size(), 0, (sockaddr*)&dest, sizeof(dest));
@@ -525,7 +525,7 @@ void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
         if (r > 12) { 
              int pos = 12; 
              std::string qname = parse_dns_name((uint8_t*)buf, r, pos);
-             printf("[DNS-DIRECT] %s (via 8.8.8.8)\n", qname.c_str());
+             printf("[DNS-DIRECT] %s (via 192.168.11.1)\n", qname.c_str());
         }
 
         uint8_t frame[2048];
