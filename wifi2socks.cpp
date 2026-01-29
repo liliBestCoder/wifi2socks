@@ -475,78 +475,68 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     return ERR_OK;
 }
 
-// --- DNS Direct ---
-std::string parse_dns_name(const uint8_t* buf, int len, int& pos) {
-    std::string name;
-    int jumps = 0;
-    int p = pos;
-    while (p < len) {
-        uint8_t c = buf[p];
-        if (c == 0) { p++; if (jumps == 0) pos = p; return name; }
-        if ((c & 0xC0) == 0xC0) { 
-            if (p + 1 >= len) return "<err-ptr-len>";
-            int offset = ((c & 0x3F) << 8) | buf[p + 1];
-            if (jumps == 0) pos = p + 2;
-            p = offset;
-            jumps++; if (jumps > 10) return "<err-loop>";
-        } else { 
-            if (p + 1 + c > len) return "<err-label-len>";
-            if (!name.empty()) name += ".";
-            name.append((char*)buf + p + 1, c);
-            p += 1 + c;
+// --- UDP Session Management ---
+struct UdpKey {
+    uint32_t src_ip, dst_ip;
+    uint16_t src_port, dst_port;
+    bool operator<(const UdpKey& o) const { return memcmp(this, &o, sizeof(UdpKey)) < 0; }
+};
+
+struct UdpSession {
+    SOCKET sock;
+    uint32_t src_ip, dst_ip;
+    uint16_t src_port, dst_port;
+    std::atomic<uint64_t> last_active;
+    std::atomic<bool> closed;
+    UdpSession() : sock(INVALID_SOCKET), closed(false) { last_active = get_now_ms(); }
+};
+
+std::map<UdpKey, UdpSession*> g_udp_sessions;
+std::mutex g_udp_mtx;
+
+void udp_recv_loop(UdpSession* sess) {
+    char buf[2048];
+    sockaddr_in from;
+    int from_len = sizeof(from);
+    while (!sess->closed) {
+        int r = recvfrom(sess->sock, buf, sizeof(buf), 0, (sockaddr*)&from, &from_len);
+        if (r > 0 && g_host_mac_known) {
+            sess->last_active = get_now_ms();
+            uint8_t frame[2048];
+            if (14 + 20 + 8 + r > 2048) continue;
+
+            memcpy(frame, HOST_MAC, 6);
+            memcpy(frame + 6, TAP_MAC, 6);
+            *(uint16_t*)(frame + 12) = htons(0x0800);
+
+            uint8_t* ip = frame + 14;
+            uint8_t* udp_hdr = ip + 20;
+            memset(ip, 0, 20);
+            ip[0] = 0x45; ip[9] = 17; ip[8] = 64;
+            *(uint16_t*)(ip + 2) = htons((uint16_t)(20 + 8 + r));
+            *(uint32_t*)(ip + 12) = sess->dst_ip;
+            *(uint32_t*)(ip + 16) = sess->src_ip;
+            *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
+
+            *(uint16_t*)(udp_hdr + 0) = sess->dst_port;
+            *(uint16_t*)(udp_hdr + 2) = sess->src_port;
+            *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + r));
+            *(uint16_t*)(udp_hdr + 6) = 0;
+            memcpy(udp_hdr + 8, buf, r);
+
+            tap_send_async(frame, 14 + 20 + 8 + r);
+        } else if (r == SOCKET_ERROR) {
+            if (WSAGetLastError() != WSAETIMEDOUT) break;
+            if (get_now_ms() - sess->last_active > 60000) break; // 60秒无响应自动关闭
         }
     }
-    return "";
-}
-
-void udp_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint16_t dst_port) {
-    SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udp == INVALID_SOCKET) return; 
-    
-    DWORD timeout = 1000;
-    setsockopt(udp, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-
-    sockaddr_in dest;
-    dest.sin_family = AF_INET;
-    dest.sin_addr.S_un.S_addr = dst_ip;
-    dest.sin_port = dst_port;
-
-    sendto(udp, (char*)pkt.data(), (int)pkt.size(), 0, (sockaddr*)&dest, sizeof(dest));
-
-    char buf[2048];
-    sockaddr_in from_addr;
-    int from_len = sizeof(from_addr);
-    int r = recvfrom(udp, buf, sizeof(buf), 0, (sockaddr*)&from_addr, &from_len);
-    
-    if (r > 0 && g_host_mac_known) {
-        uint8_t frame[2048];
-        if (14 + 20 + 8 + r > sizeof(frame)) { closesocket(udp); return; }
-
-        memcpy(frame, HOST_MAC, 6);
-        memcpy(frame + 6, TAP_MAC, 6);
-        *(uint16_t*)(frame + 12) = ::htons(0x0800);
-
-        uint8_t* ip = frame + 14;
-        uint8_t* udp_hdr = ip + 20;
-        
-        memset(ip, 0, 20);
-        ip[0] = 0x45;
-        *(uint16_t*)(ip + 2) = ::htons((uint16_t)(20 + 8 + r));
-        ip[8] = 64; ip[9] = 17; 
-        
-        *(uint32_t*)(ip + 12) = dst_ip;   
-        *(uint32_t*)(ip + 16) = src_ip;  
-        *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
-
-        *(uint16_t*)(udp_hdr + 0) = dst_port;\n        *(uint16_t*)(udp_hdr + 2) = src_port;
-        *(uint16_t*)(udp_hdr + 4) = ::htons((uint16_t)(8 + r));
-        *(uint16_t*)(udp_hdr + 6) = 0; 
-        
-        memcpy(udp_hdr + 8, buf, r);
-
-        tap_send_async(frame, 14 + 20 + 8 + r);
+    {
+        std::lock_guard<std::mutex> lk(g_udp_mtx);
+        UdpKey key = { sess->src_ip, sess->dst_ip, sess->src_port, sess->dst_port };
+        g_udp_sessions.erase(key);
     }
-    closesocket(udp);
+    if (sess->sock != INVALID_SOCKET) closesocket(sess->sock);
+    delete sess;
 }
 
 // --- Main Processing ---
@@ -574,17 +564,49 @@ void process_tap_frame(uint8_t* buf, int len) {
     
     // Check if it's IPv4
     if (IPH_V(ip) == 4) {
-        // UDP Direct Handler (Generic)
+        // UDP Direct Handler (Session-based)
         if (IPH_PROTO(ip) == IP_PROTO_UDP) {
-            uint8_t* udp = buf + 14 + IPH_HL(ip) * 4;
-            uint16_t src_port = *(uint16_t*)(udp + 0);
-            uint16_t dst_port = *(uint16_t*)(udp + 2);
-            uint8_t* payload = udp + 8;
+            uint8_t* udp_ptr = buf + 14 + IPH_HL(ip) * 4;
+            uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
+            uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
+            uint8_t* payload = udp_ptr + 8;
             int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
-            
+
             if (pay_len >= 0) {
-                std::vector<uint8_t> data(payload, payload + pay_len);
-                std::thread(udp_direct_thread, data, ip->src.addr, src_port, ip->dest.addr, dst_port).detach();
+                UdpKey key = { ip->src.addr, ip->dest.addr, src_port, dst_port };
+                UdpSession* sess = NULL;
+                {
+                    std::lock_guard<std::mutex> lk(g_udp_mtx);
+                    auto it = g_udp_sessions.find(key);
+                    if (it != g_udp_sessions.end()) sess = it->second;
+                }
+
+                if (!sess) {
+                    sess = new UdpSession();
+                    sess->src_ip = ip->src.addr; sess->dst_ip = ip->dest.addr;
+                    sess->src_port = src_port; sess->dst_port = dst_port;
+                    sess->sock = socket(AF_INET, SOCK_DGRAM, 0);
+                    if (sess->sock != INVALID_SOCKET) {
+                        DWORD timeout = 1000;
+                        setsockopt(sess->sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+                        {
+                            std::lock_guard<std::mutex> lk(g_udp_mtx);
+                            g_udp_sessions[key] = sess;
+                        }
+                        std::thread(udp_recv_loop, sess).detach();
+                    } else {
+                        delete sess; sess = NULL;
+                    }
+                }
+
+                if (sess) {
+                    sess->last_active = get_now_ms();
+                    sockaddr_in dest;
+                    dest.sin_family = AF_INET;
+                    dest.sin_addr.S_un.S_addr = sess->dst_ip;
+                    dest.sin_port = sess->dst_port;
+                    sendto(sess->sock, (const char*)payload, pay_len, 0, (sockaddr*)&dest, sizeof(dest));
+                }
             }
             return; // Don't pass UDP to LwIP
         }
