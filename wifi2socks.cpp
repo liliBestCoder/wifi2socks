@@ -66,6 +66,7 @@ err_t ethernet_input(struct pbuf *p, struct netif *netif);
 #define PROXY_IP        "192.168.11.250"
 #define PROXY_PORT      2080
 #define LWIP_LISTEN_PORT 7000
+#define MAX_SNI_LEN     2048
 
 #define TAP_CONTROL_CODE(request, method) CTL_CODE(FILE_DEVICE_UNKNOWN, request, method, FILE_ANY_ACCESS)
 #define TAP_IOCTL_SET_MEDIA_STATUS TAP_CONTROL_CODE(6, METHOD_BUFFERED)
@@ -341,7 +342,9 @@ struct TcpCtx {
     NatEntry target;
     std::vector<uint8_t> buffer;
 
-    TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false) {}
+    TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false) {
+        buffer.reserve(MAX_SNI_LEN);
+    }
 };
 
 void close_tcp_ctx(TcpCtx* ctx) {
@@ -385,7 +388,9 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         uint8_t* d = (uint8_t*)p->payload;
         ctx->buffer.insert(ctx->buffer.end(), d, d + p->len);
         bool ready = false;
-        if (ctx->buffer.size() >= 5) {
+        if (ctx->buffer.size() >= MAX_SNI_LEN) {
+            ready = true;
+        } else if (ctx->buffer.size() >= 5) {
             if (ctx->buffer[0] != 0x16) ready = true;
             else {
                 uint16_t tls_len = (ctx->buffer[3] << 8) | ctx->buffer[4];
