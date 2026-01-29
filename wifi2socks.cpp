@@ -142,22 +142,48 @@ uint16_t ip_chksum_simple(void* dataptr, int len) {
     return (uint16_t)~(acc);
 }
 
-void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len) {
-    struct pbuf p;
-    p.next = NULL;
-    p.payload = tcp_base;
-    p.len = (u16_t)tcp_len;
-    p.tot_len = (u16_t)tcp_len;
-    
-    ip_addr_t src, dst;
-    src.addr = ip->src.addr;
-    dst.addr = ip->dest.addr;
+// --- Manual Checksum Implementation ---
+uint16_t checksum_raw_buffer(const void* data, int len) {
+    uint32_t sum = 0;
+    const uint16_t* ptr = (const uint16_t*)data;
+    while (len > 1) {
+        sum += *ptr++;
+        len -= 2;
+    }
+    if (len > 0) {
+        uint16_t temp = 0;
+        *(uint8_t*)&temp = *(const uint8_t*)ptr;
+        sum += temp;
+    }
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return (uint16_t)~sum;
+}
 
-    // Zero out the checksum field before calculation
+void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len) {
     *(uint16_t*)(tcp_base + 16) = 0;
 
-    // Use LwIP's standard function
-    *(uint16_t*)(tcp_base + 16) = inet_chksum_pseudo(&p, IP_PROTO_TCP, (u16_t)tcp_len, &src, &dst);
+    uint32_t sum = 0;
+    // Pseudo Header: Source IP
+    uint16_t* ip_src = (uint16_t*)&ip->src.addr;
+    sum += ip_src[0];
+    sum += ip_src[1];
+    
+    // Pseudo Header: Dest IP
+    uint16_t* ip_dst = (uint16_t*)&ip->dest.addr;
+    sum += ip_dst[0];
+    sum += ip_dst[1];
+
+    // Pseudo Header: Protocol (0x0006 in Network Order)
+    sum += ::htons(IP_PROTO_TCP); 
+
+    // Pseudo Header: Length
+    sum += ::htons((uint16_t)tcp_len);
+
+    // TCP Segment
+    sum += checksum_raw_buffer(tcp_base, tcp_len);
+
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    *(uint16_t*)(tcp_base + 16) = (uint16_t)~sum;
 }
 
 // --- ASYNC WRITE HELPER ---
@@ -223,6 +249,9 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
                  uint16_t src_port = *(uint16_t*)tcp_base;
                  uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
                  
+                 // Debug: LwIP is sending a packet
+                 // printf("[LwIP-OUT] SrcPort=%d DstPort=%d\\n", ::ntohs(src_port), ::ntohs(dst_port));
+
                  if (src_port == ::htons(LWIP_LISTEN_PORT)) {
                      NatEntry target = { 0 };
                      {
@@ -230,7 +259,9 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
                          auto it = g_nat_table.find(::ntohs(dst_port));
                          if (it != g_nat_table.end()) target = it->second;
                      }
+                     
                      if (target.original_dst_ip != 0) {
+                         // Found NAT entry, Reverse NAT
                          ip->src.addr = target.original_dst_ip;
                          *(uint16_t*)tcp_base = target.original_dst_port;
                          
@@ -239,7 +270,11 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
                          
                          uint16_t ip_len = ::ntohs(*(uint16_t*)((uint8_t*)ip + 2));
                          int tcp_len = ip_len - IPH_HL(ip) * 4;
+                         
+                         // printf("[NAT-REV] Restoring to SrcIP=%x SrcPort=%d\\n", target.original_dst_ip, ::ntohs(target.original_dst_port));
                          recalculate_tcp_checksum(ip, tcp_base, tcp_len);
+                     } else {
+                         // printf("[-] NAT entry not found for port %d\\n", ::ntohs(dst_port));
                      }
                  }
              }
