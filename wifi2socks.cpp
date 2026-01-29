@@ -40,6 +40,7 @@ extern "C" {
 #include "lwip/ip.h"
 #include "lwip/timeouts.h"
 #include "netif/etharp.h"
+#include "lwip/inet_chksum.h"
 // Explicitly declare ethernet_input for raw frames
 err_t ethernet_input(struct pbuf *p, struct netif *netif);
 }
@@ -142,6 +143,21 @@ uint16_t ip_chksum_simple(void* dataptr, int len) {
 }
 
 void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len) {
+    ip_addr_t src, dst;
+    ip_addr_set_u32(&src, ip->src.addr);
+    ip_addr_set_u32(&dst, ip->dest.addr);
+
+    // Zero out the checksum field before calculation
+    *(uint16_t*)(tcp_base + 16) = 0;
+
+    // Calculate checksum of the TCP data (Header + Payload)
+    // inet_chksum returns the inverted 16-bit sum
+    u16_t data_sum = inet_chksum(tcp_base, tcp_len);
+
+    // Calculate Pseudo Header Sum
+    // We can accumulate the pseudo header manually and combine.
+    // The pseudo header contains: SrcIP(4), DstIP(4), Zero(1), Proto(1), TCP_Len(2)
+    
     uint32_t sum = 0;
     sum += (ip->src.addr & 0xFFFF);
     sum += (ip->src.addr >> 16) & 0xFFFF;
@@ -150,18 +166,15 @@ void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len)
     sum += ::htons(IP_PROTO_TCP);
     sum += ::htons((uint16_t)tcp_len);
     
-    *(uint16_t*)(tcp_base + 16) = 0;
-    
-    uint16_t* ptr = (uint16_t*)tcp_base;
-    int len = tcp_len;
-    while (len > 1) {
-        sum += *ptr++;
-        len -= 2;
-    }
-    if (len == 1) {
-        sum += *(uint8_t*)ptr;
-    }
+    // Combine with the data checksum
+    // Note: inet_chksum returns ~Sum. We need Sum.
+    // So we add ~data_sum to our accumulator.
+    sum += (uint16_t)(~data_sum);
+
+    // Fold 32-bit sum to 16-bit
     while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    
+    // Store inverted result
     *(uint16_t*)(tcp_base + 16) = (uint16_t)~sum;
 }
 
