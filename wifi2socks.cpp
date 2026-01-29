@@ -250,7 +250,7 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
                  uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
                  
                  // Debug: LwIP is sending a packet
-                 // printf("[LwIP-OUT] SrcPort=%d DstPort=%d\\n", ::ntohs(src_port), ::ntohs(dst_port));
+                 printf("[LwIP-OUT] SrcPort=%d DstPort=%d\n", ::ntohs(src_port), ::ntohs(dst_port));
 
                  if (src_port == ::htons(LWIP_LISTEN_PORT)) {
                      NatEntry target = { 0 };
@@ -271,10 +271,10 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
                          uint16_t ip_len = ::ntohs(*(uint16_t*)((uint8_t*)ip + 2));
                          int tcp_len = ip_len - IPH_HL(ip) * 4;
                          
-                         // printf("[NAT-REV] Restoring to SrcIP=%x SrcPort=%d\\n", target.original_dst_ip, ::ntohs(target.original_dst_port));
+                         printf("[NAT-REV] Restoring to SrcIP=%x SrcPort=%d\n", target.original_dst_ip, ::ntohs(target.original_dst_port));
                          recalculate_tcp_checksum(ip, tcp_base, tcp_len);
                      } else {
-                         // printf("[-] NAT entry not found for port %d\\n", ::ntohs(dst_port));
+                         printf("[-] NAT entry not found for port %d\n", ::ntohs(dst_port));
                      }
                  }
              }
@@ -634,7 +634,11 @@ void process_tap_frame(uint8_t* buf, int len) {
         struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         if (p) {
             pbuf_take(p, buf, len);
-            if (g_netif.input(p, &g_netif) != ERR_OK) pbuf_free(p);
+            err_t err = g_netif.input(p, &g_netif);
+            if (err != ERR_OK) {
+                printf("[LwIP-IN] Input failed: %d\n", err);
+                pbuf_free(p);
+            }
         }
     }
 }
@@ -675,6 +679,7 @@ int main() {
 
     netif_add(&g_netif, &ip, &mask, &gw, NULL, netif_init_cb, ethernet_input);
     netif_set_default(&g_netif);
+    netif_set_up(&g_netif);
 
     struct tcp_pcb* pcb = tcp_new();
     tcp_bind(pcb, IP_ADDR_ANY, LWIP_LISTEN_PORT);
