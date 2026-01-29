@@ -449,58 +449,60 @@ void handle_proxy_connect(TcpCtx* ctx) {
 
 // Helper to initiate async connection
 void connect_to_proxy_async(TcpCtx* ctx) {
-    // 1. Create Socket
-    ctx->proxy_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (ctx->proxy_socket == INVALID_SOCKET) {
-        close_tcp_ctx(ctx);
-        return;
+    // 1. Assign Worker if not already
+    if (!ctx->worker) {
+        ctx->worker = WorkerPool::instance().get_worker(ctx->target.original_dst_port);
+        if (!ctx->worker) ctx->worker = WorkerPool::instance().get_next_worker();
     }
 
-    // 2. Set Non-Blocking
-    u_long mode = 1;
-    if (ioctlsocket(ctx->proxy_socket, FIONBIO, &mode) != 0) {
-        close_tcp_ctx(ctx);
-        return;
-    }
+    // 2. Set State IMMEDIATELY to prevent re-entry from LwIP thread
+    ctx->state = TcpCtx::CONNECTING;
 
-    // 3. Assign Worker
-    ctx->worker = WorkerPool::instance().get_worker(ctx->target.original_dst_port);
-    if (!ctx->worker) ctx->worker = WorkerPool::instance().get_next_worker();
+    // 3. Queue the socket creation and connect to Worker
+    ctx->worker->queue_task([ctx]() {
+        if (ctx->closed) return;
 
-    // 4. Start Connect
-    sockaddr_in addr;
-    addr.sin_family = AF_INET;
-    addr.sin_addr.S_un.S_addr = inet_addr(PROXY_IP);
-    addr.sin_port = htons(PROXY_PORT);
-
-    int r = connect(ctx->proxy_socket, (sockaddr*)&addr, sizeof(addr));
-    
-    if (r == 0) {
-        // Connected immediately (local proxy?)
-        // Queue the logic to run in worker thread to maintain consistency
-        ctx->state = TcpCtx::CONNECTING;
-        ctx->worker->add_socket(
-            ctx->proxy_socket,
-            nullptr, // no read yet
-            [ctx]() { handle_proxy_connect(ctx); }, // Trigger connect handler (it handles sending CONNECT)
-            [ctx]() { close_tcp_ctx(ctx); }
-        );
-    } else {
-        int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) {
-            // Pending
-            ctx->state = TcpCtx::CONNECTING;
-            ctx->worker->add_socket(
-                ctx->proxy_socket,
-                nullptr, // no read yet
-                [ctx]() { handle_proxy_connect(ctx); }, // Wake up when writable (connected)
-                [ctx]() { close_tcp_ctx(ctx); }
-            );
-        } else {
-            // Failed
+        // Create Socket (In Worker)
+        ctx->proxy_socket = socket(AF_INET, SOCK_STREAM, 0);
+        if (ctx->proxy_socket == INVALID_SOCKET) {
             close_tcp_ctx(ctx);
+            return;
         }
-    }
+
+        // Set Non-Blocking (In Worker)
+        u_long mode = 1;
+        if (ioctlsocket(ctx->proxy_socket, FIONBIO, &mode) != 0) {
+            close_tcp_ctx(ctx);
+            return;
+        }
+
+        // Start Connect (In Worker)
+        sockaddr_in addr;
+        addr.sin_family = AF_INET;
+        addr.sin_addr.S_un.S_addr = inet_addr(PROXY_IP);
+        addr.sin_port = htons(PROXY_PORT);
+
+        int r = connect(ctx->proxy_socket, (sockaddr*)&addr, sizeof(addr));
+        
+        if (r == 0) {
+            // Connected immediately
+            handle_proxy_connect(ctx); 
+        } else {
+            int err = WSAGetLastError();
+            if (err == WSAEWOULDBLOCK) {
+                // Pending - Register for Write
+                ctx->worker->add_socket(
+                    ctx->proxy_socket,
+                    nullptr, // no read
+                    [ctx]() { handle_proxy_connect(ctx); }, // on_write
+                    [ctx]() { close_tcp_ctx(ctx); }
+                );
+            } else {
+                // Failed
+                close_tcp_ctx(ctx);
+            }
+        }
+    });
 }
 
 err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
@@ -516,6 +518,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         }
 
         ctx->worker->queue_task([ctx, d = std::move(data)]() {
+            // Socket might be invalid if connect failed in the meantime or closed
             if (ctx->proxy_socket != INVALID_SOCKET) {
                 send(ctx->proxy_socket, (const char*)d.data(), (int)d.size(), 0);
             }
@@ -523,14 +526,15 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
 
     } else {
         std::lock_guard<std::mutex> lock(ctx->data_mtx);
+        // If connection is established but worker just assigned? (Shouldn't happen with new flow)
         if (ctx->connected) {
-             // Race condition fallback
             send(ctx->proxy_socket, (const char*)p->payload, p->len, 0);
         } else {
             uint8_t* d = (uint8_t*)p->payload;
             ctx->upstream_data.insert(ctx->upstream_data.end(), d, d + p->len);
             
-            if (ctx->proxy_socket == INVALID_SOCKET) {
+            // Check state instead of invalid socket
+            if (ctx->state == TcpCtx::PRE_CONNECT) {
                 if (ctx->sni_buffer.size() < MAX_SNI_LEN) {
                     size_t to_copy = (std::min)((size_t)p->len, (size_t)(MAX_SNI_LEN - ctx->sni_buffer.size()));
                     ctx->sni_buffer.insert(ctx->sni_buffer.end(), d, d + to_copy);
