@@ -399,15 +399,35 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
             addr.sin_addr.S_un.S_addr = inet_addr(PROXY_IP);
             addr.sin_port = htons(PROXY_PORT);
             if (connect(ctx->proxy_socket, (sockaddr*)&addr, sizeof(addr)) == 0) {
-                char cmd[512], ip_str[64];
-                struct in_addr ia; ia.S_un.S_addr = ctx->target.original_dst_ip;
-                strcpy_s(ip_str, ::inet_ntoa(ia));
+                // 尝试解析 SNI 域名
+                std::string sni = parse_tls_sni(ctx->buffer.data(), ctx->buffer.size());
+                std::string target_host;
+                
+                if (!sni.empty()) {
+                    target_host = sni;
+                    log_debug("[TCP] SNI Detected for CONNECT: %s\n", sni.c_str());
+                } else {
+                    char ip_str[64];
+                    struct in_addr ia; ia.S_un.S_addr = ctx->target.original_dst_ip;
+                    strcpy_s(ip_str, ::inet_ntoa(ia));
+                    target_host = ip_str;
+                }
+
+                char cmd[1024];
+                uint16_t port = ntohs(ctx->target.original_dst_port);
                 sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", 
-                    ip_str, ntohs(ctx->target.original_dst_port), ip_str, ntohs(ctx->target.original_dst_port));
+                    target_host.c_str(), port, target_host.c_str(), port);
+                
                 send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
-                char resp[1024]; recv(ctx->proxy_socket, resp, sizeof(resp), 0);
+                
+                // 简单的读取响应
+                char resp[1024];
+                int res = recv(ctx->proxy_socket, resp, sizeof(resp), 0);
+                
+                // 发送之前缓存的 Client Hello / 数据
                 send(ctx->proxy_socket, (const char*)ctx->buffer.data(), (int)ctx->buffer.size(), 0);
                 ctx->buffer.clear();
+                
                 std::thread(proxy_reader_loop, ctx).detach();
             } else close_tcp_ctx(ctx);
         }
