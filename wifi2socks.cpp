@@ -1,5 +1,10 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #define NOMINMAX
+// Ensure FD_SETSIZE is defined before winsock
+#ifndef FD_SETSIZE
+#define FD_SETSIZE 1024
+#endif
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -11,6 +16,9 @@
 #include <ctime>
 #include <stdarg.h>
 #include <atomic>
+#include <thread>
+
+#include "worker.h"
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -42,7 +50,6 @@ extern "C" {
 #include "lwip/timeouts.h"
 #include "netif/etharp.h"
 #include "lwip/inet_chksum.h"
-// Explicitly declare ethernet_input for raw frames
 err_t ethernet_input(struct pbuf *p, struct netif *netif);
 }
 
@@ -97,11 +104,10 @@ struct ArpPacket {
 // --- Globals ---
 HANDLE g_tap = INVALID_HANDLE_VALUE;
 struct netif g_netif;
-uint8_t TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C }; // Virtual Gateway MAC
+uint8_t TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C }; 
 uint8_t HOST_MAC[6] = { 0 }; 
 std::atomic<bool> g_host_mac_known(false);
 
-// --- Global NAT Table ---
 struct NatEntry {
     uint32_t original_dst_ip;
     uint16_t original_dst_port;
@@ -110,10 +116,10 @@ struct NatEntry {
 std::map<uint16_t, NatEntry> g_nat_table;
 std::mutex g_nat_mtx;
 
+std::recursive_mutex g_lwip_mtx; // Global LwIP lock
+
 // --- Forward Declarations ---
-void handle_arp_manual(uint8_t* buf, int len);
 void tap_send_async(const uint8_t* buf, int len);
-err_t tap_linkoutput(struct netif* netif, struct pbuf* p);
 
 // --- Logging ---
 void log_debug(const char* format, ...) {
@@ -125,7 +131,6 @@ void log_debug(const char* format, ...) {
     OutputDebugStringA(buf);
 }
 
-// --- Platform Helper ---
 uint32_t get_now_ms() { return (uint32_t)GetTickCount64(); }
 extern "C" u32_t sys_now() { return get_now_ms(); }
 extern "C" unsigned int sys_win_rand() { return (unsigned int)rand(); }
@@ -135,7 +140,7 @@ extern "C" void lwip_win32_platform_diag(const char *format, ...) {
     OutputDebugStringA(buf); va_end(ap);
 }
 
-// --- Checksum ---
+// --- Checksum Helpers ---
 uint16_t ip_chksum_simple(void* dataptr, int len) {
     uint32_t acc = 0;
     uint16_t* ptr = (uint16_t*)dataptr;
@@ -145,52 +150,29 @@ uint16_t ip_chksum_simple(void* dataptr, int len) {
     return (uint16_t)~(acc);
 }
 
-// --- Manual Checksum Implementation ---
 uint32_t calculate_raw_sum(const void* data, int len) {
     uint32_t sum = 0;
     const uint16_t* ptr = (const uint16_t*)data;
-    while (len > 1) {
-        sum += *ptr++;
-        len -= 2;
-    }
-    if (len > 0) {
-        // Handle the last byte: in TCP checksum it's treated as the high byte of a 16-bit word
-        sum += (uint16_t)(*(const uint8_t*)ptr << 8);
-    }
+    while (len > 1) { sum += *ptr++; len -= 2; }
+    if (len > 0) { sum += (uint16_t)(*(const uint8_t*)ptr << 8); }
     return sum;
 }
 
 void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len) {
     *(uint16_t*)(tcp_base + 16) = 0;
-
     uint32_t sum = 0;
-    // Pseudo Header: Source IP
     uint16_t* ip_src = (uint16_t*)&ip->src.addr;
-    sum += ip_src[0];
-    sum += ip_src[1];
-    
-    // Pseudo Header: Dest IP
+    sum += ip_src[0]; sum += ip_src[1];
     uint16_t* ip_dst = (uint16_t*)&ip->dest.addr;
-    sum += ip_dst[0];
-    sum += ip_dst[1];
-
-    // Pseudo Header: Protocol (TCP = 6)
-    sum += ::htons(IP_PROTO_TCP); 
-
-    // Pseudo Header: Length
+    sum += ip_dst[0]; sum += ip_dst[1];
+    sum += ::htons(IP_PROTO_TCP);
     sum += ::htons((uint16_t)tcp_len);
-
-    // TCP Segment (Header + Data)
     sum += calculate_raw_sum(tcp_base, tcp_len);
-
-    // Fold 32-bit sum to 16-bit
     while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
-    
-    // Final inversion
     *(uint16_t*)(tcp_base + 16) = (uint16_t)~sum;
 }
 
-// --- ASYNC WRITE HELPER ---
+// --- TAP Write ---
 std::mutex g_write_mtx;
 void tap_send_async(const uint8_t* buf, int len) {
     if (len <= 0) return; 
@@ -205,37 +187,6 @@ void tap_send_async(const uint8_t* buf, int len) {
         }
     }
     CloseHandle(ol.hEvent);
-}
-
-void handle_arp_manual(uint8_t* buf, int len) {
-    if (len < sizeof(EthHeader) + sizeof(ArpPacket)) return;
-
-    EthHeader* eth = (EthHeader*)buf;
-    ArpPacket* arp = (ArpPacket*)(buf + sizeof(EthHeader));
-
-    if (::ntohs(arp->htype) != 1 || ::ntohs(arp->ptype) != 0x0800 || 
-        arp->hlen != 6 || arp->plen != 4) return;
-
-    uint16_t oper = ::ntohs(arp->oper);
-    if (oper != 1) return; 
-
-    uint32_t target_ip = arp->tpa;
-    uint32_t my_ip = ::inet_addr(TAP_GW);
-    
-    if (target_ip != my_ip) return;
-
-    memcpy(eth->dst_mac, eth->src_mac, 6);
-    memcpy(eth->src_mac, TAP_MAC, 6);
-    
-    arp->oper = ::htons(2); 
-    
-    memcpy(arp->tha, arp->sha, 6);
-    arp->tpa = arp->spa;
-    
-    memcpy(arp->sha, TAP_MAC, 6);
-    arp->spa = my_ip;
-
-    tap_send_async(buf, len);
 }
 
 err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
@@ -281,7 +232,6 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
     return ERR_OK;
 }
 
-// --- SNI Parser ---
 std::string parse_tls_sni(const uint8_t* data, size_t len) {
     if (len < 5 || data[0] != 0x16) return ""; 
     size_t pos = 5;
@@ -324,12 +274,7 @@ std::string parse_tls_sni(const uint8_t* data, size_t len) {
     return "";
 }
 
-
-
-// --- Thread Safety ---
-std::recursive_mutex g_lwip_mtx;
-
-// --- TCP Logic ---
+// --- TCP Logic with Worker Pool ---
 struct TcpCtx {
     struct tcp_pcb* client_pcb;
     SOCKET proxy_socket;
@@ -337,10 +282,11 @@ struct TcpCtx {
     std::atomic<bool> connected;
     NatEntry target;
     std::vector<uint8_t> sni_buffer;
-    std::vector<uint8_t> upstream_data;
+    std::vector<uint8_t> upstream_data; // Pre-connect buffer
     std::mutex data_mtx;
+    Worker* worker;
 
-    TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false) {
+    TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), worker(NULL) {
         sni_buffer.reserve(MAX_SNI_LEN);
         upstream_data.reserve(4096);
     }
@@ -348,6 +294,13 @@ struct TcpCtx {
 
 void close_tcp_ctx(TcpCtx* ctx) {
     if (!ctx || ctx->closed.exchange(true)) return;
+
+    if (ctx->worker && ctx->proxy_socket != INVALID_SOCKET) {
+        ctx->worker->remove_socket(ctx->proxy_socket);
+    }
+
+    // Schedule LwIP cleanup on main thread logic or ensure lock
+    // This might be called from Worker Thread, so we lock g_lwip_mtx
     std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
     if (ctx->client_pcb) {
         tcp_arg(ctx->client_pcb, NULL);
@@ -360,24 +313,34 @@ void close_tcp_ctx(TcpCtx* ctx) {
         closesocket(ctx->proxy_socket);
         ctx->proxy_socket = INVALID_SOCKET;
     }
+    // ctx is deleted by tcp_err/tcp_close callback logic usually, or here if we manage it. 
+    // In this code, ctx is usually passed to tcp_arg. 
+    // We need to ensure we don't leak. 
+    // Ideally use shared_ptr, but for now assuming strict lifecycle.
+    // NOTE: 'new TcpCtx' is done in accept. We should delete it eventually.
+    // LwIP doesn't delete arg.
+    delete ctx; 
 }
 
-void proxy_reader_loop(TcpCtx* ctx) {
+// Handler running in Worker Thread
+void handle_proxy_read(TcpCtx* ctx) {
+    if (ctx->closed) return;
     char buf[16384];
-    while (!ctx->closed) {
-        int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
-        if (r <= 0) break;
+    int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
+    if (r > 0) {
         std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
         if (ctx->client_pcb && !ctx->closed) {
-            if (tcp_write(ctx->client_pcb, buf, (u16_t)r, 1) == ERR_OK) {
-                tcp_output(ctx->client_pcb);
-            } else break;
-        } else break;
+            tcp_write(ctx->client_pcb, buf, (u16_t)r, 1);
+            tcp_output(ctx->client_pcb);
+        }
+    } else {
+        // Error or Close
+        close_tcp_ctx(ctx);
     }
-    close_tcp_ctx(ctx);
 }
 
-void proxy_init_thread(TcpCtx* ctx) {
+// Short-lived thread for connection setup
+void connect_and_setup(TcpCtx* ctx) {
     sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_addr.S_un.S_addr = inet_addr(PROXY_IP);
@@ -398,17 +361,32 @@ void proxy_init_thread(TcpCtx* ctx) {
         send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
 
         char resp[1024];
-        recv(ctx->proxy_socket, resp, sizeof(resp), 0);
+        int r = recv(ctx->proxy_socket, resp, sizeof(resp), 0); // Wait for HTTP 200
 
-        {
-            std::lock_guard<std::mutex> lock(ctx->data_mtx);
-            if (!ctx->upstream_data.empty()) {
-                send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
-                ctx->upstream_data.clear();
+        if (r > 0) { // Ideally check for "200 Connection Established"
+            {
+                std::lock_guard<std::mutex> lock(ctx->data_mtx);
+                if (!ctx->upstream_data.empty()) {
+                    send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
+                    ctx->upstream_data.clear();
+                }
+                ctx->connected = true;
             }
-            ctx->connected = true;
+
+            // Assign to Worker
+            // Hash by client port for consistency
+            // Wait, we can just pick one.
+            ctx->worker = WorkerPool::instance().get_worker(ctx->target.original_dst_port);
+            if (!ctx->worker) ctx->worker = WorkerPool::instance().get_next_worker();
+            
+            ctx->worker->add_socket(
+                ctx->proxy_socket, 
+                [ctx]() { handle_proxy_read(ctx); },
+                [ctx]() { close_tcp_ctx(ctx); }
+            );
+        } else {
+            close_tcp_ctx(ctx);
         }
-        proxy_reader_loop(ctx);
     } else {
         close_tcp_ctx(ctx);
     }
@@ -420,6 +398,9 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
     tcp_recved(tpcb, p->tot_len);
 
     if (ctx->connected) {
+        // Send to proxy - this might block if socket buffer full
+        // For strict non-blocking we should use Worker task, but send() is usually fast enough for this prototype
+        // or check for WOULDBLOCK.
         send(ctx->proxy_socket, (const char*)p->payload, p->len, 0);
     } else {
         std::lock_guard<std::mutex> lock(ctx->data_mtx);
@@ -446,7 +427,8 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
                 }
                 if (ready) {
                     ctx->proxy_socket = socket(AF_INET, SOCK_STREAM, 0);
-                    std::thread(proxy_init_thread, ctx).detach();
+                    // Spawn SHORT-LIVED thread for setup
+                    std::thread(connect_and_setup, ctx).detach();
                 }
             }
         }
@@ -471,11 +453,18 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     ctx->target = target;
     tcp_arg(newpcb, ctx);
     tcp_recv(newpcb, tcp_client_recv);
-    tcp_err(newpcb, [](void* arg, err_t err) { close_tcp_ctx((TcpCtx*)arg); });
+    // On error, cleanup.
+    tcp_err(newpcb, [](void* arg, err_t err) { 
+        // We cannot call close_tcp_ctx safely if it locks LwIP from inside LwIP callback?
+        // Actually g_lwip_mtx is recursive.
+        TcpCtx* c = (TcpCtx*)arg;
+        c->client_pcb = NULL; // Detach PCB immediately
+        close_tcp_ctx(c); 
+    });
     return ERR_OK;
 }
 
-// --- UDP Session Management ---
+// --- UDP Session with Worker Pool ---
 struct UdpKey {
     uint32_t src_ip, dst_ip;
     uint16_t src_port, dst_port;
@@ -488,54 +477,69 @@ struct UdpSession {
     uint16_t src_port, dst_port;
     std::atomic<uint64_t> last_active;
     std::atomic<bool> closed;
-    UdpSession() : sock(INVALID_SOCKET), closed(false) { last_active = get_now_ms(); }
+    Worker* worker;
+    UdpSession() : sock(INVALID_SOCKET), closed(false), worker(NULL) { last_active = get_now_ms(); }
 };
 
 std::map<UdpKey, UdpSession*> g_udp_sessions;
 std::mutex g_udp_mtx;
 
-void udp_recv_loop(UdpSession* sess) {
+void handle_udp_read(UdpSession* sess) {
+    if (sess->closed) return;
     char buf[2048];
     sockaddr_in from;
     int from_len = sizeof(from);
-    while (!sess->closed) {
-        int r = recvfrom(sess->sock, buf, sizeof(buf), 0, (sockaddr*)&from, &from_len);
-        if (r > 0 && g_host_mac_known) {
-            sess->last_active = get_now_ms();
-            uint8_t frame[2048];
-            if (14 + 20 + 8 + r > 2048) continue;
+    int r = recvfrom(sess->sock, buf, sizeof(buf), 0, (sockaddr*)&from, &from_len);
+    
+    if (r > 0 && g_host_mac_known) {
+        sess->last_active = get_now_ms();
+        // Construct Reply
+        uint8_t frame[2048];
+        if (14 + 20 + 8 + r > 2048) return;
 
-            memcpy(frame, HOST_MAC, 6);
-            memcpy(frame + 6, TAP_MAC, 6);
-            *(uint16_t*)(frame + 12) = htons(0x0800);
+        memcpy(frame, HOST_MAC, 6);
+        memcpy(frame + 6, TAP_MAC, 6);
+        *(uint16_t*)(frame + 12) = htons(0x0800);
 
-            uint8_t* ip = frame + 14;
-            uint8_t* udp_hdr = ip + 20;
-            memset(ip, 0, 20);
-            ip[0] = 0x45; ip[9] = 17; ip[8] = 64;
-            *(uint16_t*)(ip + 2) = htons((uint16_t)(20 + 8 + r));
-            *(uint32_t*)(ip + 12) = sess->dst_ip;
-            *(uint32_t*)(ip + 16) = sess->src_ip;
-            *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
+        uint8_t* ip = frame + 14;
+        uint8_t* udp_hdr = ip + 20;
+        
+        // IPv4 Header
+        memset(ip, 0, 20);
+        ip[0] = 0x45; ip[9] = 17; ip[8] = 64;
+        *(uint16_t*)(ip + 2) = htons((uint16_t)(20 + 8 + r));
+        *(uint32_t*)(ip + 12) = sess->dst_ip;
+        *(uint32_t*)(ip + 16) = sess->src_ip;
+        *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
 
-            *(uint16_t*)(udp_hdr + 0) = sess->dst_port;
-            *(uint16_t*)(udp_hdr + 2) = sess->src_port;
-            *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + r));
-            *(uint16_t*)(udp_hdr + 6) = 0;
-            memcpy(udp_hdr + 8, buf, r);
+        // UDP Header
+        *(uint16_t*)(udp_hdr + 0) = sess->dst_port;
+        *(uint16_t*)(udp_hdr + 2) = sess->src_port;
+        *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + r));
+        *(uint16_t*)(udp_hdr + 6) = 0;
+        memcpy(udp_hdr + 8, buf, r);
 
-            tap_send_async(frame, 14 + 20 + 8 + r);
-        } else if (r == SOCKET_ERROR) {
-            if (WSAGetLastError() != WSAETIMEDOUT) break;
-            if (get_now_ms() - sess->last_active > 60000) break; // 60秒无响应自动关闭
+        tap_send_async(frame, 14 + 20 + 8 + r);
+    } else if (r == SOCKET_ERROR) {
+        // Only close on fatal errors, not EWOULDBLOCK
+        if (WSAGetLastError() != WSAEWOULDBLOCK) {
+             // Close logic handled by timeout usually, or here?
         }
     }
+}
+
+// Close helper
+void close_udp_session(UdpSession* sess) {
+    if (sess->closed.exchange(true)) return;
+    if (sess->worker) sess->worker->remove_socket(sess->sock);
+    if (sess->sock != INVALID_SOCKET) closesocket(sess->sock);
+    
+    // Remove from map
     {
         std::lock_guard<std::mutex> lk(g_udp_mtx);
         UdpKey key = { sess->src_ip, sess->dst_ip, sess->src_port, sess->dst_port };
         g_udp_sessions.erase(key);
     }
-    if (sess->sock != INVALID_SOCKET) closesocket(sess->sock);
     delete sess;
 }
 
@@ -543,14 +547,12 @@ void udp_recv_loop(UdpSession* sess) {
 void process_tap_frame(uint8_t* buf, int len) {
     if (len < 14) return;
 
-    // Capture Host MAC from the first packet
     if (!g_host_mac_known) {
         memcpy(HOST_MAC, buf + 6, 6);
         g_host_mac_known = true;
     }
 
     uint16_t eth_type = ::ntohs(*(uint16_t*)(buf + 12));
-
     if (eth_type == 0x0806) {
         struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         if (p) {
@@ -561,10 +563,7 @@ void process_tap_frame(uint8_t* buf, int len) {
     }
 
     struct ip_hdr* ip = (struct ip_hdr*)(buf + 14);
-    
-    // Check if it's IPv4
     if (IPH_V(ip) == 4) {
-        // UDP Direct Handler (Session-based)
         if (IPH_PROTO(ip) == IP_PROTO_UDP) {
             uint8_t* udp_ptr = buf + 14 + IPH_HL(ip) * 4;
             uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
@@ -586,14 +585,27 @@ void process_tap_frame(uint8_t* buf, int len) {
                     sess->src_ip = ip->src.addr; sess->dst_ip = ip->dest.addr;
                     sess->src_port = src_port; sess->dst_port = dst_port;
                     sess->sock = socket(AF_INET, SOCK_DGRAM, 0);
+                    
                     if (sess->sock != INVALID_SOCKET) {
-                        DWORD timeout = 1000;
-                        setsockopt(sess->sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+                        // Non-blocking
+                        u_long mode = 1;
+                        ioctlsocket(sess->sock, FIONBIO, &mode);
+                        
+                        // Assign to worker
+                        sess->worker = WorkerPool::instance().get_worker(src_port ^ dst_port);
+                        if (!sess->worker) sess->worker = WorkerPool::instance().get_next_worker();
+
                         {
                             std::lock_guard<std::mutex> lk(g_udp_mtx);
                             g_udp_sessions[key] = sess;
                         }
-                        std::thread(udp_recv_loop, sess).detach();
+                        
+                        sess->worker->add_socket(
+                            sess->sock,
+                            [sess]() { handle_udp_read(sess); },
+                            [sess]() { close_udp_session(sess); }
+                        );
+
                     } else {
                         delete sess; sess = NULL;
                     }
@@ -608,10 +620,9 @@ void process_tap_frame(uint8_t* buf, int len) {
                     sendto(sess->sock, (const char*)payload, pay_len, 0, (sockaddr*)&dest, sizeof(dest));
                 }
             }
-            return; // Don't pass UDP to LwIP
+            return; 
         }
 
-        // TCP NAT Logic
         if (IPH_PROTO(ip) == IP_PROTO_TCP) {
             uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
             uint16_t src_port = *(uint16_t*)(tcp_base); 
@@ -639,7 +650,6 @@ void process_tap_frame(uint8_t* buf, int len) {
             }
         }
 
-        // Pass TCP and ICMP to LwIP
         struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         if (p) {
             pbuf_take(p, buf, len);
@@ -677,6 +687,10 @@ int main() {
 
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
 
+    // --- Init Worker Pool ---
+    WorkerPool::instance().init(std::thread::hardware_concurrency());
+    log_debug("Worker Pool Initialized with %d threads.\n", std::thread::hardware_concurrency());
+
     lwip_init();
 
     ip4_addr_t ip, mask, gw;
@@ -700,6 +714,7 @@ int main() {
     ol.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     DWORD bytesRead = 0;
     bool pending = false;
+    uint32_t last_cleanup = get_now_ms();
 
     while (true) {
         if (!pending) {
@@ -720,7 +735,7 @@ int main() {
         }
 
         if (pending) {
-            DWORD waitRes = WaitForSingleObject(ol.hEvent, 5); 
+            DWORD waitRes = WaitForSingleObject(ol.hEvent, 2); 
             if (waitRes == WAIT_OBJECT_0) {
                 if (GetOverlappedResult(g_tap, &ol, &bytesRead, FALSE)) {
                     std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
@@ -735,6 +750,23 @@ int main() {
         {
             std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
             sys_check_timeouts();
+        }
+        
+        // Clean UDP sessions
+        if (get_now_ms() - last_cleanup > 5000) {
+            last_cleanup = get_now_ms();
+            std::vector<UdpSession*> stale_sessions;
+            {
+                std::lock_guard<std::mutex> lk(g_udp_mtx);
+                for (auto& pair : g_udp_sessions) {
+                    if (get_now_ms() - pair.second->last_active > 60000) {
+                        stale_sessions.push_back(pair.second);
+                    }
+                }
+            }
+            for (auto* sess : stale_sessions) {
+                close_udp_session(sess);
+            }
         }
     }
     return 0;
