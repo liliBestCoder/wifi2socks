@@ -313,13 +313,15 @@ void close_tcp_ctx(TcpCtx* ctx) {
         closesocket(ctx->proxy_socket);
         ctx->proxy_socket = INVALID_SOCKET;
     }
-    // ctx is deleted by tcp_err/tcp_close callback logic usually, or here if we manage it. 
-    // In this code, ctx is usually passed to tcp_arg. 
-    // We need to ensure we don't leak. 
-    // Ideally use shared_ptr, but for now assuming strict lifecycle.
-    // NOTE: 'new TcpCtx' is done in accept. We should delete it eventually.
-    // LwIP doesn't delete arg.
-    delete ctx; 
+
+    // Defer deletion to worker thread to ensure all pending send tasks are finished
+    if (ctx->worker) {
+        ctx->worker->queue_task([ctx]() {
+            delete ctx;
+        });
+    } else {
+        delete ctx;
+    }
 }
 
 // Handler running in Worker Thread
@@ -397,14 +399,29 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
     if (!p) { close_tcp_ctx(ctx); return ERR_OK; }
     tcp_recved(tpcb, p->tot_len);
 
-    if (ctx->connected) {
-        // Send to proxy - this might block if socket buffer full
-        // For strict non-blocking we should use Worker task, but send() is usually fast enough for this prototype
-        // or check for WOULDBLOCK.
-        send(ctx->proxy_socket, (const char*)p->payload, p->len, 0);
+    if (ctx->connected && ctx->worker) {
+        // ASYNC SEND: Copy data and queue task to worker
+        // This unblocks the main LwIP thread!
+        std::vector<uint8_t> data;
+        data.reserve(p->tot_len);
+        for (struct pbuf* q = p; q != NULL; q = q->next) {
+            data.insert(data.end(), (uint8_t*)q->payload, (uint8_t*)q->payload + q->len);
+        }
+
+        ctx->worker->queue_task([ctx, d = std::move(data)]() {
+            // Check if socket is still valid (simple check, strictly speaking ctx could be closed but valid pointer)
+            // But since we defer delete, 'ctx' pointer is valid memory.
+            // And if socket was closed, send will just fail harmlessly.
+            if (ctx->proxy_socket != INVALID_SOCKET) {
+                send(ctx->proxy_socket, (const char*)d.data(), (int)d.size(), 0);
+            }
+        });
+
     } else {
         std::lock_guard<std::mutex> lock(ctx->data_mtx);
         if (ctx->connected) {
+             // Fallback if worker not ready yet (rare race), send blocking or queue?
+             // Just blocking here is fine as it's rare.
             send(ctx->proxy_socket, (const char*)p->payload, p->len, 0);
         } else {
             uint8_t* d = (uint8_t*)p->payload;
