@@ -579,7 +579,11 @@ void process_tap_frame(uint8_t* buf, int len) {
     uint16_t eth_type = ::ntohs(*(uint16_t*)(buf + 12));
 
     if (eth_type == 0x0806) {
-        handle_arp_manual(buf, len);
+        struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
+        if (p) {
+            pbuf_take(p, buf, len);
+            g_netif.input(p, &g_netif);
+        }
         return; 
     }
 
