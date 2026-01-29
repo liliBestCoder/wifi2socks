@@ -143,10 +143,6 @@ uint16_t ip_chksum_simple(void* dataptr, int len) {
 }
 
 void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len) {
-    ip_addr_t src, dst;
-    ip_addr_set_u32(&src, ip->src.addr);
-    ip_addr_set_u32(&dst, ip->dest.addr);
-
     // Zero out the checksum field before calculation
     *(uint16_t*)(tcp_base + 16) = 0;
 
