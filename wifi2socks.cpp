@@ -150,8 +150,8 @@ void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len)
     p.tot_len = (u16_t)tcp_len;
     
     ip_addr_t src, dst;
-    ip4_addr_set_u32(&src, ip->src.addr);
-    ip4_addr_set_u32(&dst, ip->dest.addr);
+    src.addr = ip->src.addr;
+    dst.addr = ip->dest.addr;
 
     // Zero out the checksum field before calculation
     *(uint16_t*)(tcp_base + 16) = 0;
@@ -487,7 +487,7 @@ std::string parse_dns_name(const uint8_t* buf, int len, int& pos) {
     return "";
 }
 
-void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_port) {
+void udp_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint16_t dst_port) {
     SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
     if (udp == INVALID_SOCKET) return; 
     
@@ -496,21 +496,20 @@ void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
 
     sockaddr_in dest;
     dest.sin_family = AF_INET;
-    dest.sin_addr.S_un.S_addr = ::inet_addr("192.168.11.1");
-    dest.sin_port = ::htons(53);
+    dest.sin_addr.S_un.S_addr = dst_ip;
+    dest.sin_port = dst_port;
 
     sendto(udp, (char*)pkt.data(), (int)pkt.size(), 0, (sockaddr*)&dest, sizeof(dest));
 
     char buf[2048];
-    int r = recvfrom(udp, buf, sizeof(buf), 0, NULL, NULL);
+    sockaddr_in from_addr;
+    int from_len = sizeof(from_addr);
+    int r = recvfrom(udp, buf, sizeof(buf), 0, (sockaddr*)&from_addr, &from_len);
+    
     if (r > 0) {
-        if (r > 12) { 
-             int pos = 12; 
-             std::string qname = parse_dns_name((uint8_t*)buf, r, pos);
-             printf("[DNS-DIRECT] %s (via 192.168.11.1)\n", qname.c_str());
-        }
-
         uint8_t frame[2048];
+        if (14 + 20 + 8 + r > sizeof(frame)) { closesocket(udp); return; }
+
         memcpy(frame, TAP_MAC, 6);
         memcpy(frame + 6, TAP_MAC, 6);
         *(uint16_t*)(frame + 12) = ::htons(0x0800);
@@ -523,17 +522,16 @@ void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
         *(uint16_t*)(ip + 2) = ::htons((uint16_t)(20 + 8 + r));
         ip[8] = 64; ip[9] = 17; 
         
-        *(uint32_t*)(ip + 12) = dest.sin_addr.S_un.S_addr;   
+        *(uint32_t*)(ip + 12) = dst_ip;   
         *(uint32_t*)(ip + 16) = src_ip;  
         *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
 
-        *(uint16_t*)(udp_hdr + 0) = dest.sin_port;
+        *(uint16_t*)(udp_hdr + 0) = dst_port;
         *(uint16_t*)(udp_hdr + 2) = src_port;
         *(uint16_t*)(udp_hdr + 4) = ::htons((uint16_t)(8 + r));
         *(uint16_t*)(udp_hdr + 6) = 0; 
         
         memcpy(udp_hdr + 8, buf, r);
-        *(uint16_t*)(udp_hdr + 6) = 0; 
 
         tap_send_async(frame, 14 + 20 + 8 + r);
     }
@@ -554,6 +552,21 @@ void process_tap_frame(uint8_t* buf, int len) {
     
     // Check if it's IPv4
     if (IPH_V(ip) == 4) {
+        // UDP Direct Handler (Generic)
+        if (IPH_PROTO(ip) == IP_PROTO_UDP) {
+            uint8_t* udp = buf + 14 + IPH_HL(ip) * 4;
+            uint16_t src_port = *(uint16_t*)(udp + 0);
+            uint16_t dst_port = *(uint16_t*)(udp + 2);
+            uint8_t* payload = udp + 8;
+            int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
+            
+            if (pay_len >= 0) {
+                std::vector<uint8_t> data(payload, payload + pay_len);
+                std::thread(udp_direct_thread, data, ip->src.addr, src_port, ip->dest.addr, dst_port).detach();
+            }
+            return; // Don't pass UDP to LwIP
+        }
+
         // TCP NAT Logic
         if (IPH_PROTO(ip) == IP_PROTO_TCP) {
             uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
@@ -582,7 +595,7 @@ void process_tap_frame(uint8_t* buf, int len) {
             }
         }
 
-        // Pass ALL IPv4 packets to LwIP (TCP NAT'd, UDP/ICMP as is)
+        // Pass TCP and ICMP to LwIP
         struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         if (p) {
             pbuf_take(p, buf, len);
