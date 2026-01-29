@@ -185,7 +185,7 @@ std::string parse_tls_sni(const uint8_t* data, size_t len) {
     return "";
 }
 
-// --- NAT State ---
+// --- Global NAT Table ---
 struct NatEntry {
     uint32_t original_dst_ip;
     uint16_t original_dst_port;
@@ -197,10 +197,10 @@ std::mutex g_nat_mtx;
 // --- TCP Logic ---
 enum TcpProxyState {
     TCP_STATE_NONE,
-    TCP_STATE_WAIT_CLIENT_HELLO,
-    TCP_STATE_CONNECTING_PROXY,
-    TCP_STATE_HANDSHAKE_SENT,
-    TCP_STATE_ESTABLISHED
+    TCP_STATE_WAIT_CLIENT_HELLO, 
+    TCP_STATE_CONNECTING_PROXY,  
+    TCP_STATE_HANDSHAKE_SENT,    
+    TCP_STATE_ESTABLISHED        
 };
 
 struct TcpCtx {
@@ -208,7 +208,7 @@ struct TcpCtx {
     struct tcp_pcb* proxy_pcb; 
     TcpProxyState state;
     NatEntry target;
-    std::vector<uint8_t> buffer;
+    std::vector<uint8_t> buffer; 
     TcpCtx() : client_pcb(NULL), proxy_pcb(NULL), state(TCP_STATE_NONE) {}
 };
 
@@ -254,7 +254,7 @@ err_t on_proxy_connected(void* arg, struct tcp_pcb* tpcb, err_t err) {
     }
 
     char cmd[512];
-    sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\\n\r\\n", 
+    sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", 
         target_host.c_str(), ::ntohs(ctx->target.original_dst_port),
         target_host.c_str(), ::ntohs(ctx->target.original_dst_port));
         
@@ -438,6 +438,9 @@ private:
                 Sleep(2000); continue;
             }
             
+            // HTTP CONNECT for UDP is tricky. SOCKS5 UDP Associate is standard.
+            // If proxy supports SOCKS5 on same port as HTTP, we use SOCKS5 handshake.
+            // Assuming the proxy supports SOCKS5 here as per previous context.
             send(tcpSock, "\x05\x01\x00", 3, 0);
             char buf[2048];
             if (!RecvAll(tcpSock, buf, 2) || buf[1] != 0) { Sleep(1000); continue; }
@@ -482,11 +485,14 @@ private:
                     if (r > 10 && buf[2] == 0) {
                         int offset = (buf[3] == 1) ? 10 : ((buf[3] == 4) ? 22 : 0);
                         if (offset > 0) {
-                            uint32_t src_ip = *(uint32_t*)&buf[4]; 
-                            // Just forward to TAP (we need to map back to client)
-                            // But UDP is connectionless. We need a NAT table.
-                            // For simplicity, we'll drop UDP packets that are not DNS for now.
-                            // A full UDP NAT implementation is beyond the scope of this snippet.
+                            // Forward back to TAP via Async helper
+                            // Note: We need to reconstruct the IP packet here.
+                            // But we lack the NAT mapping back for generic UDP!
+                            // For DNS (53), we can assume it goes back to where we intercepted.
+                            // Since we intercept ALL UDP 53 via Direct Thread, 
+                            // this SOCKS5 path is for NON-DNS UDP.
+                            // Without NAT table for UDP, we can't route back.
+                            // Simplified: Just drop for now or implement UDP NAT.
                         }
                     }
                 }
@@ -497,39 +503,79 @@ private:
 
 UdpRelay g_udpRelay;
 
-void handle_arp_manual(uint8_t* buf, int len) {
-    if (len < sizeof(EthHeader) + sizeof(ArpPacket)) return;
-    EthHeader* eth = (EthHeader*)buf;
-    ArpPacket* arp = (ArpPacket*)(buf + sizeof(EthHeader));
-    if (::ntohs(arp->oper) != 1) return;
-    if (arp->tpa != ::inet_addr(TAP_GW)) return;
+// Output function
+err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
+    uint8_t buf[2048];
+    int len = pbuf_copy_partial(p, buf, sizeof(buf), 0);
+    
+    if (len > 34) {
+        struct ip_hdr* ip = (struct ip_hdr*)(buf + 14);
+        if (IPH_PROTO(ip) == IP_PROTO_TCP) {
+            uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
+            uint16_t dst_port = *(uint16_t*)(tcp_base + 2); 
+            
+            std::lock_guard<std::mutex> lk(g_nat_mtx);
+            auto it = g_nat_table.find(ntohs(dst_port));
+            if (it != g_nat_table.end()) {
+                ip->src.addr = it->second.original_dst_ip;
+                *(uint16_t*)(tcp_base) = it->second.original_dst_port;
+                IPH_CHKSUM_SET(ip, 0);
+                IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+            }
+        }
+    }
+    tap_send_async(buf, len);
+    return ERR_OK;
+}
 
-    uint8_t reply[64]; 
-    memset(reply, 0, sizeof(reply)); 
-    EthHeader* reth = (EthHeader*)reply;
-    ArpPacket* rarp = (ArpPacket*)(reply + sizeof(EthHeader));
+// Handle UDP (DNS Direct + Generic Drop for now to save space, or Direct for all?)
+void udp_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint16_t dst_port) {
+    SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
+    DWORD timeout = 2000;
+    setsockopt(udp, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
 
-    memcpy(reth->dst_mac, eth->src_mac, 6);
-    memcpy(reth->src_mac, TAP_MAC, 6);
-    reth->type = eth->type;
+    sockaddr_in dest;
+    dest.sin_family = AF_INET;
+    dest.sin_addr.S_un.S_addr = dst_ip; 
+    dest.sin_port = dst_port;
 
-    rarp->htype = arp->htype;
-    rarp->ptype = arp->ptype;
-    rarp->hlen = 6;
-    rarp->plen = 4;
-    rarp->oper = ::htons(2);
+    sendto(udp, (char*)pkt.data(), (int)pkt.size(), 0, (sockaddr*)&dest, sizeof(dest));
 
-    memcpy(rarp->sha, TAP_MAC, 6);
-    rarp->spa = ::inet_addr(TAP_GW);
-    memcpy(rarp->tha, arp->sha, 6);
-    rarp->tpa = arp->spa;
+    char buf[2048];
+    sockaddr_in from;
+    int fromlen = sizeof(from);
+    int r = recvfrom(udp, buf, sizeof(buf), 0, (sockaddr*)&from, &fromlen);
+    if (r > 0) {
+        uint8_t frame[2048];
+        memcpy(frame, TAP_MAC, 6); memcpy(frame + 6, TAP_MAC, 6); *(uint16_t*)(frame + 12) = htons(0x0800);
+        uint8_t* ip = frame + 14;
+        uint8_t* udp_hdr = ip + 20;
+        
+        memset(ip, 0, 20);
+        ip[0] = 0x45;
+        *(uint16_t*)(ip + 2) = htons((uint16_t)(20 + 8 + r));
+        ip[8] = 64; ip[9] = 17; 
+        
+        *(uint32_t*)(ip + 12) = from.sin_addr.S_un.S_addr;   
+        *(uint32_t*)(ip + 16) = src_ip;  
+        *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
 
-    tap_send_async(reply, 42); 
+        *(uint16_t*)(udp_hdr + 0) = from.sin_port;
+        *(uint16_t*)(udp_hdr + 2) = src_port;
+        *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + r));
+        *(uint16_t*)(udp_hdr + 6) = 0; 
+        
+        memcpy(udp_hdr + 8, buf, r);
+        *(uint16_t*)(udp_hdr + 6) = 0; 
+
+        tap_send_async(frame, 14 + 20 + 8 + r);
+    }
+    closesocket(udp);
 }
 
 void process_tap_frame(uint8_t* buf, int len) {
     if (len < 14) return;
-    uint16_t eth_type = ::ntohs(*(uint16_t*)(buf + 12));
+    uint16_t eth_type = ntohs(*(uint16_t*)(buf + 12));
 
     if (eth_type == 0x0806) {
         handle_arp_manual(buf, len);
@@ -538,20 +584,19 @@ void process_tap_frame(uint8_t* buf, int len) {
 
     struct ip_hdr* ip = (struct ip_hdr*)(buf + 14);
     
-    // UDP Handling via Global Relay
-    if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_UDP) {
+    if (eth_type == 0x0800 && IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_UDP) {
         uint8_t* udp = buf + 14 + IPH_HL(ip) * 4;
         uint16_t dport = *(uint16_t*)(udp + 2);
         uint8_t* payload = udp + 8;
         int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
         if (pay_len > 0) {
-            g_udpRelay.Send(payload, pay_len, ip->dest.addr, dport);
+            std::vector<uint8_t> data(payload, payload + pay_len);
+            std::thread(udp_direct_thread, data, ip->src.addr, *(uint16_t*)udp, ip->dest.addr, dport).detach();
         }
         return;
     }
 
-    // TCP NAT
-    if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
+    if (eth_type == 0x0800 && IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
         uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
         uint16_t src_port = *(uint16_t*)(tcp_base); 
         uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
@@ -559,14 +604,14 @@ void process_tap_frame(uint8_t* buf, int len) {
 
         {
             std::lock_guard<std::mutex> lk(g_nat_mtx);
-            NatEntry& e = g_nat_table[::ntohs(src_port)]; 
+            NatEntry& e = g_nat_table[ntohs(src_port)]; 
             e.original_dst_ip = dst_ip;
             e.original_dst_port = dst_port; 
             e.last_active = get_now_ms();
         }
 
-        ip->dest.addr = ::inet_addr(TAP_GW);
-        *(uint16_t*)(tcp_base + 2) = ::htons(LWIP_LISTEN_PORT);
+        ip->dest.addr = inet_addr(TAP_GW);
+        *(uint16_t*)(tcp_base + 2) = htons(LWIP_LISTEN_PORT);
 
         IPH_CHKSUM_SET(ip, 0);
         IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
@@ -590,20 +635,14 @@ err_t netif_init_cb(struct netif* netif) {
 int main() {
     char devicePath[256];
     sprintf_s(devicePath, sizeof(devicePath), TAP_WIN_PATH, "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}");
-    log_debug("Opening TAP device: %s\n", devicePath);
-
-    g_tap = CreateFileA(devicePath, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, 0);
     
-    if (g_tap == INVALID_HANDLE_VALUE) { 
-        log_debug("Error opening TAP. Code=%lu\n", GetLastError()); 
-        return 1; 
-    }
+    g_tap = CreateFileA(devicePath, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, 0);
+    if (g_tap == INVALID_HANDLE_VALUE) { printf("Error opening TAP\n"); return 1; }
 
     ULONG status = TRUE; DWORD len;
     DeviceIoControl(g_tap, TAP_IOCTL_SET_MEDIA_STATUS, &status, sizeof(status), &status, sizeof(status), &len, NULL);
 
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
-
     lwip_init();
 
     ip4_addr_t ip, mask, gw;
@@ -619,7 +658,7 @@ int main() {
     pcb = tcp_listen(pcb);
     tcp_accept(pcb, tcp_proxy_accept);
 
-    log_debug("LwIP Tun2Socks Running. Proxy: %s:%d\n", PROXY_IP, PROXY_PORT);
+    log_debug("LwIP Tun2Socks Running. HTTP Proxy: %s:%d\n", PROXY_IP, PROXY_PORT);
     
     g_udpRelay.Start();
 
