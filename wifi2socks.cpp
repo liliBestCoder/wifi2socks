@@ -488,6 +488,30 @@ void dns_direct_thread(std::vector<uint8_t> pkt, uint32_t src_ip, uint16_t src_p
 }
 
 // --- Main Processing ---
+void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len) {
+    uint32_t sum = 0;
+    sum += (ip->src.addr & 0xFFFF);
+    sum += (ip->src.addr >> 16) & 0xFFFF;
+    sum += (ip->dest.addr & 0xFFFF);
+    sum += (ip->dest.addr >> 16) & 0xFFFF;
+    sum += ::htons(IP_PROTO_TCP);
+    sum += ::htons((uint16_t)tcp_len);
+    
+    *(uint16_t*)(tcp_base + 16) = 0;
+    
+    uint16_t* ptr = (uint16_t*)tcp_base;
+    int len = tcp_len;
+    while (len > 1) {
+        sum += *ptr++;
+        len -= 2;
+    }
+    if (len == 1) {
+        sum += *(uint8_t*)ptr;
+    }
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    *(uint16_t*)(tcp_base + 16) = (uint16_t)~sum;
+}
+
 void process_tap_frame(uint8_t* buf, int len) {
     if (len < 14) return;
     uint16_t eth_type = ::ntohs(*(uint16_t*)(buf + 12));
@@ -534,6 +558,12 @@ void process_tap_frame(uint8_t* buf, int len) {
 
         IPH_CHKSUM_SET(ip, 0);
         IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+        
+        uint16_t ip_len = ::ntohs(*(uint16_t*)((uint8_t*)ip + 2));
+        int tcp_len = ip_len - IPH_HL(ip) * 4;
+        if (tcp_len > 0) {
+            recalculate_tcp_checksum(ip, tcp_base, tcp_len);
+        }
         
         struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         pbuf_take(p, buf, len);
