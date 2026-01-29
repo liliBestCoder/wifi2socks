@@ -129,6 +129,7 @@
   <ItemGroup>
     <ClCompile Include="utils.cpp" />
     <ClCompile Include="wifi2socks.cpp" />
+    <ClCompile Include="worker.cpp" />
     <ClCompile Include="lwip\src\core\init.c" />
     <ClCompile Include="lwip\src\core\def.c" />
     <ClCompile Include="lwip\src\core\dns.c" />
@@ -160,6 +161,7 @@
     <ClInclude Include="lwipopts.h" />
     <ClInclude Include="packet.h" />
     <ClInclude Include="utils.h" />
+    <ClInclude Include="worker.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
