@@ -16,6 +16,7 @@
 struct SocketContext {
     SOCKET sock;
     std::function<void()> on_read;
+    std::function<void()> on_write; // Added for async connect
     std::function<void()> on_close; 
 };
 
@@ -27,8 +28,9 @@ public:
     void start();
     void stop();
     
-    // Thread-safe methods to add/remove sockets
-    void add_socket(SOCKET s, std::function<void()> on_read, std::function<void()> on_close);
+    // Thread-safe methods to add/remove sockets.
+    // Calling add_socket on an existing socket updates its callbacks.
+    void add_socket(SOCKET s, std::function<void()> on_read, std::function<void()> on_write, std::function<void()> on_close);
     void remove_socket(SOCKET s);
     
     // Run arbitrary task in worker thread

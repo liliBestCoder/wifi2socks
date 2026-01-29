@@ -286,7 +286,9 @@ struct TcpCtx {
     std::mutex data_mtx;
     Worker* worker;
 
-    TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), worker(NULL) {
+    enum State { PRE_CONNECT, CONNECTING, HANDSHAKE, ESTABLISHED } state;
+
+    TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), worker(NULL), state(PRE_CONNECT) {
         sni_buffer.reserve(MAX_SNI_LEN);
         upstream_data.reserve(4096);
     }
@@ -299,8 +301,6 @@ void close_tcp_ctx(TcpCtx* ctx) {
         ctx->worker->remove_socket(ctx->proxy_socket);
     }
 
-    // Schedule LwIP cleanup on main thread logic or ensure lock
-    // This might be called from Worker Thread, so we lock g_lwip_mtx
     std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
     if (ctx->client_pcb) {
         tcp_arg(ctx->client_pcb, NULL);
@@ -314,7 +314,6 @@ void close_tcp_ctx(TcpCtx* ctx) {
         ctx->proxy_socket = INVALID_SOCKET;
     }
 
-    // Defer deletion to worker thread to ensure all pending send tasks are finished
     if (ctx->worker) {
         ctx->worker->queue_task([ctx]() {
             delete ctx;
@@ -324,7 +323,12 @@ void close_tcp_ctx(TcpCtx* ctx) {
     }
 }
 
-// Handler running in Worker Thread
+// Forward declarations for callbacks
+void handle_handshake_read(TcpCtx* ctx);
+void handle_proxy_read(TcpCtx* ctx);
+void handle_proxy_connect(TcpCtx* ctx);
+
+// 3. Established state handler (Transparent Proxy)
 void handle_proxy_read(TcpCtx* ctx) {
     if (ctx->closed) return;
     char buf[16384];
@@ -341,56 +345,151 @@ void handle_proxy_read(TcpCtx* ctx) {
     }
 }
 
-// Short-lived thread for connection setup
-void connect_and_setup(TcpCtx* ctx) {
+// 2. Handshake response handler (Waiting for HTTP 200)
+void handle_handshake_read(TcpCtx* ctx) {
+    if (ctx->closed) return;
+    char resp[1024];
+    int r = recv(ctx->proxy_socket, resp, sizeof(resp) - 1, 0);
+    
+    if (r > 0) {
+        resp[r] = 0;
+        // Simple check for 200 OK. 
+        // Real implementation should parse HTTP properly, but this suffices for typical proxies.
+        if (strstr(resp, "200") != NULL) {
+             {
+                std::lock_guard<std::mutex> lock(ctx->data_mtx);
+                if (!ctx->upstream_data.empty()) {
+                     send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
+                     ctx->upstream_data.clear();
+                }
+                ctx->connected = true;
+                ctx->state = TcpCtx::ESTABLISHED;
+            }
+            
+            // Switch to Transparent Proxy Mode
+            ctx->worker->add_socket(
+                ctx->proxy_socket,
+                [ctx]() { handle_proxy_read(ctx); }, // on_read
+                nullptr, // on_write (disable)
+                [ctx]() { close_tcp_ctx(ctx); }
+            );
+        } else {
+            // Proxy error
+            close_tcp_ctx(ctx);
+        }
+    } else {
+        // Error or Close during handshake
+        close_tcp_ctx(ctx);
+    }
+}
+
+// 1. Connect completion handler
+void handle_proxy_connect(TcpCtx* ctx) {
+    if (ctx->closed) return;
+
+    // Check connection result
+    int err = 0; int len = sizeof(err);
+    if (getsockopt(ctx->proxy_socket, SOL_SOCKET, SO_ERROR, (char*)&err, &len) == SOCKET_ERROR) {
+        err = WSAGetLastError();
+    }
+    
+    if (err != 0) {
+        close_tcp_ctx(ctx);
+        return;
+    }
+
+    // Connected. Send CONNECT command.
+    std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());
+    std::string target_host;
+    if (!sni.empty()) target_host = sni;
+    else {
+        char ip_str[64]; struct in_addr ia; ia.S_un.S_addr = ctx->target.original_dst_ip;
+        strcpy_s(ip_str, ::inet_ntoa(ia)); target_host = ip_str;
+    }
+
+    char cmd[1024];
+    uint16_t port = ntohs(ctx->target.original_dst_port);
+    sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", target_host.c_str(), port, target_host.c_str(), port);
+    
+    // We assume socket buffer is empty enough for this small command. 
+    // In strict non-blocking, we should handle partial sends, but for < 1k command on fresh socket, it's fine.
+    int sent = send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
+    if (sent == SOCKET_ERROR) {
+         if (WSAGetLastError() != WSAEWOULDBLOCK) {
+             close_tcp_ctx(ctx);
+             return;
+         }
+         // If WOULDBLOCK (extremely rare for fresh socket), we should actually keep on_write and retry.
+         // For simplification, we fail here.
+         close_tcp_ctx(ctx); 
+         return;
+    }
+
+    ctx->state = TcpCtx::HANDSHAKE;
+
+    // Switch to Read Interest (Waiting for 200 OK)
+    // Remove on_write, Add on_read
+    ctx->worker->add_socket(
+        ctx->proxy_socket,
+        [ctx]() { handle_handshake_read(ctx); }, // on_read
+        nullptr, // on_write (disable)
+        [ctx]() { close_tcp_ctx(ctx); }
+    );
+}
+
+// Helper to initiate async connection
+void connect_to_proxy_async(TcpCtx* ctx) {
+    // 1. Create Socket
+    ctx->proxy_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (ctx->proxy_socket == INVALID_SOCKET) {
+        close_tcp_ctx(ctx);
+        return;
+    }
+
+    // 2. Set Non-Blocking
+    u_long mode = 1;
+    if (ioctlsocket(ctx->proxy_socket, FIONBIO, &mode) != 0) {
+        close_tcp_ctx(ctx);
+        return;
+    }
+
+    // 3. Assign Worker
+    ctx->worker = WorkerPool::instance().get_worker(ctx->target.original_dst_port);
+    if (!ctx->worker) ctx->worker = WorkerPool::instance().get_next_worker();
+
+    // 4. Start Connect
     sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_addr.S_un.S_addr = inet_addr(PROXY_IP);
     addr.sin_port = htons(PROXY_PORT);
 
-    if (connect(ctx->proxy_socket, (sockaddr*)&addr, sizeof(addr)) == 0) {
-        std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());
-        std::string target_host;
-        if (!sni.empty()) target_host = sni;
-        else {
-            char ip_str[64]; struct in_addr ia; ia.S_un.S_addr = ctx->target.original_dst_ip;
-            strcpy_s(ip_str, ::inet_ntoa(ia)); target_host = ip_str;
-        }
-
-        char cmd[1024];
-        uint16_t port = ntohs(ctx->target.original_dst_port);
-        sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", target_host.c_str(), port, target_host.c_str(), port);
-        send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
-
-        char resp[1024];
-        int r = recv(ctx->proxy_socket, resp, sizeof(resp), 0); // Wait for HTTP 200
-
-        if (r > 0) { // Ideally check for "200 Connection Established"
-            {
-                std::lock_guard<std::mutex> lock(ctx->data_mtx);
-                if (!ctx->upstream_data.empty()) {
-                    send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
-                    ctx->upstream_data.clear();
-                }
-                ctx->connected = true;
-            }
-
-            // Assign to Worker
-            // Hash by client port for consistency
-            // Wait, we can just pick one.
-            ctx->worker = WorkerPool::instance().get_worker(ctx->target.original_dst_port);
-            if (!ctx->worker) ctx->worker = WorkerPool::instance().get_next_worker();
-            
+    int r = connect(ctx->proxy_socket, (sockaddr*)&addr, sizeof(addr));
+    
+    if (r == 0) {
+        // Connected immediately (local proxy?)
+        // Queue the logic to run in worker thread to maintain consistency
+        ctx->state = TcpCtx::CONNECTING;
+        ctx->worker->add_socket(
+            ctx->proxy_socket,
+            nullptr, // no read yet
+            [ctx]() { handle_proxy_connect(ctx); }, // Trigger connect handler (it handles sending CONNECT)
+            [ctx]() { close_tcp_ctx(ctx); }
+        );
+    } else {
+        int err = WSAGetLastError();
+        if (err == WSAEWOULDBLOCK) {
+            // Pending
+            ctx->state = TcpCtx::CONNECTING;
             ctx->worker->add_socket(
-                ctx->proxy_socket, 
-                [ctx]() { handle_proxy_read(ctx); },
+                ctx->proxy_socket,
+                nullptr, // no read yet
+                [ctx]() { handle_proxy_connect(ctx); }, // Wake up when writable (connected)
                 [ctx]() { close_tcp_ctx(ctx); }
             );
         } else {
+            // Failed
             close_tcp_ctx(ctx);
         }
-    } else {
-        close_tcp_ctx(ctx);
     }
 }
 
@@ -400,8 +499,6 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
     tcp_recved(tpcb, p->tot_len);
 
     if (ctx->connected && ctx->worker) {
-        // ASYNC SEND: Copy data and queue task to worker
-        // This unblocks the main LwIP thread!
         std::vector<uint8_t> data;
         data.reserve(p->tot_len);
         for (struct pbuf* q = p; q != NULL; q = q->next) {
@@ -409,9 +506,6 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         }
 
         ctx->worker->queue_task([ctx, d = std::move(data)]() {
-            // Check if socket is still valid (simple check, strictly speaking ctx could be closed but valid pointer)
-            // But since we defer delete, 'ctx' pointer is valid memory.
-            // And if socket was closed, send will just fail harmlessly.
             if (ctx->proxy_socket != INVALID_SOCKET) {
                 send(ctx->proxy_socket, (const char*)d.data(), (int)d.size(), 0);
             }
@@ -420,8 +514,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
     } else {
         std::lock_guard<std::mutex> lock(ctx->data_mtx);
         if (ctx->connected) {
-             // Fallback if worker not ready yet (rare race), send blocking or queue?
-             // Just blocking here is fine as it's rare.
+             // Race condition fallback
             send(ctx->proxy_socket, (const char*)p->payload, p->len, 0);
         } else {
             uint8_t* d = (uint8_t*)p->payload;
@@ -443,9 +536,8 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
                     }
                 }
                 if (ready) {
-                    ctx->proxy_socket = socket(AF_INET, SOCK_STREAM, 0);
-                    // Spawn SHORT-LIVED thread for setup
-                    std::thread(connect_and_setup, ctx).detach();
+                    // Start Async Connect
+                    connect_to_proxy_async(ctx);
                 }
             }
         }
@@ -470,12 +562,10 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     ctx->target = target;
     tcp_arg(newpcb, ctx);
     tcp_recv(newpcb, tcp_client_recv);
-    // On error, cleanup.
+    
     tcp_err(newpcb, [](void* arg, err_t err) { 
-        // We cannot call close_tcp_ctx safely if it locks LwIP from inside LwIP callback?
-        // Actually g_lwip_mtx is recursive.
         TcpCtx* c = (TcpCtx*)arg;
-        c->client_pcb = NULL; // Detach PCB immediately
+        c->client_pcb = NULL; 
         close_tcp_ctx(c); 
     });
     return ERR_OK;
@@ -538,9 +628,8 @@ void handle_udp_read(UdpSession* sess) {
 
         tap_send_async(frame, 14 + 20 + 8 + r);
     } else if (r == SOCKET_ERROR) {
-        // Only close on fatal errors, not EWOULDBLOCK
         if (WSAGetLastError() != WSAEWOULDBLOCK) {
-             // Close logic handled by timeout usually, or here?
+             // Close handled by timeout
         }
     }
 }
@@ -604,11 +693,9 @@ void process_tap_frame(uint8_t* buf, int len) {
                     sess->sock = socket(AF_INET, SOCK_DGRAM, 0);
                     
                     if (sess->sock != INVALID_SOCKET) {
-                        // Non-blocking
                         u_long mode = 1;
                         ioctlsocket(sess->sock, FIONBIO, &mode);
                         
-                        // Assign to worker
                         sess->worker = WorkerPool::instance().get_worker(src_port ^ dst_port);
                         if (!sess->worker) sess->worker = WorkerPool::instance().get_next_worker();
 
@@ -620,6 +707,7 @@ void process_tap_frame(uint8_t* buf, int len) {
                         sess->worker->add_socket(
                             sess->sock,
                             [sess]() { handle_udp_read(sess); },
+                            nullptr,
                             [sess]() { close_udp_session(sess); }
                         );
 
@@ -692,7 +780,7 @@ int main() {
     sprintf_s(devicePath, sizeof(devicePath), TAP_WIN_PATH, "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}");
     log_debug("Opening TAP device: %s\n", devicePath);
 
-    g_tap = CreateFileA(devicePath, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, 0);
+    g_tap = CreateFileA(devicePath, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, 0); 
     
     if (g_tap == INVALID_HANDLE_VALUE) { 
         log_debug("Error opening TAP. Code=%lu\n", GetLastError()); 
