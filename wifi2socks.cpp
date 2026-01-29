@@ -148,8 +148,7 @@ void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len)
     p.payload = tcp_base;
     p.len = (u16_t)tcp_len;
     p.tot_len = (u16_t)tcp_len;
-    p.type = PBUF_REF; 
-
+    
     ip_addr_t src, dst;
     ip4_addr_set_u32(&src, ip->src.addr);
     ip4_addr_set_u32(&dst, ip->dest.addr);
