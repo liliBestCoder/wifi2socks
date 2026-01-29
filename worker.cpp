@@ -36,10 +36,11 @@ void Worker::add_socket(SOCKET s, std::function<void()> on_read, std::function<v
     });
 }
 
-void Worker::remove_socket(SOCKET s) {
+void Worker::remove_socket(SOCKET s, std::function<void()> on_done) {
     std::lock_guard<std::mutex> lock(m_mtx);
-    m_task_queue.push_back([this, s]() {
+    m_task_queue.push_back([this, s, on_done]() {
         m_sockets.erase(s);
+        if (on_done) on_done();
     });
 }
 

@@ -298,7 +298,8 @@ void close_tcp_ctx(TcpCtx* ctx) {
     if (!ctx || ctx->closed.exchange(true)) return;
 
     if (ctx->worker && ctx->proxy_socket != INVALID_SOCKET) {
-        ctx->worker->remove_socket(ctx->proxy_socket);
+        // Stop monitoring immediately (queued)
+        // We do NOT call remove_socket here because we need to sequence it with the deletion below.
     }
 
     std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
@@ -309,16 +310,24 @@ void close_tcp_ctx(TcpCtx* ctx) {
         tcp_close(ctx->client_pcb);
         ctx->client_pcb = NULL;
     }
-    if (ctx->proxy_socket != INVALID_SOCKET) {
-        closesocket(ctx->proxy_socket);
-        ctx->proxy_socket = INVALID_SOCKET;
-    }
+    
+    // Note: We don't close proxy_socket here anymore if worker is active, 
+    // because it might have been created in worker and we need to close it there to avoid races.
 
     if (ctx->worker) {
         ctx->worker->queue_task([ctx]() {
-            delete ctx;
+            if (ctx->proxy_socket != INVALID_SOCKET) {
+                // Remove from map, THEN close and delete
+                ctx->worker->remove_socket(ctx->proxy_socket, [ctx, s = ctx->proxy_socket]() {
+                    closesocket(s);
+                    delete ctx;
+                });
+            } else {
+                delete ctx;
+            }
         });
     } else {
+        if (ctx->proxy_socket != INVALID_SOCKET) closesocket(ctx->proxy_socket);
         delete ctx;
     }
 }
@@ -339,7 +348,8 @@ void handle_proxy_read(TcpCtx* ctx) {
             tcp_write(ctx->client_pcb, buf, (u16_t)r, 1);
             tcp_output(ctx->client_pcb);
         }
-    } else {
+    }
+    else {
         // Error or Close
         close_tcp_ctx(ctx);
     }

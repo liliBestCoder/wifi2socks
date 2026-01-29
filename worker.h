@@ -31,7 +31,7 @@ public:
     // Thread-safe methods to add/remove sockets.
     // Calling add_socket on an existing socket updates its callbacks.
     void add_socket(SOCKET s, std::function<void()> on_read, std::function<void()> on_write, std::function<void()> on_close);
-    void remove_socket(SOCKET s);
+    void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
     
     // Run arbitrary task in worker thread
     void queue_task(std::function<void()> task);
