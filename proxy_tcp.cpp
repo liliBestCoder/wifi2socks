@@ -128,12 +128,13 @@ void handle_proxy_read(TcpCtx* ctx) {
     // Check flow control flag (Atomic check would be better, but bool is okay-ish here)
     if (ctx->read_paused) return;
 
-    char buf[262144];
-    int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
+    // HEAP ALLOCATION: Use vector directly to avoid Stack Overflow with 256KB buffer
+    // Also eliminates one copy (Direct Read -> Move)
+    std::vector<uint8_t> data(262144);
+    int r = recv(ctx->proxy_socket, (char*)data.data(), (int)data.size(), 0);
     
     if (r > 0) {
-        // OPTIMIZATION: Deep copy and queue to Main Thread. NO LOCKING HERE.
-        std::vector<uint8_t> data(buf, buf + r);
+        data.resize(r); // Resize to actual bytes read
         
         MainDispatcher::instance().queue_task([ctx, d = std::move(data)]() {
             // Running on Main Thread
@@ -144,8 +145,7 @@ void handle_proxy_read(TcpCtx* ctx) {
                     ctx->downstream_pending.insert(ctx->downstream_pending.end(), d.begin(), d.end());
                     if (!ctx->read_paused) {
                         ctx->read_paused = true;
-                        ctx->worker->queue_task([ctx]() {
-                            if (ctx->proxy_socket != INVALID_SOCKET) {
+                        ctx->worker->queue_task([ctx]() {\n                            if (ctx->proxy_socket != INVALID_SOCKET) {
                                 ctx->worker->add_socket(ctx->proxy_socket, nullptr, nullptr, [ctx]() { close_tcp_ctx(ctx); });
                             }
                         });
