@@ -167,21 +167,6 @@ err_t tcp_client_sent(void* arg, struct tcp_pcb* tpcb, u16_t len) {
     // 2. Try to send more pending data
     try_send_downstream(ctx);
     
-    // 3. FLOW CONTROL: Resume Reading if dropped below Low Water Mark
-    if (ctx->read_paused) {
-        size_t total_buffered = 0;
-        for (const auto& buf : ctx->tx_queue) total_buffered += buf.size();
-        // Adjust for acked portion of front
-        if (!ctx->tx_queue.empty()) total_buffered -= ctx->tx_acked_offset;
-
-        if (total_buffered < RESUME_TX_QUEUE_SIZE) {
-            ctx->read_paused = false;
-            if (ctx->worker && ctx->proxy_socket != INVALID_SOCKET) {
-                ctx->worker->resume_read(ctx->proxy_socket);
-            }
-        }
-    }
-    
     return ERR_OK;
 }
 
@@ -189,9 +174,6 @@ err_t tcp_client_sent(void* arg, struct tcp_pcb* tpcb, u16_t len) {
 void handle_proxy_read(TcpCtx* ctx) {
     if (ctx->closed) return;
     
-    // Check flow control flag (Atomic check would be better, but bool is okay-ish here)
-    if (ctx->read_paused) return;
-
     // HEAP ALLOCATION: Use vector directly to avoid Stack Overflow with 256KB buffer
     std::vector<uint8_t> data(262144);
     int r = recv(ctx->proxy_socket, (char*)data.data(), (int)data.size(), 0);
@@ -209,19 +191,6 @@ void handle_proxy_read(TcpCtx* ctx) {
                 
                 // Try to write to LwIP
                 try_send_downstream(ctx);
-
-                // FLOW CONTROL: Pause Reading if exceeded High Water Mark
-                size_t total_buffered = 0;
-                for (const auto& buf : ctx->tx_queue) total_buffered += buf.size();
-                // Adjust for acked portion of front
-                if (!ctx->tx_queue.empty()) total_buffered -= ctx->tx_acked_offset;
-
-                if (!ctx->read_paused && total_buffered > MAX_TX_QUEUE_SIZE) {
-                    ctx->read_paused = true;
-                    if (ctx->worker && ctx->proxy_socket != INVALID_SOCKET) {
-                        ctx->worker->pause_read(ctx->proxy_socket);
-                    }
-                }
             }
         });
     } else if (r == 0) {
