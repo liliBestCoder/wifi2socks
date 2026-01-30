@@ -2,6 +2,7 @@
 #include <iostream>
 #include <algorithm>
 #include <chrono>
+#include <exception>
 
 // Worker Implementation
 
@@ -211,7 +212,13 @@ void Worker::loop() {
                 }
             }
             for (auto& task : current_tasks) {
-                task();
+                try {
+                    task();
+                } catch (const std::exception& e) {
+                    printf("Worker task exception: %s\n", e.what());
+                } catch (...) {
+                    printf("Worker task unknown exception\n");
+                }
             }
         }
 
@@ -222,30 +229,36 @@ void Worker::loop() {
             SocketContext* ctx = (SocketContext*)completionKey;
             IO_CONTEXT* ioCtx = (IO_CONTEXT*)overlapped;
 
-            if (ret) {
-                // Success
-                if (ioCtx->type == IO_READ) {
-                    ctx->read_pending = false;
-                    if (ctx->on_read) ctx->on_read();
-                    
-                    // Re-post only if socket still alive in map
-                    // (This check prevents posting new IO for closing sockets)
-                    if (m_sockets.find(ctx->sock) != m_sockets.end()) {
-                         post_zero_byte_read(ctx);
+            try {
+                if (ret) {
+                    // Success
+                    if (ioCtx->type == IO_READ) {
+                        ctx->read_pending = false;
+                        if (ctx->on_read) ctx->on_read();
+                        
+                        // Re-post only if socket still alive in map
+                        // (This check prevents posting new IO for closing sockets)
+                        if (m_sockets.find(ctx->sock) != m_sockets.end()) {
+                             post_zero_byte_read(ctx);
+                        }
+                    } else if (ioCtx->type == IO_CONNECT) {
+                        setsockopt(ctx->sock, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
+                        if (ctx->on_write) ctx->on_write();
                     }
-                } else if (ioCtx->type == IO_CONNECT) {
-                    setsockopt(ctx->sock, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
-                    if (ctx->on_write) ctx->on_write();
+                } else {
+                    // Failure (e.g. Cancelled, Connection Refused)
+                    if (ioCtx->type == IO_READ) {
+                        ctx->read_pending = false;
+                        // Trigger read callback to let recv() fail properly
+                        if (ctx->on_read) ctx->on_read();
+                    } else if (ioCtx->type == IO_CONNECT) {
+                        if (ctx->on_write) ctx->on_write();
+                    }
                 }
-            } else {
-                // Failure (e.g. Cancelled, Connection Refused)
-                if (ioCtx->type == IO_READ) {
-                    ctx->read_pending = false;
-                    // Trigger read callback to let recv() fail properly
-                    if (ctx->on_read) ctx->on_read();
-                } else if (ioCtx->type == IO_CONNECT) {
-                    if (ctx->on_write) ctx->on_write();
-                }
+            } catch (const std::exception& e) {
+                printf("Worker callback exception: %s\n", e.what());
+            } catch (...) {
+                printf("Worker callback unknown exception\n");
             }
             
             // RELEASE for IO Completion
