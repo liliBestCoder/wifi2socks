@@ -167,6 +167,23 @@ Worker* WorkerPool::get_worker(uint32_t hash) {
 }
 
 Worker* WorkerPool::get_next_worker() {
+
     if (m_workers.empty()) return nullptr;
+
     return m_workers[m_next_idx++ % m_workers.size()];
+
+}
+
+
+
+void WorkerPool::for_each_worker(std::function<void(Worker*)> callback) {
+
+    if (m_workers.empty()) return;
+
+    for (auto* w : m_workers) {
+
+        callback(w);
+
+    }
+
 }

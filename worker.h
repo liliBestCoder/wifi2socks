@@ -52,6 +52,9 @@ public:
     void init(int count);
     Worker* get_worker(uint32_t hash);
     Worker* get_next_worker();
+    
+    // Execute a function on every worker (thread-safe iteration of the pool vector)
+    void for_each_worker(std::function<void(Worker*)> callback);
 
 private:
     std::vector<Worker*> m_workers;

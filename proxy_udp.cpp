@@ -4,11 +4,9 @@
 #include "app_config.h"
 #include "lwip_handler.h"
 #include <map>
-#include <mutex>
-#include <atomic>
 #include <vector>
 
-// --- UDP Session with Worker Pool ---
+// --- UDP Session (Thread Local) ---
 struct UdpKey {
     uint32_t src_ip, dst_ip;
     uint16_t src_port, dst_port;
@@ -19,31 +17,30 @@ struct UdpSession {
     SOCKET sock;
     uint32_t src_ip, dst_ip;
     uint16_t src_port, dst_port;
-    std::atomic<uint64_t> last_active;
-    std::atomic<bool> closed;
+    uint64_t last_active; // No atomic needed, accessed only by worker thread
     Worker* worker;
-    UdpSession() : sock(INVALID_SOCKET), closed(false), worker(NULL) { last_active = GetTickCount64(); }
+    UdpSession() : sock(INVALID_SOCKET), worker(NULL) { last_active = GetTickCount64(); }
 };
 
-std::map<UdpKey, UdpSession*> g_udp_sessions;
-std::mutex g_udp_mtx;
+// Thread-local storage for sessions. 
+// No locking needed as it's accessed only by the owning worker thread.
+thread_local std::map<UdpKey, UdpSession*> t_udp_sessions;
 
-void close_udp_session(UdpSession* sess) {
-    if (sess->closed.exchange(true)) return;
+void close_udp_session_internal(UdpSession* sess) {
+    if (!sess) return;
+    
+    // Remove socket from worker's poll list
     if (sess->worker) sess->worker->remove_socket(sess->sock);
     if (sess->sock != INVALID_SOCKET) closesocket(sess->sock);
     
-    // Remove from map
-    {
-        std::lock_guard<std::mutex> lk(g_udp_mtx);
-        UdpKey key = { sess->src_ip, sess->dst_ip, sess->src_port, sess->dst_port };
-        g_udp_sessions.erase(key);
-    }
+    // Remove from thread-local map
+    UdpKey key = { sess->src_ip, sess->dst_ip, sess->src_port, sess->dst_port };
+    t_udp_sessions.erase(key);
+    
     delete sess;
 }
 
 void handle_udp_read(UdpSession* sess) {
-    if (sess->closed) return;
     char buf[2048];
     sockaddr_in from;
     int from_len = sizeof(from);
@@ -80,72 +77,88 @@ void handle_udp_read(UdpSession* sess) {
         TapDriver::instance().send_async(frame, 14 + 20 + 8 + r);
     } else if (r == SOCKET_ERROR) {
         if (WSAGetLastError() != WSAEWOULDBLOCK) {
-             // Close handled by timeout
+             // Let timeout handle close, or close immediately?
+             // Closing immediately is safer for resources.
+             close_udp_session_internal(sess);
         }
     }
 }
 
+// Called by Main Thread
 void udp_check_timeouts() {
-     std::vector<UdpSession*> stale_sessions;
-    {
-        std::lock_guard<std::mutex> lk(g_udp_mtx);
-        uint64_t now = GetTickCount64();
-        for (auto& pair : g_udp_sessions) {
-            if (now - pair.second->last_active > 60000) {
-                stale_sessions.push_back(pair.second);
+    // Dispatch cleanup task to ALL workers
+    WorkerPool::instance().for_each_worker([](Worker* w) {
+        w->queue_task([]() {
+            uint64_t now = GetTickCount64();
+            std::vector<UdpSession*> stale_sessions;
+            
+            // Iterate thread-local map
+            for (auto& pair : t_udp_sessions) {
+                if (now - pair.second->last_active > 60000) {
+                    stale_sessions.push_back(pair.second);
+                }
             }
-        }
-    }
-    for (auto* sess : stale_sessions) {
-        close_udp_session(sess);
-    }
+            
+            for (auto* sess : stale_sessions) {
+                close_udp_session_internal(sess);
+            }
+        });
+    });
 }
 
+// Called by Main Thread
 void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
-    UdpKey key = { src_ip, dst_ip, src_port, dst_port };
-    UdpSession* sess = NULL;
-    {
-        std::lock_guard<std::mutex> lk(g_udp_mtx);
-        auto it = g_udp_sessions.find(key);
-        if (it != g_udp_sessions.end()) sess = it->second;
-    }
-
-    if (!sess) {
-        sess = new UdpSession();
-        sess->src_ip = src_ip; sess->dst_ip = dst_ip;
-        sess->src_port = src_port; sess->dst_port = dst_port;
-        sess->sock = socket(AF_INET, SOCK_DGRAM, 0);
-
-        if (sess->sock != INVALID_SOCKET) {
-            u_long mode = 1;
-            ioctlsocket(sess->sock, FIONBIO, &mode);
-
-            sess->worker = WorkerPool::instance().get_worker(src_port ^ dst_port);
-            if (!sess->worker) sess->worker = WorkerPool::instance().get_next_worker();
-
-            {
-                std::lock_guard<std::mutex> lk(g_udp_mtx);
-                g_udp_sessions[key] = sess;
-            }
-
-            sess->worker->add_socket(
-                sess->sock,
-                [sess]() { handle_udp_read(sess); },
-                nullptr,
-                [sess]() { close_udp_session(sess); }
-            );
-
+    // 1. Calculate Hash to pick a worker
+    uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
+    Worker* w = WorkerPool::instance().get_worker(hash);
+    if (!w) w = WorkerPool::instance().get_next_worker();
+    
+    // 2. Copy data (Must deep copy as payload is valid only in this scope)
+    std::vector<uint8_t> data(payload, payload + len);
+    
+    // 3. Queue task to worker
+    w->queue_task([src_ip, dst_ip, src_port, dst_port, data = std::move(data), w]() {
+        // Runs inside Worker Thread
+        UdpKey key = { src_ip, dst_ip, src_port, dst_port };
+        UdpSession* sess = nullptr;
+        
+        auto it = t_udp_sessions.find(key);
+        if (it != t_udp_sessions.end()) {
+            sess = it->second;
         } else {
-            delete sess; sess = NULL;
+            // New Session
+            sess = new UdpSession();
+            sess->src_ip = src_ip; sess->dst_ip = dst_ip;
+            sess->src_port = src_port; sess->dst_port = dst_port;
+            sess->worker = w;
+            sess->sock = socket(AF_INET, SOCK_DGRAM, 0);
+            
+            if (sess->sock != INVALID_SOCKET) {
+                u_long mode = 1;
+                ioctlsocket(sess->sock, FIONBIO, &mode);
+                
+                t_udp_sessions[key] = sess;
+                
+                // Add to poll loop
+                sess->worker->add_socket(
+                    sess->sock,
+                    [sess]() { handle_udp_read(sess); },
+                    nullptr,
+                    [sess]() { close_udp_session_internal(sess); }
+                );
+            } else {
+                delete sess;
+                sess = nullptr;
+            }
         }
-    }
-
-    if (sess) {
-        sess->last_active = GetTickCount64();
-        sockaddr_in dest;
-        dest.sin_family = AF_INET;
-        dest.sin_addr.S_un.S_addr = sess->dst_ip;
-        dest.sin_port = sess->dst_port;
-        sendto(sess->sock, (const char*)payload, len, 0, (sockaddr*)&dest, sizeof(dest));
-    }
+        
+        if (sess) {
+            sess->last_active = GetTickCount64();
+            sockaddr_in dest;
+            dest.sin_family = AF_INET;
+            dest.sin_addr.S_un.S_addr = sess->dst_ip;
+            dest.sin_port = sess->dst_port;
+            sendto(sess->sock, (const char*)data.data(), (int)data.size(), 0, (sockaddr*)&dest, sizeof(dest));
+        }
+    });
 }
