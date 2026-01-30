@@ -127,9 +127,16 @@ void Worker::remove_socket(SOCKET s, std::function<void()> on_done) {
         auto it = m_sockets.find(s);
         if (it != m_sockets.end()) {
             SocketContext* ctx = it->second;
+            
+            // CRITICAL FIX: Nullify callbacks immediately.
+            // Even if IO is pending and ctx stays alive due to ref_count,
+            // we must NOT call the callbacks because the owner (TcpCtx) is about to be deleted via on_done.
+            ctx->on_read = nullptr;
+            ctx->on_write = nullptr;
+            ctx->on_close = nullptr;
+
             m_sockets.erase(it);
             // RELEASE for Map ownership
-            // If IO is pending, ref_count > 0, ctx won't be deleted yet.
             release_context(ctx); 
         }
         if (on_done) on_done();
