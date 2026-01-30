@@ -184,6 +184,15 @@ void process_tap_frame(uint8_t* buf, int len) {
             uint8_t* payload = udp_ptr + 8;
             int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
 
+            // QUIC BLOCKING (Optimization):
+            // Silent Drop for UDP 443.
+            // Sending ICMP Port Unreachable causes aggressive clients (Chrome/YouTube)
+            // to retry in a tight loop, causing CPU spikes.
+            // Silent drop forces a timeout fallback to TCP, which is CPU friendly.
+            if (dst_port == ::htons(443)) {
+                return;
+            }
+
             if (pay_len >= 0) {
                 handle_udp_packet(ip->src.addr, ip->dest.addr, src_port, dst_port, payload, pay_len);
             }

@@ -156,16 +156,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
             sess->last_active = GetTickCount64();
             sockaddr_in dest;
             dest.sin_family = AF_INET;
-            
-            // DNS Hijack: Redirect all DNS to 8.8.8.8 (Google DNS)
-            // This fixes the "slow 114.114.114.114" issue by using a faster upstream DNS
-            // while preserving the original source/dest for the NAT session.
-            if (sess->dst_port == htons(53)) {
-                dest.sin_addr.S_un.S_addr = 0x08080808; 
-            } else {
-                dest.sin_addr.S_un.S_addr = sess->dst_ip;
-            }
-
+            dest.sin_addr.S_un.S_addr = sess->dst_ip;
             dest.sin_port = sess->dst_port;
             sendto(sess->sock, (const char*)data.data(), (int)data.size(), 0, (sockaddr*)&dest, sizeof(dest));
         }
