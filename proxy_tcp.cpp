@@ -145,7 +145,8 @@ void handle_proxy_read(TcpCtx* ctx) {
                     ctx->downstream_pending.insert(ctx->downstream_pending.end(), d.begin(), d.end());
                     if (!ctx->read_paused) {
                         ctx->read_paused = true;
-                        ctx->worker->queue_task([ctx]() {\n                            if (ctx->proxy_socket != INVALID_SOCKET) {
+                        ctx->worker->queue_task([ctx]() {
+                            if (ctx->proxy_socket != INVALID_SOCKET) {
                                 ctx->worker->add_socket(ctx->proxy_socket, nullptr, nullptr, [ctx]() { close_tcp_ctx(ctx); });
                             }
                         });
