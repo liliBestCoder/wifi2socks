@@ -419,6 +419,9 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
 
     if (target.original_dst_ip == 0) return ERR_ABRT;
     
+    // Disable Nagle algorithm to reduce latency (especially for handshake)
+    tcp_nagle_disable(newpcb);
+
     TcpCtx* ctx = new TcpCtx();
     ctx->client_pcb = newpcb;
     ctx->target = target;
