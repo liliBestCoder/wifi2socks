@@ -40,6 +40,61 @@ uint32_t calculate_raw_sum(const void* data, int len) {
     return sum;
 }
 
+// Helper to construct and send ICMP Port Unreachable (Type 3, Code 3)
+// This tells the client (YouTube) immediately that UDP/QUIC is blocked, triggering fast fallback to TCP.
+void send_icmp_port_unreachable(uint8_t* req_buf, int req_len) {
+    if (req_len < 34) return; // Minimum size: Eth(14) + IP(20)
+
+    struct ip_hdr* req_ip = (struct ip_hdr*)(req_buf + 14);
+    int req_ip_hlen = IPH_HL(req_ip) * 4;
+    
+    // ICMP Payload: Original IP Header + first 8 bytes of Original Data (UDP Header)
+    // Packet Structure: [Ethernet 14] [IP 20] [ICMP 8] [Orig IP Header] [Orig Data 8]
+    int icmp_payload_len = req_ip_hlen + 8;
+    int resp_len = 14 + 20 + 8 + icmp_payload_len;
+    
+    if (req_len < 14 + icmp_payload_len) return; // Safety check
+
+    std::vector<uint8_t> resp(resp_len);
+    uint8_t* ptr = resp.data();
+
+    // 1. Ethernet Header (Swap MACs)
+    memcpy(ptr, req_buf + 6, 6);      // Dst MAC = Req Src MAC
+    memcpy(ptr + 6, req_buf, 6);      // Src MAC = Req Dst MAC
+    *(uint16_t*)(ptr + 12) = ::htons(0x0800); // IPv4 type
+
+    // 2. IP Header
+    struct ip_hdr* resp_ip = (struct ip_hdr*)(ptr + 14);
+    IPH_VHL_SET(resp_ip, 4, 5);
+    IPH_TOS_SET(resp_ip, 0);
+    IPH_LEN_SET(resp_ip, ::htons(resp_len - 14));
+    IPH_ID_SET(resp_ip, ::htons(0x1337));
+    IPH_OFFSET_SET(resp_ip, 0);
+    IPH_TTL_SET(resp_ip, 64);
+    IPH_PROTO_SET(resp_ip, IP_PROTO_ICMP);
+    resp_ip->src.addr = req_ip->dest.addr; // From: The IP client tried to reach
+    resp_ip->dest.addr = req_ip->src.addr; // To: The client
+    IPH_CHKSUM_SET(resp_ip, 0);
+    IPH_CHKSUM_SET(resp_ip, ip_chksum_simple(resp_ip, 20));
+
+    // 3. ICMP Header
+    uint8_t* icmp_base = ptr + 14 + 20;
+    icmp_base[0] = 3; // Type: Destination Unreachable
+    icmp_base[1] = 3; // Code: Port Unreachable
+    *(uint16_t*)(icmp_base + 2) = 0; // Checksum placeholder
+    *(uint32_t*)(icmp_base + 4) = 0; // Unused
+
+    // 4. ICMP Payload (Original Packet)
+    memcpy(icmp_base + 8, req_buf + 14, icmp_payload_len);
+
+    // 5. Calculate ICMP Checksum
+    // Checksum covers ICMP Header + Payload
+    *(uint16_t*)(icmp_base + 2) = ip_chksum_simple(icmp_base, 8 + icmp_payload_len);
+
+    // 6. Send back to TAP
+    TapDriver::instance().send_async(resp.data(), (int)resp.size());
+}
+
 void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len) {
     *(uint16_t*)(tcp_base + 16) = 0;
     uint32_t sum = 0;
@@ -128,6 +183,15 @@ void process_tap_frame(uint8_t* buf, int len) {
             uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
             uint8_t* payload = udp_ptr + 8;
             int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
+
+            // QUIC BLOCKING (Optimization):
+            // If the packet is for UDP 443 (QUIC), immediately send ICMP Port Unreachable.
+            // This forces the client (e.g. YouTube) to fallback to TCP instantly,
+            // instead of waiting for a timeout.
+            if (dst_port == ::htons(443)) {
+                send_icmp_port_unreachable(buf, len);
+                return;
+            }
 
             if (pay_len >= 0) {
                 handle_udp_packet(ip->src.addr, ip->dest.addr, src_port, dst_port, payload, pay_len);
