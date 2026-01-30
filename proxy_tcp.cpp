@@ -276,23 +276,15 @@ void connect_to_proxy_async(TcpCtx* ctx) {
         addr.sin_family = AF_INET;
         addr.sin_port = htons(PROXY_PORT);
 
-        int r = connect(ctx->proxy_socket, (struct sockaddr*)&addr, sizeof(addr));
-        
-        if (r == 0) {
-            handle_proxy_connect(ctx); 
-        } else {
-            int err = WSAGetLastError();
-            if (err == WSAEWOULDBLOCK) {
-                ctx->worker->add_socket(
-                    ctx->proxy_socket,
-                    nullptr, 
-                    [ctx]() { handle_proxy_connect(ctx); },
-                    [ctx]() { close_tcp_ctx(ctx); }
-                );
-            } else {
-                close_tcp_ctx(ctx);
+        // IOCP Update: Use connect_async
+        ctx->worker->connect_async(
+            ctx->proxy_socket, 
+            *(sockaddr_in*)&addr, 
+            [ctx]() {
+                // On Connect Success
+                handle_proxy_connect(ctx); 
             }
-        }
+        );
     });
 }
 

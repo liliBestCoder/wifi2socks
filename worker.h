@@ -5,6 +5,7 @@
 #endif
 
 #include <winsock2.h>
+#include <mswsock.h>
 #include <vector>
 #include <queue>
 #include <thread>
@@ -13,11 +14,37 @@
 #include <map>
 #include <atomic>
 
+// IOCP Operation Types
+enum IO_TYPE {
+    IO_READ,    // Zero-byte read completed
+    IO_WRITE,   // Write completed (reserved)
+    IO_CONNECT  // ConnectEx completed
+};
+
+// Extended OVERLAPPED to hold context
+struct IO_CONTEXT {
+    OVERLAPPED overlapped;
+    IO_TYPE type;
+};
+
 struct SocketContext {
     SOCKET sock;
     std::function<void()> on_read;
-    std::function<void()> on_write; // Added for async connect
+    std::function<void()> on_write; // Used for Connect completion
     std::function<void()> on_close; 
+    
+    IO_CONTEXT read_io;    // Reuse for reads
+    IO_CONTEXT connect_io; // Reuse for connects
+    bool read_pending;     // Avoid double posting
+    
+    SocketContext() {
+        memset(&read_io, 0, sizeof(read_io));
+        read_io.type = IO_READ;
+        memset(&connect_io, 0, sizeof(connect_io));
+        connect_io.type = IO_CONNECT;
+        read_pending = false;
+        sock = INVALID_SOCKET;
+    }
 };
 
 class Worker {
@@ -29,21 +56,27 @@ public:
     void stop();
     
     // Thread-safe methods to add/remove sockets.
-    // Calling add_socket on an existing socket updates its callbacks.
     void add_socket(SOCKET s, std::function<void()> on_read, std::function<void()> on_write, std::function<void()> on_close);
     void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
     
+    // New: Async Connect for IOCP
+    void connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect);
+
     // Run arbitrary task in worker thread
     void queue_task(std::function<void()> task);
 
 private:
     void loop();
-    
+    void post_zero_byte_read(SocketContext* ctx);
+
+    HANDLE m_iocp;
     std::thread m_thread;
     std::mutex m_mtx;
-    std::map<SOCKET, SocketContext> m_sockets;
+    std::map<SOCKET, SocketContext*> m_sockets; // Pointers to ensure address stability for IOCP
     std::vector<std::function<void()>> m_task_queue; 
     std::atomic<bool> m_running;
+    
+    LPFN_CONNECTEX m_lpfnConnectEx;
 };
 
 class WorkerPool {
@@ -53,7 +86,6 @@ public:
     Worker* get_worker(uint32_t hash);
     Worker* get_next_worker();
     
-    // Execute a function on every worker (thread-safe iteration of the pool vector)
     void for_each_worker(std::function<void(Worker*)> callback);
 
 private:

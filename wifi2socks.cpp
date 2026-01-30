@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <winioctl.h>
 #pragma comment(lib, "Ws2_32.lib")
+#pragma comment(lib, "Mswsock.lib")
 #include "app_config.h"
 #include "tap_driver.h"
 #include "worker.h"
