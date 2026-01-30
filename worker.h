@@ -37,6 +37,8 @@ struct SocketContext {
     IO_CONTEXT connect_io; // Reuse for connects
     bool read_pending;     // Avoid double posting
     
+    int ref_count;         // Reference Counting for lifetime management
+
     SocketContext() {
         memset(&read_io, 0, sizeof(read_io));
         read_io.type = IO_READ;
@@ -44,6 +46,7 @@ struct SocketContext {
         connect_io.type = IO_CONNECT;
         read_pending = false;
         sock = INVALID_SOCKET;
+        ref_count = 0; 
     }
 };
 
@@ -68,6 +71,10 @@ public:
 private:
     void loop();
     void post_zero_byte_read(SocketContext* ctx);
+    
+    // Reference counting helpers
+    void retain_context(SocketContext* ctx);
+    void release_context(SocketContext* ctx);
 
     HANDLE m_iocp;
     std::thread m_thread;

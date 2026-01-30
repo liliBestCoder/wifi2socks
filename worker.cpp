@@ -43,11 +43,23 @@ void Worker::stop() {
     if (m_thread.joinable()) m_thread.join();
 }
 
+// --- Reference Counting ---
+void Worker::retain_context(SocketContext* ctx) {
+    if (ctx) ctx->ref_count++;
+}
+
+void Worker::release_context(SocketContext* ctx) {
+    if (ctx) {
+        ctx->ref_count--;
+        if (ctx->ref_count <= 0) {
+            delete ctx;
+        }
+    }
+}
+
 void Worker::post_zero_byte_read(SocketContext* ctx) {
     if (!ctx || ctx->read_pending) return;
 
-    // Use a static dummy buffer. 
-    // Although len is 0, passing a valid pointer is safer/required by some providers.
     static char dummy_buf[1];
     static WSABUF wsaBuf = { 0, dummy_buf };
     
@@ -57,23 +69,18 @@ void Worker::post_zero_byte_read(SocketContext* ctx) {
     memset(&ctx->read_io.overlapped, 0, sizeof(OVERLAPPED));
     ctx->read_io.type = IO_READ;
 
+    // RETAIN for IO
+    retain_context(ctx);
+
     if (WSARecv(ctx->sock, &wsaBuf, 1, &bytes, &flags, &ctx->read_io.overlapped, NULL) == SOCKET_ERROR) {
         if (WSAGetLastError() != WSA_IO_PENDING) {
-            // Immediate error. 
-            // In a proactor model, we might want to signal this immediately.
-            // For now, we rely on the loop's error handling if pending failed,
-            // or we could mark pending as true and let the loop handle immediate failure if ret==FALSE?
-            // Actually if it fails immediately, GQCStatus won't pick it up.
-            // But handling it here requires recursion or complex logic.
-            // Often if socket is valid, it returns IO_PENDING.
-            // If socket is closed, we might get error.
+            // Immediate failure
+            release_context(ctx);
         } else {
             ctx->read_pending = true;
         }
     } else {
-        // Completed immediately (synchronously)
-        // Still, IOCP will receive a notification because we didn't skip completion port on success.
-        // So we treat it as pending.
+        // Immediate success (still generates completion)
         ctx->read_pending = true;
     }
 }
@@ -84,7 +91,6 @@ void Worker::add_socket(SOCKET s, std::function<void()> on_read, std::function<v
     m_task_queue.push_back([this, s, on_read, on_write, on_close]() {
         SocketContext* ctx = nullptr;
         
-        // 1. Check if Context already exists (e.g. created by connect_async)
         auto it = m_sockets.find(s);
         bool new_association = false;
         
@@ -93,23 +99,20 @@ void Worker::add_socket(SOCKET s, std::function<void()> on_read, std::function<v
         } else {
             ctx = new SocketContext();
             ctx->sock = s;
+            // RETAIN for Map ownership
+            retain_context(ctx);
             m_sockets[s] = ctx;
             new_association = true;
         }
         
-        // 2. Update Callbacks
         ctx->on_read = on_read;
-        ctx->on_write = on_write; // Updates or sets write callback
+        ctx->on_write = on_write; 
         ctx->on_close = on_close;
 
-        // 3. Associate with IOCP (only if new)
-        // Note: Re-associating with same Key is harmless/ignored, but we only do it if we created ctx.
-        // If it existed, it's already associated with 'ctx' as Key.
         if (new_association) {
             CreateIoCompletionPort((HANDLE)s, m_iocp, (ULONG_PTR)ctx, 0);
         }
 
-        // 4. Post Read if needed
         if (on_read && !ctx->read_pending) {
             post_zero_byte_read(ctx);
         }
@@ -124,32 +127,10 @@ void Worker::remove_socket(SOCKET s, std::function<void()> on_done) {
         auto it = m_sockets.find(s);
         if (it != m_sockets.end()) {
             SocketContext* ctx = it->second;
-            // In a full IOCP impl, we should wait for pending IO to cancel.
-            // Here we assume closesocket() has been called or will be called, 
-            // which cancels IO. 
-            // We just clean up the map. The ctx pointer might still be referenced in a completion packet!
-            // FIX: We CANNOT delete 'ctx' here if IOCP packet is pending.
-            // However, implementing full RefCounting is complex.
-            // Given the simple use case: closesocket triggers failure completion.
-            // If we delete ctx here, the loop might access freed memory.
-            // LEAK TRADE-OFF: We removed it from map. We won't find it again.
-            // We will rely on the loop to NOT crash if Key points to dead memory? No that's impossible.
-            
-            // Safer Strategy for this snippet: 
-            // Don't delete ctx immediately. 
-            // But we have no garbage collector.
-            // 
-            // Workaround: We delete ctx. We assume the user calls remove_socket AFTER closesocket,
-            // and we rely on the fact that we process tasks before completion status? 
-            // No, completions can arrive anytime.
-            
-            // PROPER FIX requires shared_ptr or intrusive refcounting.
-            // For this specific bug fix ("Network not working"), the issue was Key mismatch.
-            // We will stick to raw delete for now, but be aware of the risk. 
-            // To mitigate, we erase from map. 
-            
-            delete ctx; 
             m_sockets.erase(it);
+            // RELEASE for Map ownership
+            // If IO is pending, ref_count > 0, ctx won't be deleted yet.
+            release_context(ctx); 
         }
         if (on_done) on_done();
     });
@@ -159,7 +140,6 @@ void Worker::remove_socket(SOCKET s, std::function<void()> on_done) {
 void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect) {
     std::lock_guard<std::mutex> lock(m_mtx);
     m_task_queue.push_back([this, s, addr, on_connect]() {
-        // Bind required for ConnectEx
         struct sockaddr_in bindAddr;
         memset(&bindAddr, 0, sizeof(bindAddr));
         bindAddr.sin_family = AF_INET;
@@ -167,26 +147,31 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
         bindAddr.sin_port = 0;
         bind(s, (sockaddr*)&bindAddr, sizeof(bindAddr));
 
-        // Create Context
         SocketContext* ctx = new SocketContext();
         ctx->sock = s;
-        ctx->on_write = on_connect; // Connect callback
+        ctx->on_write = on_connect;
+        
+        // RETAIN for Map ownership
+        retain_context(ctx);
         m_sockets[s] = ctx;
 
-        // Associate
         CreateIoCompletionPort((HANDLE)s, m_iocp, (ULONG_PTR)ctx, 0);
 
-        // Post ConnectEx
         memset(&ctx->connect_io.overlapped, 0, sizeof(OVERLAPPED));
         ctx->connect_io.type = IO_CONNECT;
         
+        // RETAIN for IO
+        retain_context(ctx);
+
         if (m_lpfnConnectEx) {
             BOOL ret = m_lpfnConnectEx(s, (sockaddr*)&addr, sizeof(addr), NULL, 0, NULL, &ctx->connect_io.overlapped);
             if (!ret && WSAGetLastError() != ERROR_IO_PENDING) {
-                // Failed immediately. 
-                // We should probably callback or cleanup?
-                // For now, let it be.
+                // Immediate failure
+                release_context(ctx);
             }
+        } else {
+             // Should not happen if init correctly
+             release_context(ctx);
         }
     });
     PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
@@ -229,10 +214,10 @@ void Worker::loop() {
                 // Success
                 if (ioCtx->type == IO_READ) {
                     ctx->read_pending = false;
-                    // Zero-byte read completed successfully
                     if (ctx->on_read) ctx->on_read();
                     
-                    // Re-post if still valid
+                    // Re-post only if socket still alive in map
+                    // (This check prevents posting new IO for closing sockets)
                     if (m_sockets.find(ctx->sock) != m_sockets.end()) {
                          post_zero_byte_read(ctx);
                     }
@@ -241,17 +226,19 @@ void Worker::loop() {
                     if (ctx->on_write) ctx->on_write();
                 }
             } else {
-                // Failed (e.g. ConnectRefused, Reset, etc.)
-                // Treat as event ready so app can get the error
+                // Failure (e.g. Cancelled, Connection Refused)
                 if (ioCtx->type == IO_READ) {
                     ctx->read_pending = false;
-                    // Trigger read callback, let recv() fail and app handle close
+                    // Trigger read callback to let recv() fail properly
                     if (ctx->on_read) ctx->on_read();
                 } else if (ioCtx->type == IO_CONNECT) {
-                    // Connect failed. Trigger callback, let app check SO_ERROR
                     if (ctx->on_write) ctx->on_write();
                 }
             }
+            
+            // RELEASE for IO Completion
+            // This balances the retain_context called before WSARecv/ConnectEx
+            release_context(ctx);
         }
     }
 }
