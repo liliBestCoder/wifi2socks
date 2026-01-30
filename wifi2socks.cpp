@@ -12,6 +12,7 @@
 #include "lwip_handler.h"
 #include "proxy_tcp.h"
 #include "proxy_udp.h"
+#include "main_dispatcher.h"
 #include <iostream>
 #include <thread>
 
@@ -64,6 +65,11 @@ int main() {
     HANDLE tapHandle = TapDriver::instance().handle();
 
     while (true) {
+        // --- PROCESS PENDING TASKS FROM WORKERS ---
+        // This handles the "Downstream" writes to LwIP without locking in Workers
+        MainDispatcher::instance().process_pending();
+        // ------------------------------------------
+
         if (!pending) {
             if (!ReadFile(tapHandle, buffer, sizeof(buffer), &bytesRead, &ol)) {
                 if (GetLastError() != ERROR_IO_PENDING) {

@@ -136,6 +136,7 @@
     <ClCompile Include="proxy_tcp.cpp" />
     <ClCompile Include="proxy_udp.cpp" />
     <ClCompile Include="lwip_handler.cpp" />
+    <ClCompile Include="main_dispatcher.cpp" />
     <ClCompile Include="lwip\src\core\init.c" />
     <ClCompile Include="lwip\src\core\def.c" />
     <ClCompile Include="lwip\src\core\dns.c" />
