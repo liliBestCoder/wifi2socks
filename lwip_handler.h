@@ -6,6 +6,7 @@
 // Global LwIP lock
 extern std::recursive_mutex g_lwip_mtx;
 
+uint32_t get_now_ms();
 void lwip_system_init();
 void lwip_periodic_handle();
 void process_tap_frame(uint8_t* buf, int len);
