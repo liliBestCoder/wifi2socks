@@ -8,6 +8,7 @@
 #include <atomic>
 #include <mutex>
 #include <vector>
+#include <deque>
 #include <string>
 #include <algorithm>
 
@@ -21,16 +22,22 @@ struct TcpCtx {
     NatEntry target;
     std::vector<uint8_t> sni_buffer;
     std::vector<uint8_t> upstream_data; // Pre-connect buffer
-    std::vector<uint8_t> downstream_pending; // Pending data for LwIP
+    
+    // Zero-Copy Queue
+    std::deque<std::vector<uint8_t>> tx_queue;
+    size_t tx_acked_offset;   // Bytes acked in tx_queue.front()
+    size_t tx_written_idx;    // Current buffer index being written to LwIP
+    size_t tx_written_offset; // Bytes written in tx_queue[tx_written_idx]
+    
     std::mutex data_mtx;
     Worker* worker;
 
     enum State { PRE_CONNECT, CONNECTING, HANDSHAKE, ESTABLISHED } state;
 
-    TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT) {
+    TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
+               tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0) {
         sni_buffer.reserve(MAX_SNI_LEN);
         upstream_data.reserve(8192); 
-        downstream_pending.reserve(262144);
     }
 };
 
@@ -84,40 +91,90 @@ void close_tcp_ctx(TcpCtx* ctx) {
     }
 }
 
+// Internal helper: Try to write pending buffers to LwIP (Zero-Copy)
+void try_send_downstream(TcpCtx* ctx) {
+    if (!ctx || ctx->closed || !ctx->client_pcb) return;
+
+    while (ctx->tx_written_idx < ctx->tx_queue.size()) {
+        auto& buf = ctx->tx_queue[ctx->tx_written_idx];
+        
+        // Safety check for offset
+        if (ctx->tx_written_offset >= buf.size()) {
+            ctx->tx_written_idx++;
+            ctx->tx_written_offset = 0;
+            continue;
+        }
+
+        u16_t limit = tcp_sndbuf(ctx->client_pcb);
+        if (limit == 0) break; 
+
+        size_t remaining = buf.size() - ctx->tx_written_offset;
+        u16_t chunk = (u16_t)((std::min)((size_t)limit, remaining));
+        if (chunk == 0) break;
+
+        // ZERO COPY WRITE: Pass 0 as copy flag
+        // We guarantee 'buf' stays in tx_queue until Acked
+        err_t err = tcp_write(ctx->client_pcb, 
+                              buf.data() + ctx->tx_written_offset, 
+                              chunk, 
+                              0);
+                              
+        if (err == ERR_OK) {
+            ctx->tx_written_offset += chunk;
+            if (ctx->tx_written_offset >= buf.size()) {
+                ctx->tx_written_idx++;
+                ctx->tx_written_offset = 0;
+            }
+            tcp_output(ctx->client_pcb);
+        } else if (err == ERR_MEM) {
+            break;
+        } else {
+            close_tcp_ctx(ctx);
+            return;
+        }
+    }
+    
+    // Resume reading if we have written everything to LwIP (backlog cleared)
+    if (ctx->read_paused && ctx->worker && ctx->tx_written_idx >= ctx->tx_queue.size()) {
+        ctx->read_paused = false;
+        ctx->worker->queue_task([ctx]() {
+            if (ctx->proxy_socket != INVALID_SOCKET) {
+                 ctx->worker->add_socket(
+                    ctx->proxy_socket,
+                    [ctx]() { handle_proxy_read(ctx); },
+                    nullptr,
+                    [ctx]() { close_tcp_ctx(ctx); }
+                );
+            }
+        });
+    }
+}
+
 // Flow Control Callback (Main Thread)
 err_t tcp_client_sent(void* arg, struct tcp_pcb* tpcb, u16_t len) {
     TcpCtx* ctx = (TcpCtx*)arg;
     if (!ctx || ctx->closed) return ERR_OK;
 
-    // Retry pending data
-    if (!ctx->downstream_pending.empty()) {
-        u16_t limit = tcp_sndbuf(tpcb);
-        if (limit > 0) {
-             size_t chunk = (std::min)((size_t)limit, ctx->downstream_pending.size());
-             if (chunk > 0xffff) chunk = 0xffff; // Safety
-             if (tcp_write(tpcb, ctx->downstream_pending.data(), (u16_t)chunk, 1) == ERR_OK) {
-                 tcp_output(tpcb);
-                 ctx->downstream_pending.erase(ctx->downstream_pending.begin(), ctx->downstream_pending.begin() + chunk);
-             }
+    // 1. Process Acks: Remove fully acked buffers from front
+    while (len > 0 && !ctx->tx_queue.empty()) {
+        auto& head = ctx->tx_queue.front();
+        size_t unacked = head.size() - ctx->tx_acked_offset;
+        
+        if (len >= unacked) {
+            len -= (u16_t)unacked;
+            ctx->tx_queue.pop_front();
+            ctx->tx_acked_offset = 0;
+            // Adjust written index since we removed a buffer from front
+            if (ctx->tx_written_idx > 0) ctx->tx_written_idx--;
+        } else {
+            ctx->tx_acked_offset += len;
+            len = 0;
         }
     }
 
-    if (ctx->read_paused && ctx->worker && ctx->downstream_pending.empty()) {
-        if (tcp_sndbuf(tpcb) > 0) {
-            ctx->read_paused = false;
-            ctx->worker->queue_task([ctx]() {
-                // Re-enable READ on Worker
-                if (ctx->proxy_socket != INVALID_SOCKET) {
-                     ctx->worker->add_socket(
-                        ctx->proxy_socket,
-                        [ctx]() { handle_proxy_read(ctx); },
-                        nullptr,
-                        [ctx]() { close_tcp_ctx(ctx); }
-                    );
-                }
-            });
-        }
-    }
+    // 2. Try to send more pending data
+    try_send_downstream(ctx);
+    
     return ERR_OK;
 }
 
@@ -129,56 +186,22 @@ void handle_proxy_read(TcpCtx* ctx) {
     if (ctx->read_paused) return;
 
     // HEAP ALLOCATION: Use vector directly to avoid Stack Overflow with 256KB buffer
-    // Also eliminates one copy (Direct Read -> Move)
     std::vector<uint8_t> data(262144);
     int r = recv(ctx->proxy_socket, (char*)data.data(), (int)data.size(), 0);
     
     if (r > 0) {
         data.resize(r); // Resize to actual bytes read
         
-        MainDispatcher::instance().queue_task([ctx, d = std::move(data)]() {
+        // Use mutable to allow moving 'd' into tx_queue
+        MainDispatcher::instance().queue_task([ctx, d = std::move(data)]() mutable {
             // Running on Main Thread
             std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
             if (ctx->client_pcb && !ctx->closed) {
-                // 1. If pending data exists, append all and ensure paused
-                if (!ctx->downstream_pending.empty()) {
-                    ctx->downstream_pending.insert(ctx->downstream_pending.end(), d.begin(), d.end());
-                    if (!ctx->read_paused) {
-                        ctx->read_paused = true;
-                        ctx->worker->queue_task([ctx]() {
-                            if (ctx->proxy_socket != INVALID_SOCKET) {
-                                ctx->worker->add_socket(ctx->proxy_socket, nullptr, nullptr, [ctx]() { close_tcp_ctx(ctx); });
-                            }
-                        });
-                    }
-                    return;
-                }
-
-                // 2. Try direct write
-                size_t written = 0;
-                u16_t limit = tcp_sndbuf(ctx->client_pcb);
-                if (limit > 0) {
-                    size_t chunk = (std::min)((size_t)limit, d.size());
-                    if (chunk > 0xffff) chunk = 0xffff;
-                    if (tcp_write(ctx->client_pcb, d.data(), (u16_t)chunk, 1) == ERR_OK) {
-                        tcp_output(ctx->client_pcb);
-                        written = chunk;
-                    }
-                }
-
-                // 3. Buffer remainder if any
-                if (written < d.size()) {
-                    ctx->downstream_pending.insert(ctx->downstream_pending.end(), d.begin() + written, d.end());
-                    
-                    if (!ctx->read_paused) {
-                        ctx->read_paused = true;
-                        ctx->worker->queue_task([ctx]() {
-                            if (ctx->proxy_socket != INVALID_SOCKET) {
-                                ctx->worker->add_socket(ctx->proxy_socket, nullptr, nullptr, [ctx]() { close_tcp_ctx(ctx); });
-                            }
-                        });
-                    }
-                }
+                // Append to Zero-Copy Queue
+                ctx->tx_queue.push_back(std::move(d));
+                
+                // Try to write to LwIP
+                try_send_downstream(ctx);
             }
         });
     } else if (r == 0) {
