@@ -72,9 +72,9 @@ err_t ethernet_input(struct pbuf *p, struct netif *netif);
 #define TAP_NETMASK     "255.255.255.0"
 #define TAP_GW          "10.0.0.1" 
 #define PROXY_IP        "127.0.0.1"
-#define PROXY_PORT      3080
+#define PROXY_PORT      2080
 #define LWIP_LISTEN_PORT 7000
-#define MAX_SNI_LEN     8192
+#define MAX_SNI_LEN     1024
 
 #define TAP_CONTROL_CODE(request, method) CTL_CODE(FILE_DEVICE_UNKNOWN, request, method, FILE_ANY_ACCESS)
 #define TAP_IOCTL_SET_MEDIA_STATUS TAP_CONTROL_CODE(6, METHOD_BUFFERED)
@@ -811,74 +811,60 @@ void process_tap_frame(uint8_t* buf, int len) {
             uint8_t* udp_ptr = buf + 14 + IPH_HL(ip) * 4;
             uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
             uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
-            
-            // 1. DNS (UDP 53) -> Pass through (Manual NAT)
-            if (dst_port == htons(53)) {
-                uint8_t* payload = udp_ptr + 8;
-                int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
+            //所有得udp直连
+            uint8_t* payload = udp_ptr + 8;
+            int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
 
-                if (pay_len >= 0) {
-                    UdpKey key = { ip->src.addr, ip->dest.addr, src_port, dst_port };
-                    UdpSession* sess = NULL;
-                    {
-                        std::lock_guard<std::mutex> lk(g_udp_mtx);
-                        auto it = g_udp_sessions.find(key);
-                        if (it != g_udp_sessions.end()) sess = it->second;
-                    }
+            if (pay_len >= 0) {
+                UdpKey key = { ip->src.addr, ip->dest.addr, src_port, dst_port };
+                UdpSession* sess = NULL;
+                {
+                    std::lock_guard<std::mutex> lk(g_udp_mtx);
+                    auto it = g_udp_sessions.find(key);
+                    if (it != g_udp_sessions.end()) sess = it->second;
+                }
 
-                    if (!sess) {
-                        sess = new UdpSession();
-                        sess->src_ip = ip->src.addr; sess->dst_ip = ip->dest.addr;
-                        sess->src_port = src_port; sess->dst_port = dst_port;
-                        sess->sock = socket(AF_INET, SOCK_DGRAM, 0);
-                        
-                        if (sess->sock != INVALID_SOCKET) {
-                            u_long mode = 1;
-                            ioctlsocket(sess->sock, FIONBIO, &mode);
-                            
-                            sess->worker = WorkerPool::instance().get_worker(src_port ^ dst_port);
-                            if (!sess->worker) sess->worker = WorkerPool::instance().get_next_worker();
+                if (!sess) {
+                    sess = new UdpSession();
+                    sess->src_ip = ip->src.addr; sess->dst_ip = ip->dest.addr;
+                    sess->src_port = src_port; sess->dst_port = dst_port;
+                    sess->sock = socket(AF_INET, SOCK_DGRAM, 0);
 
-                            {
-                                std::lock_guard<std::mutex> lk(g_udp_mtx);
-                                g_udp_sessions[key] = sess;
-                            }
-                            
-                            sess->worker->add_socket(
-                                sess->sock,
-                                [sess]() { handle_udp_read(sess); },
-                                nullptr,
-                                [sess]() { close_udp_session(sess); }
-                            );
+                    if (sess->sock != INVALID_SOCKET) {
+                        u_long mode = 1;
+                        ioctlsocket(sess->sock, FIONBIO, &mode);
 
-                        } else {
-                            delete sess; sess = NULL;
+                        sess->worker = WorkerPool::instance().get_worker(src_port ^ dst_port);
+                        if (!sess->worker) sess->worker = WorkerPool::instance().get_next_worker();
+
+                        {
+                            std::lock_guard<std::mutex> lk(g_udp_mtx);
+                            g_udp_sessions[key] = sess;
                         }
-                    }
 
-                    if (sess) {
-                        sess->last_active = get_now_ms();
-                        sockaddr_in dest;
-                        dest.sin_family = AF_INET;
-                        dest.sin_addr.S_un.S_addr = sess->dst_ip;
-                        dest.sin_port = sess->dst_port;
-                        sendto(sess->sock, (const char*)payload, pay_len, 0, (sockaddr*)&dest, sizeof(dest));
+                        sess->worker->add_socket(
+                            sess->sock,
+                            [sess]() { handle_udp_read(sess); },
+                            nullptr,
+                            [sess]() { close_udp_session(sess); }
+                        );
+
+                    } else {
+                        delete sess; sess = NULL;
                     }
                 }
-                return; // Done with DNS
+
+                if (sess) {
+                    sess->last_active = get_now_ms();
+                    sockaddr_in dest;
+                    dest.sin_family = AF_INET;
+                    dest.sin_addr.S_un.S_addr = sess->dst_ip;
+                    dest.sin_port = sess->dst_port;
+                    sendto(sess->sock, (const char*)payload, pay_len, 0, (sockaddr*)&dest, sizeof(dest));
+                }
             }
+            return; // Done with DNS
 
-            // 2. Other UDP (QUIC/YouTube) -> Active Reject (ICMP Port Unreachable)
-            // We trick LwIP into generating the ICMP error for us.
-            // Change Dest IP to Gateway IP -> LwIP receives it -> No listening socket -> ICMP Port Unreachable
-            ip->dest.addr = inet_addr(TAP_GW);
-            IPH_CHKSUM_SET(ip, 0);
-            IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
-            
-            // Disable UDP Checksum to avoid recalculation issues
-            *(uint16_t*)(udp_ptr + 6) = 0;
-
-            // Fall through to g_netif.input...
         }
 
         if (IPH_PROTO(ip) == IP_PROTO_TCP) {
@@ -946,7 +932,7 @@ int main() {
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
 
     // --- Init Worker Pool ---
-    WorkerPool::instance().init(80); // Size set to 80 as requested
+    WorkerPool::instance().init(40); // Size set to 80 as requested
     log_debug("Worker Pool Initialized with 80 threads.\n");
 
     lwip_init();
