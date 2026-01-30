@@ -18,11 +18,11 @@
 
 // --- 4. TCP/IP ---
 #define LWIP_TCP                        1
-#define TCP_MSS                         1400
-#define TCP_WND                         (32 * TCP_MSS) 
-#define TCP_SND_BUF                     (32 * TCP_MSS)
+#define TCP_MSS                         1460  // Adjusted for Ethernet MTU
+#define TCP_WND                         (64 * 1024)   // 64KB base window
+#define TCP_SND_BUF                     (256 * 1024)  // 256KB send buffer
 #define LWIP_WND_SCALE                  1
-#define TCP_RCV_SCALE                   2
+#define TCP_RCV_SCALE                   3     // Scale 3 (x8) -> 512KB Max Window
 
 #define LWIP_ARP                        1
 #define LWIP_ETHERNET                   1

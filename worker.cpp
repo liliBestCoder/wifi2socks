@@ -147,6 +147,11 @@ void Worker::remove_socket(SOCKET s, std::function<void()> on_done) {
 void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect) {
     std::lock_guard<std::mutex> lock(m_mtx);
     m_task_queue.push_back([this, s, addr, on_connect]() {
+        // Set TCP_NODELAY for low latency
+        int flag = 1;
+        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+
+        // Bind required for ConnectEx
         struct sockaddr_in bindAddr;
         memset(&bindAddr, 0, sizeof(bindAddr));
         bindAddr.sin_family = AF_INET;
