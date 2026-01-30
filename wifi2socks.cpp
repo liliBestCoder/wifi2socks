@@ -1,6 +1,10 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 #define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
 
+#include <winsock2.h>
+#include <windows.h>
+#include <winioctl.h>
 #include "app_config.h"
 #include "tap_driver.h"
 #include "worker.h"
