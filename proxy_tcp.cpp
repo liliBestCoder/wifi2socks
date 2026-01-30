@@ -30,7 +30,7 @@ struct TcpCtx {
     TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT) {
         sni_buffer.reserve(MAX_SNI_LEN);
         upstream_data.reserve(8192); 
-        downstream_pending.reserve(65536);
+        downstream_pending.reserve(262144);
     }
 };
 
@@ -128,7 +128,7 @@ void handle_proxy_read(TcpCtx* ctx) {
     // Check flow control flag (Atomic check would be better, but bool is okay-ish here)
     if (ctx->read_paused) return;
 
-    char buf[65536];
+    char buf[262144];
     int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
     
     if (r > 0) {
