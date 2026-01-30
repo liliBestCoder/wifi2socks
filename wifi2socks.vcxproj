@@ -127,7 +127,6 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="utils.cpp" />
     <ClCompile Include="wifi2socks.cpp" />
     <ClCompile Include="worker.cpp" />
     <ClCompile Include="nat_table.cpp" />
