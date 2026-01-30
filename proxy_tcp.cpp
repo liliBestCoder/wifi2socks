@@ -21,6 +21,7 @@ struct TcpCtx {
     NatEntry target;
     std::vector<uint8_t> sni_buffer;
     std::vector<uint8_t> upstream_data; // Pre-connect buffer
+    std::vector<uint8_t> downstream_pending; // Pending data for LwIP
     std::mutex data_mtx;
     Worker* worker;
 
@@ -29,6 +30,7 @@ struct TcpCtx {
     TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT) {
         sni_buffer.reserve(MAX_SNI_LEN);
         upstream_data.reserve(8192); 
+        downstream_pending.reserve(65536);
     }
 };
 
@@ -85,7 +87,22 @@ void close_tcp_ctx(TcpCtx* ctx) {
 // Flow Control Callback (Main Thread)
 err_t tcp_client_sent(void* arg, struct tcp_pcb* tpcb, u16_t len) {
     TcpCtx* ctx = (TcpCtx*)arg;
-    if (ctx && ctx->read_paused && ctx->worker) {
+    if (!ctx || ctx->closed) return ERR_OK;
+
+    // Retry pending data
+    if (!ctx->downstream_pending.empty()) {
+        u16_t limit = tcp_sndbuf(tpcb);
+        if (limit > 0) {
+             size_t chunk = (std::min)((size_t)limit, ctx->downstream_pending.size());
+             if (chunk > 0xffff) chunk = 0xffff; // Safety
+             if (tcp_write(tpcb, ctx->downstream_pending.data(), (u16_t)chunk, 1) == ERR_OK) {
+                 tcp_output(tpcb);
+                 ctx->downstream_pending.erase(ctx->downstream_pending.begin(), ctx->downstream_pending.begin() + chunk);
+             }
+        }
+    }
+
+    if (ctx->read_paused && ctx->worker && ctx->downstream_pending.empty()) {
         if (tcp_sndbuf(tpcb) > 0) {
             ctx->read_paused = false;
             ctx->worker->queue_task([ctx]() {
@@ -111,7 +128,7 @@ void handle_proxy_read(TcpCtx* ctx) {
     // Check flow control flag (Atomic check would be better, but bool is okay-ish here)
     if (ctx->read_paused) return;
 
-    char buf[16384];
+    char buf[65536];
     int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
     
     if (r > 0) {
@@ -122,24 +139,44 @@ void handle_proxy_read(TcpCtx* ctx) {
             // Running on Main Thread
             std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
             if (ctx->client_pcb && !ctx->closed) {
-                // Check buffer space
-                if (tcp_sndbuf(ctx->client_pcb) < d.size()) {
-                    // Backpressure: Pause reading
-                    ctx->read_paused = true;
-                    ctx->worker->queue_task([ctx]() {
-                        if (ctx->proxy_socket != INVALID_SOCKET) {
-                            ctx->worker->add_socket(ctx->proxy_socket, nullptr, nullptr, [ctx]() { close_tcp_ctx(ctx); });
-                        }
-                    });
+                // 1. If pending data exists, append all and ensure paused
+                if (!ctx->downstream_pending.empty()) {
+                    ctx->downstream_pending.insert(ctx->downstream_pending.end(), d.begin(), d.end());
+                    if (!ctx->read_paused) {
+                        ctx->read_paused = true;
+                        ctx->worker->queue_task([ctx]() {
+                            if (ctx->proxy_socket != INVALID_SOCKET) {
+                                ctx->worker->add_socket(ctx->proxy_socket, nullptr, nullptr, [ctx]() { close_tcp_ctx(ctx); });
+                            }
+                        });
+                    }
+                    return;
                 }
-                
-                // Write what we can (or all if fits) - LwIP handles partial writes?
-                // tcp_write doesn't guarantee partial writes if mem err.
-                // For simplicity assuming it fits or we fail. Real world needs buffering.
-                if (tcp_write(ctx->client_pcb, d.data(), (u16_t)d.size(), 1) == ERR_OK) {
-                    tcp_output(ctx->client_pcb);
-                } else {
-                    close_tcp_ctx(ctx);
+
+                // 2. Try direct write
+                size_t written = 0;
+                u16_t limit = tcp_sndbuf(ctx->client_pcb);
+                if (limit > 0) {
+                    size_t chunk = (std::min)((size_t)limit, d.size());
+                    if (chunk > 0xffff) chunk = 0xffff;
+                    if (tcp_write(ctx->client_pcb, d.data(), (u16_t)chunk, 1) == ERR_OK) {
+                        tcp_output(ctx->client_pcb);
+                        written = chunk;
+                    }
+                }
+
+                // 3. Buffer remainder if any
+                if (written < d.size()) {
+                    ctx->downstream_pending.insert(ctx->downstream_pending.end(), d.begin() + written, d.end());
+                    
+                    if (!ctx->read_paused) {
+                        ctx->read_paused = true;
+                        ctx->worker->queue_task([ctx]() {
+                            if (ctx->proxy_socket != INVALID_SOCKET) {
+                                ctx->worker->add_socket(ctx->proxy_socket, nullptr, nullptr, [ctx]() { close_tcp_ctx(ctx); });
+                            }
+                        });
+                    }
                 }
             }
         });
