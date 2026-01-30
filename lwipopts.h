@@ -20,7 +20,7 @@
 #define LWIP_TCP                        1
 #define TCP_MSS                         1460  // Adjusted for Ethernet MTU
 #define TCP_WND                         (64 * 1024)   // 64KB base window
-#define TCP_SND_BUF                     (256 * 1024)  // 256KB send buffer
+#define TCP_SND_BUF                     (40 * TCP_MSS) // ~58KB (Must be < 65535 - 4*MSS)
 #define LWIP_WND_SCALE                  1
 #define TCP_RCV_SCALE                   3     // Scale 3 (x8) -> 512KB Max Window
 
