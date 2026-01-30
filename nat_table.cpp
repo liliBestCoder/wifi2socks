@@ -21,3 +21,16 @@ NatEntry NatTable::get(uint16_t src_port) {
     if (it != m_table.end()) return it->second;
     return {0, 0, 0};
 }
+
+void NatTable::cleanup(uint64_t timeout_ms) {
+    std::lock_guard<std::mutex> lk(m_mtx);
+    uint64_t now = GetTickCount64();
+    
+    for (auto it = m_table.begin(); it != m_table.end(); ) {
+        if (now - it->second.last_active > timeout_ms) {
+            it = m_table.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}

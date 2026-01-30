@@ -36,6 +36,7 @@ struct SocketContext {
     IO_CONTEXT read_io;    // Reuse for reads
     IO_CONTEXT connect_io; // Reuse for connects
     bool read_pending;     // Avoid double posting
+    bool paused;           // Flow control: if true, do not re-post read
     
     int ref_count;         // Reference Counting for lifetime management
 
@@ -45,6 +46,7 @@ struct SocketContext {
         memset(&connect_io, 0, sizeof(connect_io));
         connect_io.type = IO_CONNECT;
         read_pending = false;
+        paused = false;
         sock = INVALID_SOCKET;
         ref_count = 0; 
     }
@@ -62,6 +64,10 @@ public:
     void add_socket(SOCKET s, std::function<void()> on_read, std::function<void()> on_write, std::function<void()> on_close);
     void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
     
+    // Flow Control
+    void pause_read(SOCKET s);
+    void resume_read(SOCKET s);
+
     // New: Async Connect for IOCP
     void connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect);
 

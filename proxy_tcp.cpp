@@ -12,6 +12,9 @@
 #include <string>
 #include <algorithm>
 
+const size_t MAX_TX_QUEUE_SIZE = 4 * 1024 * 1024;    // 4MB High Water Mark
+const size_t RESUME_TX_QUEUE_SIZE = 2 * 1024 * 1024; // 2MB Low Water Mark
+
 // --- TCP Logic with Worker Pool ---
 struct TcpCtx {
     struct tcp_pcb* client_pcb;
@@ -134,20 +137,9 @@ void try_send_downstream(TcpCtx* ctx) {
         }
     }
     
-    // Resume reading if we have written everything to LwIP (backlog cleared)
-    if (ctx->read_paused && ctx->worker && ctx->tx_written_idx >= ctx->tx_queue.size()) {
-        ctx->read_paused = false;
-        ctx->worker->queue_task([ctx]() {
-            if (ctx->proxy_socket != INVALID_SOCKET) {
-                 ctx->worker->add_socket(
-                    ctx->proxy_socket,
-                    [ctx]() { handle_proxy_read(ctx); },
-                    nullptr,
-                    [ctx]() { close_tcp_ctx(ctx); }
-                );
-            }
-        });
-    }
+    // NO AUTO RESUME HERE. 
+    // Resume is handled in tcp_client_sent (ACK based flow control)
+    // or if we simply failed to write due to MEM but now have space (rare in LwIP single thread without ack)
 }
 
 // Flow Control Callback (Main Thread)
@@ -174,6 +166,21 @@ err_t tcp_client_sent(void* arg, struct tcp_pcb* tpcb, u16_t len) {
 
     // 2. Try to send more pending data
     try_send_downstream(ctx);
+    
+    // 3. FLOW CONTROL: Resume Reading if dropped below Low Water Mark
+    if (ctx->read_paused) {
+        size_t total_buffered = 0;
+        for (const auto& buf : ctx->tx_queue) total_buffered += buf.size();
+        // Adjust for acked portion of front
+        if (!ctx->tx_queue.empty()) total_buffered -= ctx->tx_acked_offset;
+
+        if (total_buffered < RESUME_TX_QUEUE_SIZE) {
+            ctx->read_paused = false;
+            if (ctx->worker && ctx->proxy_socket != INVALID_SOCKET) {
+                ctx->worker->resume_read(ctx->proxy_socket);
+            }
+        }
+    }
     
     return ERR_OK;
 }
@@ -202,6 +209,19 @@ void handle_proxy_read(TcpCtx* ctx) {
                 
                 // Try to write to LwIP
                 try_send_downstream(ctx);
+
+                // FLOW CONTROL: Pause Reading if exceeded High Water Mark
+                size_t total_buffered = 0;
+                for (const auto& buf : ctx->tx_queue) total_buffered += buf.size();
+                // Adjust for acked portion of front
+                if (!ctx->tx_queue.empty()) total_buffered -= ctx->tx_acked_offset;
+
+                if (!ctx->read_paused && total_buffered > MAX_TX_QUEUE_SIZE) {
+                    ctx->read_paused = true;
+                    if (ctx->worker && ctx->proxy_socket != INVALID_SOCKET) {
+                        ctx->worker->pause_read(ctx->proxy_socket);
+                    }
+                }
             }
         });
     } else if (r == 0) {

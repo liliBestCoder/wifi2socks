@@ -14,6 +14,7 @@
 #include "proxy_tcp.h"
 #include "proxy_udp.h"
 #include "main_dispatcher.h"
+#include "nat_table.h"
 #include <iostream>
 #include <thread>
 
@@ -110,6 +111,7 @@ int main() {
         if (get_now_ms() - last_cleanup > 5000) {
             last_cleanup = get_now_ms();
             udp_check_timeouts();
+            NatTable::instance().cleanup(60000); // 1 Minute timeout for NAT entries
         }
     }
     return 0;

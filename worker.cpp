@@ -196,6 +196,35 @@ void Worker::queue_task(std::function<void()> task) {
     PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
 }
 
+void Worker::pause_read(SOCKET s) {
+    std::lock_guard<std::mutex> lock(m_mtx);
+    m_task_queue.push_back([this, s]() {
+        auto it = m_sockets.find(s);
+        if (it != m_sockets.end()) {
+            it->second->paused = true;
+        }
+    });
+    PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
+}
+
+void Worker::resume_read(SOCKET s) {
+    std::lock_guard<std::mutex> lock(m_mtx);
+    m_task_queue.push_back([this, s]() {
+        auto it = m_sockets.find(s);
+        if (it != m_sockets.end()) {
+            SocketContext* ctx = it->second;
+            if (ctx->paused) {
+                ctx->paused = false;
+                // If no read is pending, we must kickstart it
+                if (!ctx->read_pending) {
+                    post_zero_byte_read(ctx);
+                }
+            }
+        }
+    });
+    PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
+}
+
 void Worker::loop() {
     DWORD bytesTransferred;
     ULONG_PTR completionKey;
@@ -236,10 +265,11 @@ void Worker::loop() {
                         ctx->read_pending = false;
                         if (ctx->on_read) ctx->on_read();
                         
-                        // Re-post only if socket still alive in map
-                        // (This check prevents posting new IO for closing sockets)
+                        // Re-post only if socket still alive in map AND NOT PAUSED
                         if (m_sockets.find(ctx->sock) != m_sockets.end()) {
-                             post_zero_byte_read(ctx);
+                            if (!ctx->paused) {
+                                post_zero_byte_read(ctx);
+                            }
                         }
                     } else if (ioCtx->type == IO_CONNECT) {
                         setsockopt(ctx->sock, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
