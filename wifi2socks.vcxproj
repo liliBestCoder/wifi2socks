@@ -130,6 +130,12 @@
     <ClCompile Include="utils.cpp" />
     <ClCompile Include="wifi2socks.cpp" />
     <ClCompile Include="worker.cpp" />
+    <ClCompile Include="nat_table.cpp" />
+    <ClCompile Include="tls_parser.cpp" />
+    <ClCompile Include="tap_driver.cpp" />
+    <ClCompile Include="proxy_tcp.cpp" />
+    <ClCompile Include="proxy_udp.cpp" />
+    <ClCompile Include="lwip_handler.cpp" />
     <ClCompile Include="lwip\src\core\init.c" />
     <ClCompile Include="lwip\src\core\def.c" />
     <ClCompile Include="lwip\src\core\dns.c" />
@@ -162,6 +168,14 @@
     <ClInclude Include="packet.h" />
     <ClInclude Include="utils.h" />
     <ClInclude Include="worker.h" />
+    <ClInclude Include="app_config.h" />
+    <ClInclude Include="nat_table.h" />
+    <ClInclude Include="tls_parser.h" />
+    <ClInclude Include="tap_driver.h" />
+    <ClInclude Include="proxy_tcp.h" />
+    <ClInclude Include="proxy_udp.h" />
+    <ClInclude Include="lwip_handler.h" />
+    <ClInclude Include="lwip_includes.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
