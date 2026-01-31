@@ -18,7 +18,7 @@ struct UdpKey {
 
 struct UdpSession {
     SOCKET tcp_sock; 
-    SOCKET udp_sock; // Not used for DNS-over-TCP, kept for structure compat
+    SOCKET udp_sock; // Direct UDP socket
     
     // Key identification
     uint32_t src_ip; 
@@ -62,21 +62,67 @@ void close_udp_session_internal(UdpSession* sess) {
     if (sess->worker) {
         auto worker = sess->worker;
         SOCKET s1 = sess->tcp_sock;
+        SOCKET s2 = sess->udp_sock;
         
         sess->tcp_sock = INVALID_SOCKET;
+        sess->udp_sock = INVALID_SOCKET;
         sess->state = UdpSession::CLOSED;
 
-        if (s1 != INVALID_SOCKET) {
-            worker->remove_socket(s1, [s1, sess]() {
-                closesocket(s1);
-                delete sess;
-            });
-        } else {
+        worker->queue_task([worker, s1, s2, sess]() {
+            if (s1 != INVALID_SOCKET) {
+                worker->remove_socket(s1, [s1]() { closesocket(s1); });
+            }
+            if (s2 != INVALID_SOCKET) {
+                worker->remove_socket(s2, [s2]() { closesocket(s2); });
+            }
             delete sess;
-        }
+        });
     } else {
         if (sess->tcp_sock != INVALID_SOCKET) closesocket(sess->tcp_sock);
+        if (sess->udp_sock != INVALID_SOCKET) closesocket(sess->udp_sock);
         delete sess;
+    }
+}
+
+void handle_udp_direct_read(UdpSession* sess) {
+    if (sess->state == UdpSession::CLOSED) return;
+    
+    char buf[4096];
+    sockaddr_in remote_addr;
+    int addr_len = sizeof(remote_addr);
+    int r = recvfrom(sess->udp_sock, buf, sizeof(buf), 0, (sockaddr*)&remote_addr, &addr_len);
+    
+    if (r > 0) {
+        uint8_t frame[4096 + 100]; 
+        if (14 + 20 + 8 + r > sizeof(frame)) return; 
+
+        memcpy(frame, HOST_MAC, 6);
+        memcpy(frame + 6, TapDriver::TAP_MAC, 6);
+        *(uint16_t*)(frame + 12) = htons(0x0800);
+
+        uint8_t* ip_hdr = frame + 14;
+        uint8_t* udp_hdr = ip_hdr + 20;
+
+        memset(ip_hdr, 0, 20);
+        ip_hdr[0] = 0x45; 
+        ip_hdr[8] = 64; 
+        ip_hdr[9] = 17; 
+        *(uint16_t*)(ip_hdr + 2) = htons((uint16_t)(20 + 8 + r));
+        *(uint32_t*)(ip_hdr + 12) = sess->original_dst_ip; 
+        *(uint32_t*)(ip_hdr + 16) = sess->src_ip;          
+        *(uint16_t*)(ip_hdr + 10) = ip_chksum_simple(ip_hdr, 20);
+
+        *(uint16_t*)(udp_hdr + 0) = sess->original_dst_port; 
+        *(uint16_t*)(udp_hdr + 2) = sess->src_port;          
+        *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + r));
+        *(uint16_t*)(udp_hdr + 6) = 0; 
+        
+        memcpy(udp_hdr + 8, buf, r);
+
+        sess->last_active = GetTickCount64();
+        TapDriver::instance().send_async(frame, 14 + 20 + 8 + r);
+    } else {
+        // Can't read? 
     }
 }
 
@@ -266,7 +312,7 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                                 // Use the clean domain name for cache key
                                 if (!sess->clean_domain.empty()) {
                                     DnsCache::instance().put(sess->clean_domain, ip, ttl);
-                                    printf("[DNS-TCP] Cached %s -> %d.%d.%d.%d (TTL: %d)\n", 
+                                    printf("[DNS] Resolved: %s -> %d.%d.%d.%d (TTL: %d)\n", 
                                         sess->clean_domain.c_str(),
                                         ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF, ttl);
                                 }
@@ -403,7 +449,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
             uint32_t cached_ip = DnsCache::instance().get(clean_domain);
             if (cached_ip != 0) {
                 // HIT! Send response immediately
-                printf("[DNS-Cache] Hit: %s -> %d.%d.%d.%d\n", clean_domain.c_str(), 
+                printf("[DNS] Cache Hit: %s -> %d.%d.%d.%d\n", clean_domain.c_str(), 
                     cached_ip & 0xFF, (cached_ip >> 8) & 0xFF, (cached_ip >> 16) & 0xFF, (cached_ip >> 24) & 0xFF);
                 send_dns_response(src_ip, dst_ip, src_port, dst_port, id, full_domain, cached_ip);
                 return;
@@ -420,6 +466,10 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                 uint8_t google[4] = {8, 8, 8, 8};
                 memcpy(&target_dns_ip, google, 4);
             }
+
+            printf("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d (DNS Query)\n", len,
+                src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, src_port,
+                target_dns_ip & 0xFF, (target_dns_ip >> 8) & 0xFF, (target_dns_ip >> 16) & 0xFF, (target_dns_ip >> 24) & 0xFF, 53);
 
             std::vector<uint8_t> query_packet;
             const uint8_t* p_data = payload;
@@ -503,4 +553,60 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
             return;
         }
     }
+
+    // Direct UDP Logic
+    printf("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
+        src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
+        dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
+
+    uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
+    Worker* w = WorkerPool::instance().get_worker(hash);
+    if (!w) w = WorkerPool::instance().get_next_worker();
+
+    std::vector<uint8_t> data(payload, payload + len);
+
+    w->queue_task([src_ip, dst_ip, src_port, dst_port, data = std::move(data), w]() {
+        UdpKey key = { src_ip, dst_ip, src_port, dst_port };
+        UdpSession* sess = nullptr;
+        auto it = t_udp_sessions.find(key);
+        
+        if (it != t_udp_sessions.end()) {
+            sess = it->second;
+        } else {
+            sess = new UdpSession();
+            sess->src_ip = src_ip; 
+            sess->original_dst_ip = dst_ip; 
+            sess->src_port = src_port; 
+            sess->original_dst_port = dst_port;
+            sess->worker = w;
+            sess->is_dns_tcp = false;
+            
+            sess->udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+            if (sess->udp_sock == INVALID_SOCKET) { delete sess; return; }
+            u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);
+            
+            t_udp_sessions[key] = sess;
+            
+            sess->worker->add_socket(
+                sess->udp_sock,
+                [sess]() { handle_udp_direct_read(sess); },
+                nullptr,
+                [sess]() { close_udp_session_internal(sess); }
+            );
+            
+            sess->state = UdpSession::ESTABLISHED;
+        }
+        
+        if (sess && sess->state != UdpSession::CLOSED) {
+            sess->last_active = GetTickCount64();
+            
+            sockaddr_in dest_addr;
+            memset(&dest_addr, 0, sizeof(dest_addr));
+            dest_addr.sin_family = AF_INET;
+            dest_addr.sin_addr.S_un.S_addr = dst_ip;
+            dest_addr.sin_port = dst_port; 
+            
+            sendto(sess->udp_sock, (const char*)data.data(), (int)data.size(), 0, (sockaddr*)&dest_addr, sizeof(dest_addr));
+        }
+    });
 }

@@ -17,14 +17,16 @@ const size_t RESUME_TX_QUEUE_SIZE = 2 * 1024 * 1024; // 2MB Low Water Mark
 
 // --- TCP Logic with Worker Pool ---
 struct TcpCtx {
-    static std::atomic<uint32_t> global_id;
-    uint32_t id;
     struct tcp_pcb* client_pcb;
     SOCKET proxy_socket;
     std::atomic<bool> closed;
     std::atomic<bool> connected;
     bool read_paused;
     NatEntry target;
+    
+    // Client Info for Logging
+    uint32_t client_ip;
+    uint16_t client_port;
     
     // Sniffing
     std::vector<uint8_t> sni_buffer;
@@ -42,14 +44,13 @@ struct TcpCtx {
 
     enum State { PRE_CONNECT, CONNECTING, HANDSHAKE, ESTABLISHED } state;
 
-    TcpCtx() : id(++global_id), client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
-               tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0) {
+    TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
+               tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0), client_ip(0), client_port(0) {
         sni_buffer.reserve(MAX_SNI_LEN);
         upstream_data.reserve(8192); 
     }
 };
 
-std::atomic<uint32_t> TcpCtx::global_id(0);
 
 void close_tcp_ctx(TcpCtx* ctx);
 void handle_proxy_read(TcpCtx* ctx);
@@ -168,7 +169,9 @@ void handle_proxy_read(TcpCtx* ctx) {
     int r = recv(ctx->proxy_socket, (char*)read_buf.data(), (int)read_buf.size(), 0);
     
     if (r > 0) {
-        printf("[TCP-%u] Recv %d bytes from Proxy.\n", ctx->id, r);
+        printf("[TCP] Recv %d bytes: %d.%d.%d.%d:%d <- %d.%d.%d.%d:%d\n", r,
+            ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
+            ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
         std::vector<uint8_t> data(read_buf.begin(), read_buf.begin() + r);
         
         MainDispatcher::instance().queue_task([ctx, d = std::move(data)]() mutable {
@@ -199,7 +202,9 @@ void handle_handshake_read(TcpCtx* ctx) {
         if (header_end != std::string::npos) {
             std::string header = s.substr(0, header_end);
             if (header.find("200") != std::string::npos) {
-                printf("[TCP-%u] Tunnel Established (200 OK).\n", ctx->id);
+                printf("[TCP] Tunnel Established: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
+                    ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
+                    ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
                 
                 {
                     std::lock_guard<std::mutex> lock(ctx->data_mtx);
@@ -246,7 +251,9 @@ void handle_handshake_read(TcpCtx* ctx) {
                     [ctx]() { close_tcp_ctx(ctx); }
                 );
             } else {
-                printf("[TCP-%u] Handshake Rejected.\n", ctx->id);
+                printf("[TCP] Handshake Rejected: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
+                    ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
+                    ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
                 close_tcp_ctx(ctx);
             }
         } else { 
@@ -276,11 +283,13 @@ void handle_proxy_connect(TcpCtx* ctx) {
     
     if (!sni.empty()) {
         target_host = sni;
-        printf("[TCP-%u] SNI: %s\n", ctx->id, sni.c_str());
+        printf("[TCP] SNI: %s (%d.%d.%d.%d:%d)\n", sni.c_str(),
+            ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
     } else {
         target_host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
         if (!target_host.empty()) {
-            printf("[TCP-%u] Host: %s\n", ctx->id, target_host.c_str());
+            printf("[TCP] Host: %s (%d.%d.%d.%d:%d)\n", target_host.c_str(),
+                ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
         }
     }
 
@@ -295,7 +304,8 @@ void handle_proxy_connect(TcpCtx* ctx) {
         sprintf_s(ip_buf, "%d.%d.%d.%d", 
             ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
         // Direct CONNECT to IP
-        printf("[TCP-%u] No SNI. CONNECT %s:%d\n", ctx->id, ip_buf, port);
+        printf("[TCP] No SNI. CONNECT %s:%d (%d.%d.%d.%d:%d)\n", ip_buf, port,
+             ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
         sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", ip_buf, port, ip_buf, port);
     }
     
@@ -361,6 +371,12 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
     }
     if (!p) { close_tcp_ctx(ctx); return ERR_OK; }
     tcp_recved(tpcb, p->tot_len);
+
+    if (p->tot_len > 0) {
+        printf("[TCP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", p->tot_len,
+            ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
+            ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
+    }
 
     if (ctx->connected && ctx->worker) {
         std::vector<uint8_t> data;
@@ -428,6 +444,8 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     TcpCtx* ctx = new TcpCtx();
     ctx->client_pcb = newpcb;
     ctx->target = target;
+    ctx->client_ip = newpcb->remote_ip.addr;
+    ctx->client_port = newpcb->remote_port;
     tcp_arg(newpcb, ctx);
     tcp_recv(newpcb, tcp_client_recv);
     tcp_sent(newpcb, tcp_client_sent);
