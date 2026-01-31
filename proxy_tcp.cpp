@@ -282,8 +282,21 @@ void handle_proxy_connect(TcpCtx* ctx) {
         char ip_buf[32];
         sprintf_s(ip_buf, "%d.%d.%d.%d", 
             ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
-        sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", ip_buf, port, ip_buf, port);
-        printf("[TCP] No SNI/Host. Connecting to IP: %s:%d\n", ip_buf, port);
+            
+        // Check if it is a Fake IP, try to recover domain
+        if (FakeIpMapper::instance().is_fake_ip(ip)) {
+            std::string mapped_domain = FakeIpMapper::instance().get_domain(ip);
+            if (!mapped_domain.empty()) {
+                printf("[TCP] Recovered Domain from FakeIP: %s -> %s\n", ip_buf, mapped_domain.c_str());
+                sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", mapped_domain.c_str(), port, mapped_domain.c_str(), port);
+            } else {
+                // FakeIP but lost mapping? Fallback to IP (will likely fail on proxy)
+                sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", ip_buf, port, ip_buf, port);
+            }
+        } else {
+            sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", ip_buf, port, ip_buf, port);
+            printf("[TCP] No SNI/Host. Connecting to IP: %s:%d\n", ip_buf, port);
+        }
     }
     
     int sent = send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
