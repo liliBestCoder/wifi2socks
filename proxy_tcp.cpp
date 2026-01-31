@@ -255,11 +255,17 @@ void handle_proxy_connect(TcpCtx* ctx) {
     if (!sni.empty()) {
         target_host = sni;
     } else {
-        uint32_t ip = ctx->target.original_dst_ip;
-        char ip_buf[32];
-        sprintf_s(ip_buf, "%d.%d.%d.%d", 
-            ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
-        target_host = ip_buf;
+        // Try HTTP Host
+        std::string http_host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
+        if (!http_host.empty()) {
+            target_host = http_host;
+        } else {
+            uint32_t ip = ctx->target.original_dst_ip;
+            char ip_buf[32];
+            sprintf_s(ip_buf, "%d.%d.%d.%d", 
+                ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+            target_host = ip_buf;
+        }
     }
 
     char cmd[1024];
@@ -393,8 +399,23 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
                 bool ready = false;
                 if (ctx->sni_buffer.size() >= MAX_SNI_LEN) ready = true;
                 else if (ctx->sni_buffer.size() >= 5) {
-                    if (ctx->sni_buffer[0] != 0x16) ready = true; 
-                    else { 
+                    if (ctx->sni_buffer[0] != 0x16) {
+                        // Not TLS. Try HTTP Host.
+                        if (is_http_start(ctx->sni_buffer.data(), ctx->sni_buffer.size())) {
+                            std::string host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
+                            if (!host.empty()) {
+                                ready = true; // Found Host header
+                            } else {
+                                // Looks like HTTP but no Host header yet.
+                                // If buffer is large, give up.
+                                if (ctx->sni_buffer.size() > 1024) ready = true; 
+                            }
+                        } else {
+                            // Not TLS, Not HTTP start -> Unknown/Raw -> Fallback to IP
+                            ready = true; 
+                        }
+                    } else { 
+                        // TLS
                         uint16_t tls_len = ((uint16_t)ctx->sni_buffer[3] << 8) | ctx->sni_buffer[4];
                         if (ctx->sni_buffer.size() >= (size_t)5 + tls_len) ready = true; 
                     }

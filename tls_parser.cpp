@@ -1,4 +1,7 @@
 #include "tls_parser.h"
+#include <vector>
+#include <algorithm>
+#include <cstring>
 
 // Optimized SNI Parser
 std::string parse_tls_sni(const uint8_t* data, size_t len) {
@@ -75,6 +78,79 @@ std::string parse_tls_sni(const uint8_t* data, size_t len) {
             break; 
         }
         pos += elen;
+    }
+    return "";
+}
+
+bool is_http_start(const uint8_t* data, size_t len) {
+    if (len < 4) return false;
+    // Check methods (Basic checks)
+    if (len >= 4 && memcmp(data, "GET ", 4) == 0) return true;
+    if (len >= 5 && memcmp(data, "POST ", 5) == 0) return true;
+    if (len >= 5 && memcmp(data, "HEAD ", 5) == 0) return true;
+    if (len >= 4 && memcmp(data, "PUT ", 4) == 0) return true;
+    if (len >= 7 && memcmp(data, "DELETE ", 7) == 0) return true;
+    if (len >= 8 && memcmp(data, "CONNECT ", 8) == 0) return true;
+    if (len >= 8 && memcmp(data, "OPTIONS ", 8) == 0) return true;
+    if (len >= 6 && memcmp(data, "TRACE ", 6) == 0) return true;
+    if (len >= 6 && memcmp(data, "PATCH ", 6) == 0) return true;
+    return false;
+}
+
+std::string parse_http_host(const uint8_t* data, size_t len) {
+    if (!is_http_start(data, len)) return "";
+    
+    std::string s((const char*)data, std::min((size_t)len, (size_t)4096)); // Limit scan
+    
+    // Case-insensitive search helper
+    auto find_case_insensitive = [](const std::string& haystack, const std::string& needle, size_t pos) -> size_t {
+        auto it = std::search(
+            haystack.begin() + pos, haystack.end(),
+            needle.begin(), needle.end(),
+            [](char a, char b) { return std::tolower(a) == std::tolower(b); }
+        );
+        if (it == haystack.end()) return std::string::npos;
+        return it - haystack.begin();
+    };
+
+    size_t pos = 0;
+    while (pos < s.length()) {
+        size_t line_end = s.find('\n', pos);
+        if (line_end == std::string::npos) break;
+        
+        // Check this line for "Host:"
+        // We look for "Host:" at the start of the line (headers start at beginning of line)
+        // But s contains the whole request, so 'pos' is the start of the current line.
+        
+        size_t colon = s.find(':', pos);
+        if (colon != std::string::npos && colon < line_end) {
+            std::string key = s.substr(pos, colon - pos);
+            // Trim whitespace from key? Usually headers are strictly "Key:".
+            
+            if (key.length() == 4 && (key[0] == 'H' || key[0] == 'h') && 
+                                     (key[1] == 'o' || key[1] == 'O') &&
+                                     (key[2] == 's' || key[2] == 'S') && 
+                                     (key[3] == 't' || key[3] == 'T')) {
+                
+                // Found Host
+                std::string val = s.substr(colon + 1, line_end - (colon + 1));
+                // Trim whitespace and \r
+                size_t first = val.find_first_not_of(" \t");
+                if (first == std::string::npos) return ""; // Empty host
+                
+                size_t last = val.find_last_not_of(" \t\r");
+                if (last == std::string::npos || last < first) return "";
+                
+                return val.substr(first, last - first + 1);
+            }
+        }
+        
+        pos = line_end + 1;
+        
+        // Double \n or \r\n means end of headers
+        if (pos < s.length()) {
+             if (s[pos] == '\r' || s[pos] == '\n') break; 
+        }
     }
     return "";
 }
