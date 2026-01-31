@@ -110,8 +110,12 @@ void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len)
 }
 
 err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
-    std::vector<uint8_t> buf;
+    // Optimization: Use static buffer to avoid heap allocation per packet.
+    // LwIP core is protected by g_lwip_mtx, so this is thread-safe.
+    static std::vector<uint8_t> buf;
+    buf.clear();
     buf.reserve(p->tot_len);
+
     for (struct pbuf* q = p; q != NULL; q = q->next) {
         buf.insert(buf.end(), (uint8_t*)q->payload, (uint8_t*)q->payload + q->len);
     }

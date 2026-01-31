@@ -174,12 +174,14 @@ err_t tcp_client_sent(void* arg, struct tcp_pcb* tpcb, u16_t len) {
 void handle_proxy_read(TcpCtx* ctx) {
     if (ctx->closed) return;
     
-    // HEAP ALLOCATION: Use vector directly to avoid Stack Overflow with 256KB buffer
-    std::vector<uint8_t> data(262144);
-    int r = recv(ctx->proxy_socket, (char*)data.data(), (int)data.size(), 0);
+    // Optimization: Use thread_local buffer to avoid allocation/zero-fill overhead per read
+    thread_local std::vector<uint8_t> read_buf(262144);
+    
+    int r = recv(ctx->proxy_socket, (char*)read_buf.data(), (int)read_buf.size(), 0);
     
     if (r > 0) {
-        data.resize(r); // Resize to actual bytes read
+        // Copy only actual data. vector(iter, iter) is more efficient than resize() on a fresh zeroed vector.
+        std::vector<uint8_t> data(read_buf.begin(), read_buf.begin() + r);
         
         // Use mutable to allow moving 'd' into tx_queue
         MainDispatcher::instance().queue_task([ctx, d = std::move(data)]() mutable {
