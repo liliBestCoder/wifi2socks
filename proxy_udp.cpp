@@ -196,9 +196,24 @@ void handle_socks5_tcp_read(UdpSession* sess) {
             // Expect 05 00
             if (r >= 2 && buf[0] == 0x05 && buf[1] == 0x00) {
                 // Auth OK. Send UDP ASSOCIATE.
-                // 05 03 00 01 00 00 00 00 00 00
-                uint8_t req[] = { 0x05, 0x03, 0x00, 0x01, 0,0,0,0, 0,0 };
-                send(sess->tcp_sock, (const char*)req, sizeof(req), 0);
+                // Ver(5) Cmd(3) Rsv(0) Atyp(1) DstAddr(4) DstPort(2)
+                std::vector<uint8_t> req;
+                req.push_back(0x05); 
+                req.push_back(0x03); 
+                req.push_back(0x00); 
+                req.push_back(0x01); // IPv4
+                
+                // Use the actual destination IP/Port for the association
+                // This helps the proxy server log the correct target and potentially routing.
+                req.push_back(sess->dst_ip & 0xFF);
+                req.push_back((sess->dst_ip >> 8) & 0xFF);
+                req.push_back((sess->dst_ip >> 16) & 0xFF);
+                req.push_back((sess->dst_ip >> 24) & 0xFF);
+                
+                req.push_back(sess->dst_port & 0xFF);
+                req.push_back((sess->dst_port >> 8) & 0xFF);
+
+                send(sess->tcp_sock, (const char*)req.data(), (int)req.size(), 0);
                 sess->state = UdpSession::HANDSHAKE_ASSOC;
             } else {
                 close_udp_session_internal(sess);
