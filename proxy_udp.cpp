@@ -37,6 +37,67 @@ struct UdpSession {
 
 thread_local std::map<UdpKey, UdpSession*> t_udp_sessions;
 
+// Helper to log DNS answers for debugging
+void log_dns_packet(const uint8_t* payload, int len) {
+    if (len < 12) return;
+    
+    // Header: ID (2), Flags (2), QD(2), AN(2), ...
+    uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
+    bool is_response = (flags & 0x8000) != 0;
+    
+    if (!is_response) return; 
+
+    uint16_t an_count = ntohs(*(uint16_t*)(payload + 6));
+    if (an_count == 0) return;
+
+    // We only do a rough skip of Queries to get to Answers
+    uint16_t qd_count = ntohs(*(uint16_t*)(payload + 4));
+    int pos = 12;
+
+    // Skip Queries
+    for (int i=0; i<qd_count; ++i) {
+        if (pos >= len) return;
+        while (pos < len) {
+            uint8_t n = payload[pos];
+            if (n == 0) { pos++; break; }
+            if ((n & 0xC0) == 0xC0) { pos += 2; break; } // Pointer
+            pos += n + 1;
+        }
+        pos += 4; // Type(2), Class(2)
+    }
+
+    printf("[DNS] Received %d Answers:\n", an_count);
+
+    // Parse Answers
+    for (int i=0; i<an_count; ++i) {
+        if (pos >= len) break;
+        // Skip Name
+        while (pos < len) {
+            uint8_t n = payload[pos];
+            if (n == 0) { pos++; break; }
+            if ((n & 0xC0) == 0xC0) { pos += 2; break; }
+            pos += n + 1;
+        }
+        
+        if (pos + 10 > len) break;
+        
+        uint16_t type = ntohs(*(uint16_t*)(payload + pos));
+        pos += 2; // Type
+        pos += 2; // Class
+        pos += 4; // TTL
+        uint16_t rdlen = ntohs(*(uint16_t*)(payload + pos));
+        pos += 2; // RDLength
+        
+        if (pos + rdlen > len) break;
+        
+        if (type == 1 && rdlen == 4) { // A Record (IPv4)
+            printf("  -> IPv4: %d.%d.%d.%d\n", 
+                payload[pos], payload[pos+1], payload[pos+2], payload[pos+3]);
+        }
+        pos += rdlen;
+    }
+}
+
 void close_udp_session_internal(UdpSession* sess) {
     if (!sess) return;
     
@@ -153,6 +214,11 @@ void handle_udp_relay_read(UdpSession* sess) {
         uint8_t* payload = (uint8_t*)(buf + header_len);
         int payload_len = r - header_len;
         
+        // Debug: Log DNS responses from the proxy
+        if (sess->dst_port == htons(53)) {
+            log_dns_packet(payload, payload_len);
+        }
+
         // Construct Reply to Tap
         // We use the session's info to reconstruct the IP packet.
         // Src IP = Session Dst IP (e.g. 8.8.8.8)
