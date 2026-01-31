@@ -53,6 +53,7 @@ void Worker::release_context(SocketContext* ctx) {
     if (ctx) {
         ctx->ref_count--;
         if (ctx->ref_count <= 0) {
+            ctx->magic = 0xDEADBEEF;
             delete ctx;
         }
     }
@@ -257,6 +258,12 @@ void Worker::loop() {
         if (overlapped != NULL) {
             SocketContext* ctx = (SocketContext*)completionKey;
             IO_CONTEXT* ioCtx = (IO_CONTEXT*)overlapped;
+
+            // SAFETY CHECK: Verify Context Validity
+            if (!ctx || ctx->magic != SocketContext::MAGIC_VAL) {
+                printf("Worker: Bad/Deleted Context! Magic: 0x%x Addr: %p\n", ctx ? ctx->magic : 0, ctx);
+                continue; 
+            }
 
             try {
                 if (ret) {

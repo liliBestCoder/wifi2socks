@@ -28,6 +28,8 @@ struct IO_CONTEXT {
 };
 
 struct SocketContext {
+    static const uint32_t MAGIC_VAL = 0xCAFEBABE;
+    uint32_t magic;
     SOCKET sock;
     std::function<void()> on_read;
     std::function<void()> on_write; // Used for Connect completion
@@ -38,9 +40,10 @@ struct SocketContext {
     bool read_pending;     // Avoid double posting
     bool paused;           // Flow control: if true, do not re-post read
     
-    int ref_count;         // Reference Counting for lifetime management
+    std::atomic<int> ref_count;         // Reference Counting for lifetime management
 
     SocketContext() {
+        magic = MAGIC_VAL;
         memset(&read_io, 0, sizeof(read_io));
         read_io.type = IO_READ;
         memset(&connect_io, 0, sizeof(connect_io));
@@ -49,6 +52,10 @@ struct SocketContext {
         paused = false;
         sock = INVALID_SOCKET;
         ref_count = 0; 
+    }
+    
+    ~SocketContext() {
+        magic = 0xDEADBEEF;
     }
 };
 
