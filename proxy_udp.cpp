@@ -245,7 +245,7 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                 sockaddr_in local;
                 memset(&local, 0, sizeof(local));
                 local.sin_family = AF_INET;
-                local.sin_addr.s_addr = INADDR_ANY;
+                local.sin_addr.S_un.S_addr = INADDR_ANY;
                 local.sin_port = 0;
                 bind(sess->udp_sock, (sockaddr*)&local, sizeof(local));
                 
@@ -338,9 +338,9 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
             
             unsigned int a, b, c, d;
             if (sscanf_s(PROXY_IP, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
-                proxy_addr.sin_addr.S_addr = (a) | (b << 8) | (c << 16) | (d << 24);
+                proxy_addr.sin_addr.S_un.S_addr = (a) | (b << 8) | (c << 16) | (d << 24);
             } else {
-                proxy_addr.sin_addr.S_addr = 0x0100007F; 
+                proxy_addr.sin_addr.S_un.S_addr = 0x0100007F; 
             }
             proxy_addr.sin_port = htons(PROXY_PORT);
             
