@@ -275,21 +275,12 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                 req.push_back(0x00); 
                 req.push_back(0x01); // IPv4
                 
-                // Use the actual destination IP/Port for the association
-                // This helps the proxy server log the correct target and potentially routing.
-                // DNS Hijack: 8.8.8.8
-                uint32_t assoc_ip = sess->dst_ip;
-                if (sess->dst_port == htons(53)) {
-                    assoc_ip = 0x08080808;
-                }
-
-                req.push_back(assoc_ip & 0xFF);
-                req.push_back((assoc_ip >> 8) & 0xFF);
-                req.push_back((assoc_ip >> 16) & 0xFF);
-                req.push_back((assoc_ip >> 24) & 0xFF);
-                
-                req.push_back(sess->dst_port & 0xFF);
-                req.push_back((sess->dst_port >> 8) & 0xFF);
+                // RFC 1928: DST.ADDR/PORT contains the address/port that the CLIENT expects to use.
+                // Since we bind to a random port later, we MUST send 0.0.0.0:0 here.
+                // Sending the target IP (e.g. 8.8.8.8) here was wrong and caused the proxy 
+                // to reject our UDP packets because they came from 127.0.0.1, not 8.8.8.8.
+                req.push_back(0); req.push_back(0); req.push_back(0); req.push_back(0); // 0.0.0.0
+                req.push_back(0); req.push_back(0); // Port 0
 
                 send(sess->tcp_sock, (const char*)req.data(), (int)req.size(), 0);
                 sess->state = UdpSession::HANDSHAKE_ASSOC;
