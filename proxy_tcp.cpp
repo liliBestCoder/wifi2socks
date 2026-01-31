@@ -53,6 +53,7 @@ struct TcpCtx {
 
 void close_tcp_ctx(TcpCtx* ctx);
 void handle_proxy_read(TcpCtx* ctx);
+void connect_to_proxy_async(TcpCtx* ctx);
 
 // Internal helper to finalize cleanup on Main Thread
 void final_cleanup_on_main(TcpCtx* ctx) {
@@ -201,6 +202,7 @@ void handle_proxy_read(TcpCtx* ctx) {
         close_tcp_ctx(ctx);
     } else {
         if (WSAGetLastError() != WSAEWOULDBLOCK) {
+            printf("[TCP] Proxy read error: %d\n", WSAGetLastError());
             close_tcp_ctx(ctx);
         }
     }
@@ -214,13 +216,26 @@ void handle_handshake_read(TcpCtx* ctx) {
     
     if (r > 0) {
         buf[r] = 0;
+        // printf("[TCP-Handshake] Rx: %s\n", buf); // Verbose log
+
         // Check for "200" in response (HTTP/1.1 200 Connection Established)
         if (strstr(buf, "200") != NULL) {
              {
                 std::lock_guard<std::mutex> lock(ctx->data_mtx);
                 // Handshake success, flush upstream data (ClientHello etc)
                 if (!ctx->upstream_data.empty()) {
-                     send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
+                     int sent = send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
+                     if (sent == SOCKET_ERROR) {
+                         printf("[TCP] Flush upstream failed: %d\n", WSAGetLastError());
+                         // If EWOULDBLOCK, we are in trouble because we don't have a queue for this raw socket yet.
+                         // But for Handshake, buffer should be empty/writable.
+                         if (WSAGetLastError() != WSAEWOULDBLOCK) {
+                             close_tcp_ctx(ctx);
+                             return;
+                         }
+                     } else {
+                         // printf("[TCP] Flushed %d bytes of client hello\n", sent);
+                     }
                      ctx->upstream_data.clear();
                 }
                 ctx->connected = true;
@@ -235,11 +250,17 @@ void handle_handshake_read(TcpCtx* ctx) {
                 [ctx]() { close_tcp_ctx(ctx); }
             );
         } else {
-            // Proxy rejected connection
+            printf("[TCP] Handshake Rejected: %s\n", buf);
             close_tcp_ctx(ctx);
         }
-    } else {
+    } else if (r == 0) {
+        printf("[TCP] Proxy Closed during handshake\n");
         close_tcp_ctx(ctx);
+    } else {
+        if (WSAGetLastError() != WSAEWOULDBLOCK) {
+            printf("[TCP] Handshake Recv Error: %d\n", WSAGetLastError());
+            close_tcp_ctx(ctx);
+        }
     }
 }
 
@@ -252,6 +273,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
     }
     
     if (err != 0) {
+        printf("[TCP] Proxy Connect Failed: %d\n", err);
         close_tcp_ctx(ctx);
         return;
     }
@@ -302,9 +324,12 @@ void handle_proxy_connect(TcpCtx* ctx) {
     int sent = send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
     if (sent == SOCKET_ERROR) {
          if (WSAGetLastError() != WSAEWOULDBLOCK) {
+             printf("[TCP] Failed to send CONNECT header: %d\n", WSAGetLastError());
              close_tcp_ctx(ctx);
              return;
          }
+         // EWOULDBLOCK on CONNECT packet? Extremely rare for start of connection, but...
+         // We might need to handle this if it happens. For now, assume it works or fails.
          close_tcp_ctx(ctx); 
          return;
     }
