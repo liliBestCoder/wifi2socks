@@ -17,6 +17,8 @@ const size_t RESUME_TX_QUEUE_SIZE = 2 * 1024 * 1024; // 2MB Low Water Mark
 
 // --- TCP Logic with Worker Pool ---
 struct TcpCtx {
+    static std::atomic<uint32_t> global_id;
+    uint32_t id;
     struct tcp_pcb* client_pcb;
     SOCKET proxy_socket;
     std::atomic<bool> closed;
@@ -46,12 +48,14 @@ struct TcpCtx {
     // ESTABLISHED: tunnel ready
     enum State { PRE_CONNECT, CONNECTING, HANDSHAKE, ESTABLISHED } state;
 
-    TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
+    TcpCtx() : id(++global_id), client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
                tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0), use_direct_mode(false) {
         sni_buffer.reserve(MAX_SNI_LEN);
         upstream_data.reserve(8192); 
     }
 };
+
+std::atomic<uint32_t> TcpCtx::global_id(0);
 
 void close_tcp_ctx(TcpCtx* ctx);
 void handle_proxy_read(TcpCtx* ctx);
@@ -131,7 +135,7 @@ void try_send_downstream(TcpCtx* ctx) {
                               0); // 0 = TCP_WRITE_FLAG_COPY (No Copy)
                               
         if (err == ERR_OK) {
-            // printf("[LwIP] Wrote %d bytes to client.\n", chunk); // Debug log
+            printf("[TCP-%u] Wrote %d bytes to client (LwIP).\n", ctx->id, chunk); 
             ctx->tx_written_offset += chunk;
             if (ctx->tx_written_offset >= buf.size()) {
                 ctx->tx_written_idx++;
@@ -184,7 +188,7 @@ void handle_proxy_read(TcpCtx* ctx) {
     int r = recv(ctx->proxy_socket, (char*)read_buf.data(), (int)read_buf.size(), 0);
     
     if (r > 0) {
-        printf("[TCP] Recv %d bytes from Proxy. Forwarding to Client...\n", r); // LOG ENABLED
+        printf("[TCP-%u] Recv %d bytes from Proxy. Forwarding to Client...\n", ctx->id, r);
         
         // Copy only actual data
         std::vector<uint8_t> data(read_buf.begin(), read_buf.begin() + r);
@@ -199,10 +203,11 @@ void handle_proxy_read(TcpCtx* ctx) {
             }
         });
     } else if (r == 0) {
+        printf("[TCP-%u] Proxy connection closed (FIN).\n", ctx->id);
         close_tcp_ctx(ctx);
     } else {
         if (WSAGetLastError() != WSAEWOULDBLOCK) {
-            printf("[TCP] Proxy read error: %d\n", WSAGetLastError());
+            printf("[TCP-%u] Proxy read error: %d\n", ctx->id, WSAGetLastError());
             close_tcp_ctx(ctx);
         }
     }
@@ -223,7 +228,7 @@ void handle_handshake_read(TcpCtx* ctx) {
             // Check for "200" in the header part
             std::string header = s.substr(0, header_end);
             if (header.find("200") != std::string::npos) {
-                printf("[TCP-Handshake] Tunnel Established (200 OK).\n");
+                printf("[TCP-%u] Tunnel Established (200 OK).\n", ctx->id);
                 
                 {
                     std::lock_guard<std::mutex> lock(ctx->data_mtx);
@@ -239,7 +244,7 @@ void handle_handshake_read(TcpCtx* ctx) {
                                      Sleep(1); 
                                      continue; 
                                  } else {
-                                     printf("[TCP] Flush upstream failed: %d\n", WSAGetLastError());
+                                     printf("[TCP-%u] Flush upstream failed: %d\n", ctx->id, WSAGetLastError());
                                      close_tcp_ctx(ctx);
                                      return;
                                  }
@@ -248,7 +253,7 @@ void handle_handshake_read(TcpCtx* ctx) {
                              remaining -= sent;
                              total_sent += sent;
                          }
-                         printf("[TCP] Flushed %d bytes of client hello\n", total_sent); // LOG ENABLED
+                         printf("[TCP-%u] Flushed %d bytes of client hello\n", ctx->id, total_sent); 
                          ctx->upstream_data.clear();
                     }
                     ctx->connected = true;
@@ -256,11 +261,10 @@ void handle_handshake_read(TcpCtx* ctx) {
                 }
 
                 // 2. Handle Extra Payload (Server Hello?) arriving with 200 OK
-                // This is rare but possible if proxy buffers
                 size_t payload_start = header_end + 4; // Skip \r\n\r\n
                 if (payload_start < (size_t)r) {
                     size_t payload_len = (size_t)r - payload_start;
-                    printf("[TCP] Found %d bytes of payload (ServerHello?) with 200 OK. Forwarding...\n", (int)payload_len);
+                    printf("[TCP-%u] Found %d bytes of payload (ServerHello?) with 200 OK. Forwarding...\n", ctx->id, (int)payload_len);
                     
                     std::vector<uint8_t> extra_data((uint8_t*)(buf + payload_start), (uint8_t*)(buf + r));
                     
@@ -282,22 +286,23 @@ void handle_handshake_read(TcpCtx* ctx) {
                     [ctx]() { close_tcp_ctx(ctx); }
                 );
             } else {
-                printf("[TCP] Handshake Rejected. Header: %s\n", header.c_str());
+                printf("[TCP-%u] Handshake Rejected. Header: %s\n", ctx->id, header.c_str());
                 close_tcp_ctx(ctx);
             }
         } else { 
             // Header incomplete? Wait for more? 
             // For simple proxy implementation, we assume header fits in one packet.
             // If not, we might need a buffer. But usually it fits.
-            printf("[TCP] Incomplete HTTP Header received. Closing.\n");
+            printf("[TCP-%u] Incomplete HTTP Header received. Closing.\n", ctx->id);
             close_tcp_ctx(ctx);
         }
     } else if (r == 0) {
-        printf("[TCP] Proxy Closed during handshake\n");
+        printf("[TCP-%u] Proxy Closed during handshake\n", ctx->id);
         close_tcp_ctx(ctx);
-    } else {
+    }
+    else {
         if (WSAGetLastError() != WSAEWOULDBLOCK) {
-            printf("[TCP] Handshake Recv Error: %d\n", WSAGetLastError());
+            printf("[TCP-%u] Handshake Recv Error: %d\n", ctx->id, WSAGetLastError());
             close_tcp_ctx(ctx);
         }
     }
@@ -309,7 +314,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
     int err = 0; int len = sizeof(err);
     getsockopt(ctx->proxy_socket, SOL_SOCKET, SO_ERROR, (char*)&err, &len);
     if (err != 0) {
-        printf("[TCP] Connect Failed: %d\n", err);
+        printf("[TCP-%u] Connect Failed: %d\n", ctx->id, err);
         close_tcp_ctx(ctx);
         return;
     }
@@ -320,11 +325,11 @@ void handle_proxy_connect(TcpCtx* ctx) {
     
     if (!sni.empty()) {
         target_host = sni;
-        printf("[TCP] SNI Found: %s\n", sni.c_str());
+        printf("[TCP-%u] SNI Found: %s\n", ctx->id, sni.c_str());
     } else {
         target_host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
         if (!target_host.empty()) {
-            printf("[TCP] HTTP Host Found: %s\n", target_host.c_str());
+            printf("[TCP-%u] HTTP Host Found: %s\n", ctx->id, target_host.c_str());
         }
     }
 
@@ -345,7 +350,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
         if (FakeIpMapper::instance().is_fake_ip(ip)) {
             std::string mapped_domain = FakeIpMapper::instance().get_domain(ip);
             if (!mapped_domain.empty()) {
-                printf("[TCP] Recovered Domain from FakeIP: %s -> %s\n", ip_buf, mapped_domain.c_str());
+                printf("[TCP-%u] Recovered Domain from FakeIP: %s -> %s\n", ctx->id, ip_buf, mapped_domain.c_str());
                 sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", mapped_domain.c_str(), port, mapped_domain.c_str(), port);
             } else {
                 // FakeIP but lost mapping? Fallback to IP (will likely fail on proxy but we must try)
@@ -354,7 +359,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
         } else {
             // Real IP (e.g. 106.13.x.x)
             // CORRECT LOGIC: Send CONNECT IP:PORT to proxy. Let Proxy handle it.
-            printf("[TCP] No SNI/Host. Connecting to IP via Proxy: %s:%d\n", ip_buf, port);
+            printf("[TCP-%u] No SNI/Host. Connecting to IP via Proxy: %s:%d\n", ctx->id, ip_buf, port);
             sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", ip_buf, port, ip_buf, port);
         }
     }
@@ -362,7 +367,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
     int sent = send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
     if (sent == SOCKET_ERROR) {
          if (WSAGetLastError() != WSAEWOULDBLOCK) {
-             printf("[TCP] Failed to send CONNECT header: %d\n", WSAGetLastError());
+             printf("[TCP-%u] Failed to send CONNECT header: %d\n", ctx->id, WSAGetLastError());
              close_tcp_ctx(ctx);
              return;
          }
