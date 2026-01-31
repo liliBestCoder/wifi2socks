@@ -214,7 +214,7 @@ void send_dns_over_tcp(UdpSession* sess, const std::vector<uint8_t>& payload) {
     
     int sent = send(sess->tcp_sock, (const char*)tcp_pkt.data(), (int)tcp_pkt.size(), 0);
     if (sent == SOCKET_ERROR) {
-        printf("[DNS-TCP] send failed: %d\n", WSAGetLastError());
+        LOG_INFO("[DNS-TCP] send failed: %d\n", WSAGetLastError());
         close_udp_session_internal(sess);
     }
 }
@@ -312,7 +312,7 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                                 // Use the clean domain name for cache key
                                 if (!sess->clean_domain.empty()) {
                                     DnsCache::instance().put(sess->clean_domain, ip, ttl);
-                                    printf("[DNS] Resolved: %s -> %d.%d.%d.%d (TTL: %d)\n", 
+                                    LOG_INFO("[DNS] Resolved: %s -> %d.%d.%d.%d (TTL: %d)\n", 
                                         sess->clean_domain.c_str(),
                                         ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF, ttl);
                                 }
@@ -449,7 +449,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
             uint32_t cached_ip = DnsCache::instance().get(clean_domain);
             if (cached_ip != 0) {
                 // HIT! Send response immediately
-                printf("[DNS] Cache Hit: %s -> %d.%d.%d.%d\n", clean_domain.c_str(), 
+                LOG_INFO("[DNS] Cache Hit: %s -> %d.%d.%d.%d\n", clean_domain.c_str(), 
                     cached_ip & 0xFF, (cached_ip >> 8) & 0xFF, (cached_ip >> 16) & 0xFF, (cached_ip >> 24) & 0xFF);
                 send_dns_response(src_ip, dst_ip, src_port, dst_port, id, full_domain, cached_ip);
                 return;
@@ -467,8 +467,8 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                 memcpy(&target_dns_ip, google, 4);
             }
 
-            printf("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d (DNS Query)\n", len,
-                src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, src_port,
+            LOG_INFO("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d (DNS Query)\n", len,
+                src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
                 target_dns_ip & 0xFF, (target_dns_ip >> 8) & 0xFF, (target_dns_ip >> 16) & 0xFF, (target_dns_ip >> 24) & 0xFF, 53);
 
             std::vector<uint8_t> query_packet;
@@ -555,7 +555,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     }
 
     // Direct UDP Logic
-    printf("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
+    LOG_DEBUG("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
         src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
         dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
 

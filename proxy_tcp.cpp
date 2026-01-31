@@ -169,7 +169,7 @@ void handle_proxy_read(TcpCtx* ctx) {
     int r = recv(ctx->proxy_socket, (char*)read_buf.data(), (int)read_buf.size(), 0);
     
     if (r > 0) {
-        printf("[TCP] Recv %d bytes: %d.%d.%d.%d:%d <- %d.%d.%d.%d:%d\n", r,
+        LOG_DEBUG("[TCP] Recv %d bytes: %d.%d.%d.%d:%d <- %d.%d.%d.%d:%d\n", r,
             ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
             ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
         std::vector<uint8_t> data(read_buf.begin(), read_buf.begin() + r);
@@ -202,7 +202,7 @@ void handle_handshake_read(TcpCtx* ctx) {
         if (header_end != std::string::npos) {
             std::string header = s.substr(0, header_end);
             if (header.find("200") != std::string::npos) {
-                printf("[TCP] Tunnel Established: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
+                LOG_INFO("[TCP] Tunnel Established: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
                     ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
                     ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
                 
@@ -251,7 +251,7 @@ void handle_handshake_read(TcpCtx* ctx) {
                     [ctx]() { close_tcp_ctx(ctx); }
                 );
             } else {
-                printf("[TCP] Handshake Rejected: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
+                LOG_INFO("[TCP] Handshake Rejected: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
                     ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
                     ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
                 close_tcp_ctx(ctx);
@@ -283,12 +283,12 @@ void handle_proxy_connect(TcpCtx* ctx) {
     
     if (!sni.empty()) {
         target_host = sni;
-        printf("[TCP] SNI: %s (%d.%d.%d.%d:%d)\n", sni.c_str(),
+        LOG_INFO("[TCP] SNI: %s (%d.%d.%d.%d:%d)\n", sni.c_str(),
             ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
     } else {
         target_host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
         if (!target_host.empty()) {
-            printf("[TCP] Host: %s (%d.%d.%d.%d:%d)\n", target_host.c_str(),
+            LOG_INFO("[TCP] Host: %s (%d.%d.%d.%d:%d)\n", target_host.c_str(),
                 ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
         }
     }
@@ -304,7 +304,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
         sprintf_s(ip_buf, "%d.%d.%d.%d", 
             ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
         // Direct CONNECT to IP
-        printf("[TCP] No SNI. CONNECT %s:%d (%d.%d.%d.%d:%d)\n", ip_buf, port,
+        LOG_INFO("[TCP] No SNI. CONNECT %s:%d (%d.%d.%d.%d:%d)\n", ip_buf, port,
              ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
         sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", ip_buf, port, ip_buf, port);
     }
@@ -373,7 +373,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
     tcp_recved(tpcb, p->tot_len);
 
     if (p->tot_len > 0) {
-        printf("[TCP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", p->tot_len,
+        LOG_DEBUG("[TCP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", p->tot_len,
             ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
             ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
     }

@@ -8,6 +8,9 @@
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "Mswsock.lib")
 #include "app_config.h"
+
+// Global Log Level
+LogLevel g_log_level = LOG_LEVEL_DEBUG;
 #include "tap_driver.h"
 #include "worker.h"
 #include "lwip_handler.h"
@@ -34,7 +37,7 @@ int main() {
 
     // 3. Initialize Worker Pool
     WorkerPool::instance().init(40);
-    printf("Worker Pool Initialized.\n");
+    LOG_INFO("Worker Pool Initialized.\n");
 
     // 4. Initialize LwIP
     lwip_init();
@@ -54,7 +57,7 @@ int main() {
     pcb = tcp_listen(pcb);
     tcp_accept(pcb, tcp_proxy_accept);
 
-    printf("LwIP Tun2Socks Running.\nProxy: %s:%d\nTAP IP: %s\n", PROXY_IP, PROXY_PORT, TAP_IP);
+    LOG_INFO("LwIP Tun2Socks Running.\nProxy: %s:%d\nTAP IP: %s\n", PROXY_IP, PROXY_PORT, TAP_IP);
 
     // 6. Main Loop (Read from TAP -> LwIP)
     uint8_t buffer[65536];

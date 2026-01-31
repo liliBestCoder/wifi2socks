@@ -14,3 +14,23 @@
 
 #define TAP_WIN_PATH "\\\\.\\%s.tap"
 
+#include <stdio.h>
+
+enum LogLevel {
+    LOG_LEVEL_DEBUG = 0,
+    LOG_LEVEL_INFO = 1,
+    LOG_LEVEL_NONE = 99
+};
+
+extern LogLevel g_log_level;
+
+#define LOG_PRINT(level, fmt, ...) do { \
+    if (level >= g_log_level) { \
+        printf(fmt, ##__VA_ARGS__); \
+        fflush(stdout); \
+    } \
+} while(0)
+
+#define LOG_DEBUG(fmt, ...) LOG_PRINT(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)  LOG_PRINT(LOG_LEVEL_INFO, fmt, ##__VA_ARGS__)
+
