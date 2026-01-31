@@ -26,13 +26,13 @@ struct TcpCtx {
     
     // Sniffing Buffer
     std::vector<uint8_t> sni_buffer;
-    std::vector<uint8_t> upstream_data; // Pre-connect buffer (Payload to be sent after connect)
+    std::vector<uint8_t> upstream_data; // Pre-connect buffer (Payload to be sent after connect) 
     
     // Zero-Copy Queue
     std::deque<std::vector<uint8_t>> tx_queue;
     size_t tx_acked_offset;   // Bytes acked in tx_queue.front()
     size_t tx_written_idx;    // Current buffer index being written to LwIP
-    size_t tx_written_offset; // Bytes written in tx_queue[tx_written_idx]
+    size_t tx_written_offset; // Bytes written in tx_queue[tx_written_idx] 
     
     std::mutex data_mtx;
     Worker* worker;
@@ -95,7 +95,6 @@ void close_tcp_ctx(TcpCtx* ctx) {
             internal_close_on_worker(ctx);
         });
     } else {
-        // Should not happen if connected, but fallback
         MainDispatcher::instance().queue_task([ctx]() {
             final_cleanup_on_main(ctx);
         });
@@ -208,7 +207,7 @@ void handle_proxy_read(TcpCtx* ctx) {
     }
 }
 
-// Wait for HTTP 200 OK
+// Wait for HTTP 200 OK (Proxy Mode)
 void handle_handshake_read(TcpCtx* ctx) {
     if (ctx->closed) return;
     char buf[1024];
@@ -225,16 +224,10 @@ void handle_handshake_read(TcpCtx* ctx) {
                 // Handshake success, flush upstream data (ClientHello etc)
                 if (!ctx->upstream_data.empty()) {
                      int sent = send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
-                     if (sent == SOCKET_ERROR) {
+                     if (sent == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK) {
                          printf("[TCP] Flush upstream failed: %d\n", WSAGetLastError());
-                         // If EWOULDBLOCK, we are in trouble because we don't have a queue for this raw socket yet.
-                         // But for Handshake, buffer should be empty/writable.
-                         if (WSAGetLastError() != WSAEWOULDBLOCK) {
-                             close_tcp_ctx(ctx);
-                             return;
-                         }
-                     } else {
-                         // printf("[TCP] Flushed %d bytes of client hello\n", sent);
+                         close_tcp_ctx(ctx);
+                         return;
                      }
                      ctx->upstream_data.clear();
                 }
@@ -278,7 +271,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
         return;
     }
 
-    // Try Parse SNI or Host
+    // Try Parse SNI or Host from buffer
     std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());
     std::string target_host;
     
@@ -296,10 +289,10 @@ void handle_proxy_connect(TcpCtx* ctx) {
     uint16_t port = ntohs(ctx->target.original_dst_port);
 
     if (!target_host.empty()) {
-        // Use Domain Name
+        // Case 1: Use Domain Name
         sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", target_host.c_str(), port, target_host.c_str(), port);
     } else {
-        // Use IP Address (Fallback)
+        // Case 2: No SNI. Check FakeIP or use Real IP.
         uint32_t ip = ctx->target.original_dst_ip;
         char ip_buf[32];
         sprintf_s(ip_buf, "%d.%d.%d.%d", 
@@ -312,12 +305,14 @@ void handle_proxy_connect(TcpCtx* ctx) {
                 printf("[TCP] Recovered Domain from FakeIP: %s -> %s\n", ip_buf, mapped_domain.c_str());
                 sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", mapped_domain.c_str(), port, mapped_domain.c_str(), port);
             } else {
-                // FakeIP but lost mapping? Fallback to IP (will likely fail on proxy)
+                // FakeIP but lost mapping? Fallback to IP (will likely fail on proxy but we must try)
                 sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", ip_buf, port, ip_buf, port);
             }
         } else {
+            // Real IP (e.g. 106.13.x.x)
+            // CORRECT LOGIC: Send CONNECT IP:PORT to proxy. Let Proxy handle it.
+            printf("[TCP] No SNI/Host. Connecting to IP via Proxy: %s:%d\n", ip_buf, port);
             sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", ip_buf, port, ip_buf, port);
-            printf("[TCP] No SNI/Host. Connecting to IP: %s:%d\n", ip_buf, port);
         }
     }
     
@@ -328,8 +323,6 @@ void handle_proxy_connect(TcpCtx* ctx) {
              close_tcp_ctx(ctx);
              return;
          }
-         // EWOULDBLOCK on CONNECT packet? Extremely rare for start of connection, but...
-         // We might need to handle this if it happens. For now, assume it works or fails.
          close_tcp_ctx(ctx); 
          return;
     }
@@ -454,8 +447,8 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
             // 1. TLS Check
             else if (ctx->sni_buffer.size() >= 5 && ctx->sni_buffer[0] == 0x16) {
                 uint16_t tls_len = ((uint16_t)ctx->sni_buffer[3] << 8) | ctx->sni_buffer[4];
-                if (ctx->sni_buffer.size() >= (size_t)5 + tls_len) {
-                    ready = true; // Full ClientHello received
+                if (ctx->sni_buffer.size() >= (size_t)5 + tls_len) { // Full ClientHello received
+                    ready = true; 
                 }
             }
             // 2. HTTP Check
@@ -474,6 +467,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
             }
             
             if (ready) {
+                // Always use Proxy (HTTP CONNECT)
                 connect_to_proxy_async(ctx);
             }
         }
