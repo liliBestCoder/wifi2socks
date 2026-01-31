@@ -180,6 +180,15 @@ void send_udp_to_relay(UdpSession* sess, const std::vector<uint8_t>& payload) {
     int sent = sendto(sess->udp_sock, (const char*)packet.data(), (int)packet.size(), 0, (sockaddr*)&sess->relay_addr, sizeof(sess->relay_addr));
     if (sent == SOCKET_ERROR) {
         printf("[UDP] sendto Relay failed! Err: %d\n", WSAGetLastError());
+    } else {
+        // Debug: Log sending (reduce frequency if needed, but useful now)
+        // printf("[UDP] Sent %d bytes to Relay %d.%d.%d.%d:%d\n", 
+        //    sent,
+        //    sess->relay_addr.sin_addr.S_un.S_un_b.s_b1,
+        //    sess->relay_addr.sin_addr.S_un.S_un_b.s_b2,
+        //    sess->relay_addr.sin_addr.S_un.S_un_b.s_b3,
+        //    sess->relay_addr.sin_addr.S_un.S_un_b.s_b4,
+        //    ntohs(sess->relay_addr.sin_port));
     }
 }
 
@@ -270,32 +279,48 @@ void handle_socks5_tcp_read(UdpSession* sess) {
     int r = recv(sess->tcp_sock, buf, sizeof(buf), 0);
     
     if (r > 0) {
+        // Debug: Log handshake progress
+        // printf("[SOCKS5-UDP] State: %d, Recv: %d bytes\n", sess->state, r);
+        
         if (sess->state == UdpSession::HANDSHAKE_AUTH) {
             // Expect 05 00
             if (r >= 2 && buf[0] == 0x05 && buf[1] == 0x00) {
+                printf("[SOCKS5-UDP] Auth OK. Sending UDP ASSOCIATE...\n");
+                
                 // Auth OK. Send UDP ASSOCIATE.
-                // 05 03 00 01 00 00 00 00 00 00
-                // FIX: Use 0.0.0.0:0 to allow relay from any source (our local interface)
+                // Ver(5) Cmd(3) Rsv(0) Atyp(1) DstAddr(4) DstPort(2)
+                // Use 0.0.0.0:0 to bind to any client address
                 uint8_t req[] = { 0x05, 0x03, 0x00, 0x01, 0,0,0,0, 0,0 };
                 send(sess->tcp_sock, (const char*)req, sizeof(req), 0);
                 sess->state = UdpSession::HANDSHAKE_ASSOC;
             } else {
+                printf("[SOCKS5-UDP] Auth Failed! Hex: %02X %02X\n", (uint8_t)buf[0], (uint8_t)buf[1]);
                 close_udp_session_internal(sess);
             }
         } else if (sess->state == UdpSession::HANDSHAKE_ASSOC) {
             // Expect 05 00 00 ATYP BND.ADDR BND.PORT
+            // Note: r >= 10 checks minimum size for IPv4 address response
             if (r >= 10 && buf[0] == 0x05 && buf[1] == 0x00) {
                 // Parse Relay Address
                 int addr_len = 0;
                 if (buf[3] == 0x01) addr_len = 4;
                 else if (buf[3] == 0x04) addr_len = 16;
-                else { close_udp_session_internal(sess); return; } 
+                else { 
+                    printf("[SOCKS5-UDP] Invalid Address Type: %d\n", buf[3]);
+                    close_udp_session_internal(sess); 
+                    return; 
+                } 
                 
-                if (r < 6 + addr_len + 2) { close_udp_session_internal(sess); return; }
+                // Basic length safety check
+                if (r < 6 + addr_len + 2) { 
+                    printf("[SOCKS5-UDP] Packet too short for address type\n");
+                    close_udp_session_internal(sess); 
+                    return; 
+                }
                 
                 sess->relay_addr.sin_family = AF_INET;
                 
-                if (buf[3] == 0x01) {
+                if (buf[3] == 0x01) { // IPv4
                     uint32_t relay_ip = *(uint32_t*)(buf + 4);
                     // Check if Relay IP is 0.0.0.0, if so, use Proxy IP (127.0.0.1)
                     if (relay_ip == 0) {
@@ -305,11 +330,13 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                         } else {
                              sess->relay_addr.sin_addr.S_un.S_addr = 0x0100007F; 
                         }
+                        printf("[SOCKS5-UDP] Relay IP was 0.0.0.0, patched to Local Proxy IP.\n");
                     } else {
                         sess->relay_addr.sin_addr.S_un.S_addr = relay_ip;
                     }
                 } else {
-                    // IPv6 unsupported fallback
+                    // IPv6 unsupported fallback logic or just error log
+                    printf("[SOCKS5-UDP] IPv6 Relay Address received (unsupported path), trying IPv4 fallback interpretation...\n");
                 }
                 
                 // Safe copy for port (Network Order)
@@ -321,10 +348,12 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                     sess->relay_addr.sin_addr.S_un.S_un_b.s_b3,
                     sess->relay_addr.sin_addr.S_un.S_un_b.s_b4,
                     ntohs(sess->relay_addr.sin_port));
+                fflush(stdout); // Force print
                 
                 // Create UDP Socket
                 sess->udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
                 if (sess->udp_sock == INVALID_SOCKET) {
+                    printf("[SOCKS5-UDP] Failed to create UDP socket\n");
                     close_udp_session_internal(sess);
                     return;
                 }
@@ -335,7 +364,11 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                 local.sin_family = AF_INET;
                 local.sin_addr.S_un.S_addr = INADDR_ANY;
                 local.sin_port = 0;
-                bind(sess->udp_sock, (sockaddr*)&local, sizeof(local));
+                if (bind(sess->udp_sock, (sockaddr*)&local, sizeof(local)) == SOCKET_ERROR) {
+                    printf("[SOCKS5-UDP] UDP Bind Failed: %d\n", WSAGetLastError());
+                    close_udp_session_internal(sess);
+                    return;
+                }
                 
                 u_long mode = 1;
                 ioctlsocket(sess->udp_sock, FIONBIO, &mode);
@@ -356,11 +389,17 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                     sess->pending_packets.pop_front();
                 }
             } else {
+                printf("[SOCKS5-UDP] Assoc Failed! Rep: %02X %02X Len: %d\n", (uint8_t)buf[0], (uint8_t)buf[1], r);
                 close_udp_session_internal(sess);
             }
         }
     } else {
-        // TCP Closed -> Session End
+        // TCP Closed or Error
+        if (r == 0) {
+             // printf("[SOCKS5-UDP] TCP Control Channel Closed Gracefully.\n");
+        } else {
+             printf("[SOCKS5-UDP] TCP Control Read Error: %d\n", WSAGetLastError());
+        }
         close_udp_session_internal(sess);
     }
 }
