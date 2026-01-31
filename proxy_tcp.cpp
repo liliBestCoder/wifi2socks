@@ -123,12 +123,12 @@ void try_send_downstream(TcpCtx* ctx) {
         u16_t chunk = (u16_t)((std::min)((size_t)limit, remaining));
         if (chunk == 0) break;
 
-        // FORCE COPY: Pass 1 as copy flag to ensure LwIP buffers the data internally.
-        // This avoids any pointer validity issues.
+        // Zero-Copy: Pass 0 as copy flag. 
+        // std::deque references are stable upon push_back, so this is safe as long as we don't pop until ACK.
         err_t err = tcp_write(ctx->client_pcb, 
                               buf.data() + ctx->tx_written_offset, 
                               chunk, 
-                              1); // 1 = TCP_WRITE_FLAG_COPY
+                              0); // 0 = TCP_WRITE_FLAG_COPY (No Copy)
                               
         if (err == ERR_OK) {
             // printf("[LwIP] Wrote %d bytes to client.\n", chunk); // Debug log
@@ -184,7 +184,7 @@ void handle_proxy_read(TcpCtx* ctx) {
     int r = recv(ctx->proxy_socket, (char*)read_buf.data(), (int)read_buf.size(), 0);
     
     if (r > 0) {
-        // printf("[TCP] Recv %d bytes from Proxy. Forwarding to Client...\n", r); // Trace log
+        printf("[TCP] Recv %d bytes from Proxy. Forwarding to Client...\n", r); // LOG ENABLED
         
         // Copy only actual data
         std::vector<uint8_t> data(read_buf.begin(), read_buf.begin() + r);
@@ -231,6 +231,7 @@ void handle_handshake_read(TcpCtx* ctx) {
                     if (!ctx->upstream_data.empty()) {
                          const char* ptr = (const char*)ctx->upstream_data.data();
                          int remaining = (int)ctx->upstream_data.size();
+                         int total_sent = 0;
                          while (remaining > 0) {
                              int sent = send(ctx->proxy_socket, ptr, remaining, 0);
                              if (sent == SOCKET_ERROR) {
@@ -245,7 +246,9 @@ void handle_handshake_read(TcpCtx* ctx) {
                              }
                              ptr += sent;
                              remaining -= sent;
+                             total_sent += sent;
                          }
+                         printf("[TCP] Flushed %d bytes of client hello\n", total_sent); // LOG ENABLED
                          ctx->upstream_data.clear();
                     }
                     ctx->connected = true;
@@ -253,6 +256,7 @@ void handle_handshake_read(TcpCtx* ctx) {
                 }
 
                 // 2. Handle Extra Payload (Server Hello?) arriving with 200 OK
+                // This is rare but possible if proxy buffers
                 size_t payload_start = header_end + 4; // Skip \r\n\r\n
                 if (payload_start < (size_t)r) {
                     size_t payload_len = (size_t)r - payload_start;
