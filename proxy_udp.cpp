@@ -312,8 +312,9 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                 } 
                 
                 // Basic length safety check
-                if (r < 6 + addr_len + 2) { 
-                    printf("[SOCKS5-UDP] Packet too short for address type\n");
+                // Header (4) + Addr + Port (2)
+                if (r < 4 + addr_len + 2) { 
+                    printf("[SOCKS5-UDP] Packet too short for address type. Len: %d, Expected: %d\n", r, 4 + addr_len + 2);
                     close_udp_session_internal(sess); 
                     return; 
                 }
