@@ -340,6 +340,11 @@ void connect_to_proxy_async(TcpCtx* ctx) {
 
 err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
     TcpCtx* ctx = (TcpCtx*)arg;
+    if (!ctx || ctx->closed) {
+        if (p) pbuf_free(p);
+        return ERR_OK;
+    }
+
     if (!p) { 
         // LwIP indicates connection closed
         close_tcp_ctx(ctx); 
@@ -355,6 +360,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         }
 
         ctx->worker->queue_task([ctx, d = std::move(data)]() {
+            if (ctx->closed) return;
             if (ctx->proxy_socket != INVALID_SOCKET) {
                 send(ctx->proxy_socket, (const char*)d.data(), (int)d.size(), 0);
             }

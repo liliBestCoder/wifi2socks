@@ -29,15 +29,19 @@ thread_local std::map<UdpKey, UdpSession*> t_udp_sessions;
 void close_udp_session_internal(UdpSession* sess) {
     if (!sess) return;
     
-    // Remove socket from worker's poll list
-    if (sess->worker) sess->worker->remove_socket(sess->sock);
-    if (sess->sock != INVALID_SOCKET) closesocket(sess->sock);
-    
-    // Remove from thread-local map
+    // Remove from thread-local map first
     UdpKey key = { sess->src_ip, sess->dst_ip, sess->src_port, sess->dst_port };
     t_udp_sessions.erase(key);
-    
-    delete sess;
+
+    if (sess->worker && sess->sock != INVALID_SOCKET) {
+        sess->worker->remove_socket(sess->sock, [sess]() {
+            closesocket(sess->sock);
+            delete sess;
+        });
+    } else {
+        if (sess->sock != INVALID_SOCKET) closesocket(sess->sock);
+        delete sess;
+    }
 }
 
 void handle_udp_read(UdpSession* sess) {
