@@ -1,7 +1,6 @@
 #include "proxy_tcp.h"
 #include "worker.h"
 #include "nat_table.h"
-#include "tls_parser.h"
 #include "app_config.h"
 #include "lwip_handler.h"
 #include "main_dispatcher.h"
@@ -23,7 +22,6 @@ struct TcpCtx {
     std::atomic<bool> connected;
     bool read_paused;
     NatEntry target;
-    std::vector<uint8_t> sni_buffer;
     std::vector<uint8_t> upstream_data; // Pre-connect buffer
     
     // Zero-Copy Queue
@@ -39,13 +37,13 @@ struct TcpCtx {
 
     TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
                tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0) {
-        sni_buffer.reserve(MAX_SNI_LEN);
         upstream_data.reserve(8192); 
     }
 };
 
 void close_tcp_ctx(TcpCtx* ctx);
 void handle_proxy_read(TcpCtx* ctx);
+void connect_to_proxy_async(TcpCtx* ctx);
 
 // Internal helper to finalize cleanup on Main Thread
 void final_cleanup_on_main(TcpCtx* ctx) {
@@ -136,10 +134,6 @@ void try_send_downstream(TcpCtx* ctx) {
             return;
         }
     }
-    
-    // NO AUTO RESUME HERE. 
-    // Resume is handled in tcp_client_sent (ACK based flow control)
-    // or if we simply failed to write due to MEM but now have space (rare in LwIP single thread without ack)
 }
 
 // Flow Control Callback (Main Thread)
@@ -180,7 +174,7 @@ void handle_proxy_read(TcpCtx* ctx) {
     int r = recv(ctx->proxy_socket, (char*)read_buf.data(), (int)read_buf.size(), 0);
     
     if (r > 0) {
-        // Copy only actual data. vector(iter, iter) is more efficient than resize() on a fresh zeroed vector.
+        // Copy only actual data
         std::vector<uint8_t> data(read_buf.begin(), read_buf.begin() + r);
         
         // Use mutable to allow moving 'd' into tx_queue
@@ -190,7 +184,6 @@ void handle_proxy_read(TcpCtx* ctx) {
             if (ctx->client_pcb && !ctx->closed) {
                 // Append to Zero-Copy Queue
                 ctx->tx_queue.push_back(std::move(d));
-                
                 // Try to write to LwIP
                 try_send_downstream(ctx);
             }
@@ -211,39 +204,21 @@ void handle_handshake_read(TcpCtx* ctx) {
     
     if (r > 0) {
         if (ctx->state == TcpCtx::HANDSHAKE_AUTH) {
-            // SOCKS5 Auth Response: 05 00
+            // SOCKS5 Auth Response: 05 00 (No Auth Accepted)
             if (r >= 2 && buf[0] == 0x05 && buf[1] == 0x00) {
-                // Auth OK. Send Connect Request.
-                // Re-parse target to construct request
-                std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());
-                std::string http_host;
-                if (sni.empty()) http_host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
-
+                // Auth OK. Send Connect Request (IPv4 only).
                 std::vector<uint8_t> req;
                 req.push_back(0x05); // Ver
                 req.push_back(0x01); // Cmd: Connect
                 req.push_back(0x00); // Rsv
+                req.push_back(0x01); // ATYP: IPv4
                 
-                if (!sni.empty()) {
-                    req.push_back(0x03); // Domain
-                    req.push_back((uint8_t)sni.length());
-                    req.insert(req.end(), sni.begin(), sni.end());
-                } else if (!http_host.empty()) {
-                    req.push_back(0x03); // Domain
-                    req.push_back((uint8_t)http_host.length());
-                    req.insert(req.end(), http_host.begin(), http_host.end());
-                } else {
-                    req.push_back(0x01); // IPv4
-                    uint32_t ip = ctx->target.original_dst_ip;
-                    // IP is stored in network order in target (from raw packet)? 
-                    // NatEntry original_dst_ip is uint32_t. In lwip_handler, it is ip->dest.addr.
-                    // ip->dest.addr is Network Order.
-                    // So we can just copy bytes.
-                    req.push_back(ip & 0xFF);
-                    req.push_back((ip >> 8) & 0xFF);
-                    req.push_back((ip >> 16) & 0xFF);
-                    req.push_back((ip >> 24) & 0xFF);
-                }
+                uint32_t ip = ctx->target.original_dst_ip;
+                // IP is typically Network Order in NatEntry/LwIP. SOCKS5 expects Network Order.
+                req.push_back(ip & 0xFF);
+                req.push_back((ip >> 8) & 0xFF);
+                req.push_back((ip >> 16) & 0xFF);
+                req.push_back((ip >> 24) & 0xFF);
                 
                 // Port: Network Order (2 bytes)
                 uint16_t port = ctx->target.original_dst_port; 
@@ -253,6 +228,7 @@ void handle_handshake_read(TcpCtx* ctx) {
                 send(ctx->proxy_socket, (const char*)req.data(), (int)req.size(), 0);
                 ctx->state = TcpCtx::HANDSHAKE_CONNECT;
             } else {
+                // Auth failed or unexpected response
                 close_tcp_ctx(ctx);
             }
         } else if (ctx->state == TcpCtx::HANDSHAKE_CONNECT) {
@@ -260,6 +236,7 @@ void handle_handshake_read(TcpCtx* ctx) {
             if (r >= 4 && buf[0] == 0x05 && buf[1] == 0x00) {
                  {
                     std::lock_guard<std::mutex> lock(ctx->data_mtx);
+                    // Flush pending upstream data
                     if (!ctx->upstream_data.empty()) {
                          send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
                          ctx->upstream_data.clear();
@@ -268,6 +245,7 @@ void handle_handshake_read(TcpCtx* ctx) {
                     ctx->state = TcpCtx::ESTABLISHED;
                 }
                 
+                // Switch to standard read handler
                 ctx->worker->add_socket(
                     ctx->proxy_socket,
                     [ctx]() { handle_proxy_read(ctx); },
@@ -275,6 +253,7 @@ void handle_handshake_read(TcpCtx* ctx) {
                     [ctx]() { close_tcp_ctx(ctx); }
                 );
             } else {
+                // Connection refused by proxy
                 close_tcp_ctx(ctx);
             }
         }
@@ -389,6 +368,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
     tcp_recved(tpcb, p->tot_len);
 
     if (ctx->connected && ctx->worker) {
+        // Established: Forward data directly to worker
         std::vector<uint8_t> data;
         data.reserve(p->tot_len);
         for (struct pbuf* q = p; q != NULL; q = q->next) {
@@ -403,57 +383,15 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         });
 
     } else {
+        // Handshaking: Buffer data
         std::lock_guard<std::mutex> lock(ctx->data_mtx);
         
         for (struct pbuf* q = p; q != NULL; q = q->next) {
             uint8_t* d = (uint8_t*)q->payload;
             ctx->upstream_data.insert(ctx->upstream_data.end(), d, d + q->len);
-            
-            if (ctx->state == TcpCtx::PRE_CONNECT) {
-                if (ctx->sni_buffer.size() < MAX_SNI_LEN) {
-                    size_t to_copy = (std::min)((size_t)q->len, (size_t)(MAX_SNI_LEN - ctx->sni_buffer.size()));
-                    ctx->sni_buffer.insert(ctx->sni_buffer.end(), d, d + to_copy);
-                }
-            }
         }
-
-        if (ctx->connected) {
-            if (ctx->proxy_socket != INVALID_SOCKET) {
-                 send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
-                 ctx->upstream_data.clear();
-            }
-        } else {
-            if (ctx->state == TcpCtx::PRE_CONNECT) {
-                bool ready = false;
-                if (ctx->sni_buffer.size() >= MAX_SNI_LEN) ready = true;
-                else if (ctx->sni_buffer.size() >= 5) {
-                    if (ctx->sni_buffer[0] != 0x16) {
-                        // Not TLS. Try HTTP Host.
-                        if (is_http_start(ctx->sni_buffer.data(), ctx->sni_buffer.size())) {
-                            std::string host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
-                            if (!host.empty()) {
-                                ready = true; // Found Host header
-                            } else {
-                                // Looks like HTTP but no Host header yet.
-                                // If buffer is large, give up.
-                                if (ctx->sni_buffer.size() > 1024) ready = true; 
-                            }
-                        } else {
-                            // Not TLS, Not HTTP start -> Unknown/Raw -> Fallback to IP
-                            ready = true; 
-                        }
-                    } else { 
-                        // TLS
-                        uint16_t tls_len = ((uint16_t)ctx->sni_buffer[3] << 8) | ctx->sni_buffer[4];
-                        if (ctx->sni_buffer.size() >= (size_t)5 + tls_len) ready = true; 
-                    }
-                }
-                
-                if (ready) {
-                    connect_to_proxy_async(ctx);
-                }
-            }
-        }
+        
+        // No SNI parsing. Just buffer until SOCKS5 handshake completes and flushes this buffer.
     }
     pbuf_free(p);
     return ERR_OK;
@@ -465,7 +403,7 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
 
     if (target.original_dst_ip == 0) return ERR_ABRT;
     
-    // Disable Nagle algorithm to reduce latency (especially for handshake)
+    // Disable Nagle algorithm to reduce latency
     tcp_nagle_disable(newpcb);
 
     TcpCtx* ctx = new TcpCtx();
@@ -481,5 +419,9 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
         // Trigger close from Main Thread side
         close_tcp_ctx(c); 
     });
+
+    // Start SOCKS5 connection immediately
+    connect_to_proxy_async(ctx);
+
     return ERR_OK;
 }
