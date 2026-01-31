@@ -319,14 +319,12 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
             }
             // Domestic -> Continue to Direct UDP (but hijack target to AliDNS)
             // We want to force domestic queries to 223.5.5.5 to ensure they resolve properly and fast.
-            // Override destination for the socket logic below.
-            // NOTE: 'dst_ip' is network order. 223.5.5.5 = 0xDF050505 (Host) -> Network?
-            // 223 = 0xDF, 5 = 0x05.
-            // IP: 223.5.5.5
-            // Byte array: [223, 5, 5, 5]
-            uint8_t ali_bytes[4] = {223, 5, 5, 5};
-            memcpy(&dst_ip, ali_bytes, 4);
-            printf("[Direct-DNS] Domestic: %s -> Forwarding to 223.5.5.5\n", domain.c_str());
+            // NOTE: We do NOT modify 'dst_ip' here. We must keep the ORIGINAL destination (e.g. 192.168.1.1)
+            // in the session so that when we reply to the OS, we spoof the source IP correctly.
+            // The actual hijacking to 223.5.5.5 happens inside `send_udp_to_relay`.
+            printf("[Direct-DNS] Domestic: %s -> Forwarding to 223.5.5.5 (Spoofing %d.%d.%d.%d)\n", 
+                domain.c_str(),
+                dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF);
         }
     }
 
