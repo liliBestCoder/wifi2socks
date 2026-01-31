@@ -42,67 +42,48 @@ void NatTable::cleanup(uint64_t timeout_ms) {
     }
 }
 
-// --- FakeIpMapper ---
+// --- DnsCache ---
 
-FakeIpMapper& FakeIpMapper::instance() {
-    static FakeIpMapper inst;
+DnsCache& DnsCache::instance() {
+    static DnsCache inst;
     return inst;
 }
 
-uint32_t FakeIpMapper::get_fake_ip(const std::string& domain) {
+uint32_t DnsCache::get(const std::string& domain) {
     std::lock_guard<std::mutex> lock(m_mtx);
-    
-    // Check if domain exists
-    auto it = m_domain_to_ip.find(domain);
-    if (it != m_domain_to_ip.end()) {
-        return it->second;
+    auto it = m_cache.find(domain);
+    if (it != m_cache.end()) {
+        if (GetTickCount64() < it->second.expire_time) {
+            return it->second.ip;
+        } else {
+            m_cache.erase(it); // Expired
+        }
     }
-
-    // Allocate new IP
-    // Range 198.18.0.0/15
-    // Use a counter starting at 1
-    uint32_t c = m_next_ip++;
-    if (m_next_ip > 0xFFFE) { // Simple wrap around
-        m_next_ip = 1;
-    }
-
-    // IP = 198.18.(c>>8).(c&0xFF)
-    // Construct in Network Byte Order
-    uint8_t bytes[4];
-    bytes[0] = 198;
-    bytes[1] = 18;
-    bytes[2] = (uint8_t)((c >> 8) & 0xFF);
-    bytes[3] = (uint8_t)(c & 0xFF);
-    
-    uint32_t ip;
-    memcpy(&ip, bytes, 4);
-
-    // Clean reverse map if overwritten
-    if (m_ip_to_domain.count(ip)) {
-        std::string old = m_ip_to_domain[ip];
-        m_domain_to_ip.erase(old);
-    }
-
-    m_domain_to_ip[domain] = ip;
-    m_ip_to_domain[ip] = domain;
-    
-    return ip;
+    return 0;
 }
 
-std::string FakeIpMapper::get_domain(uint32_t ip) {
+void DnsCache::put(const std::string& domain, uint32_t ip, int ttl_sec) {
     std::lock_guard<std::mutex> lock(m_mtx);
-    auto it = m_ip_to_domain.find(ip);
-    if (it != m_ip_to_domain.end()) {
-        return it->second;
-    }
-    return "";
+    // Min TTL 60s, Max TTL 1 hour to keep it reasonably fresh
+    if (ttl_sec < 60) ttl_sec = 60;
+    if (ttl_sec > 3600) ttl_sec = 3600;
+    
+    DnsCacheEntry entry;
+    entry.ip = ip;
+    entry.expire_time = GetTickCount64() + (ttl_sec * 1000);
+    m_cache[domain] = entry;
 }
 
-bool FakeIpMapper::is_fake_ip(uint32_t ip) {
-    uint8_t* p = (uint8_t*)&ip;
-    // Check if 198.18.x.x (Network Order, usually p[0] is first byte)
-    // On Little Endian Windows, memory is [198, 18, x, x]
-    return (p[0] == 198 && p[1] == 18);
+void DnsCache::cleanup() {
+    std::lock_guard<std::mutex> lock(m_mtx);
+    uint64_t now = GetTickCount64();
+    for (auto it = m_cache.begin(); it != m_cache.end(); ) {
+        if (now > it->second.expire_time) {
+            it = m_cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 // --- DomainRules ---
@@ -150,19 +131,15 @@ bool DomainRules::is_domestic(const std::string& domain) {
     std::string temp = domain;
     std::transform(temp.begin(), temp.end(), temp.begin(), ::tolower);
 
-    // Check strict .cn suffix
     if (temp.length() > 3 && temp.substr(temp.length() - 3) == ".cn") return true;
 
-    // Check rules mapping
     std::lock_guard<std::mutex> lock(m_mtx);
     
-    // Check full domain first
     if (m_cn_rules.count(temp)) return true;
 
-    // Check suffixes
     size_t pos = 0;
     while ((pos = temp.find('.', pos)) != std::string::npos) {
-        pos++; // Skip dot
+        pos++;
         std::string suffix = temp.substr(pos);
         if (m_cn_rules.count(suffix)) return true;
     }

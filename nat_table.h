@@ -28,24 +28,26 @@ private:
     std::mutex m_mtx;
 };
 
-// Singleton for FakeIP Mapping (Domain <-> 198.18.x.x)
-class FakeIpMapper {
-public:
-    static FakeIpMapper& instance();
-    
-    // Allocate (or reuse) a Fake IP for a domain
-    uint32_t get_fake_ip(const std::string& domain);
-    
-    // Lookup domain by Fake IP
-    std::string get_domain(uint32_t ip);
+// Simple DNS Cache (Domain -> IP)
+struct DnsCacheEntry {
+    uint32_t ip; // Network Order
+    uint64_t expire_time;
+};
 
-    bool is_fake_ip(uint32_t ip);
+class DnsCache {
+public:
+    static DnsCache& instance();
+    
+    // Returns 0 if not found or expired
+    uint32_t get(const std::string& domain);
+    
+    void put(const std::string& domain, uint32_t ip, int ttl_sec);
+    
+    void cleanup();
 
 private:
-    std::map<std::string, uint32_t> m_domain_to_ip;
-    std::map<uint32_t, std::string> m_ip_to_domain;
+    std::map<std::string, DnsCacheEntry> m_cache;
     std::mutex m_mtx;
-    uint32_t m_next_ip = 1; 
 };
 
 // Singleton for Domain Rules (CN List)
