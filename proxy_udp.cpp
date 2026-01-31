@@ -34,10 +34,14 @@ void load_cn_rules() {
     if (file.is_open()) {
         std::string line;
         while (std::getline(file, line)) {
-            line.erase(0, line.find_first_not_of(" 	
-"));
-            line.erase(line.find_last_not_of(" 	
-") + 1);
+            // Trim whitespace safely
+            while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ' || line.back() == '\t')) {
+                line.pop_back();
+            }
+            while (!line.empty() && (line[0] == ' ' || line[0] == '\t')) {
+                line.erase(0, 1);
+            }
+
             if (line.empty() || line[0] == '#') continue;
             g_cn_rules.insert(line);
         }
@@ -95,7 +99,7 @@ struct UdpSession {
     
     UdpSession() : sock(INVALID_SOCKET), worker(NULL) { 
         last_active = GetTickCount64(); 
-    }
+    } 
 };
 
 thread_local std::map<UdpKey, UdpSession*> t_udp_sessions;
@@ -397,9 +401,10 @@ void udp_check_timeouts() {
 
 // Called by Main Thread
 void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
+    // 1. DROP QUIC
     if (dst_port == htons(443)) return;
 
-    // Split DNS & Suffix Stripping
+    // 2. DNS Handling (Split DNS)
     if (dst_port == htons(53)) {
         int qname_len = 0;
         std::string full_domain = parse_dns_qname(payload, len, &qname_len);
