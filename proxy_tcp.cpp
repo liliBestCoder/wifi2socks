@@ -103,7 +103,7 @@ void close_tcp_ctx(TcpCtx* ctx) {
     }
 }
 
-// Internal helper: Try to write pending buffers to LwIP (Zero-Copy)
+// Internal helper: Try to write pending buffers to LwIP (Copy Mode)
 void try_send_downstream(TcpCtx* ctx) {
     if (!ctx || ctx->closed || !ctx->client_pcb) return;
 
@@ -123,12 +123,15 @@ void try_send_downstream(TcpCtx* ctx) {
         u16_t chunk = (u16_t)((std::min)((size_t)limit, remaining));
         if (chunk == 0) break;
 
+        // FORCE COPY: Pass 1 as copy flag to ensure LwIP buffers the data internally.
+        // This avoids any pointer validity issues.
         err_t err = tcp_write(ctx->client_pcb, 
                               buf.data() + ctx->tx_written_offset, 
                               chunk, 
-                              0);
+                              1); // 1 = TCP_WRITE_FLAG_COPY
                               
         if (err == ERR_OK) {
+            // printf("[LwIP] Wrote %d bytes to client.\n", chunk); // Debug log
             ctx->tx_written_offset += chunk;
             if (ctx->tx_written_offset >= buf.size()) {
                 ctx->tx_written_idx++;
@@ -136,8 +139,11 @@ void try_send_downstream(TcpCtx* ctx) {
             }
             tcp_output(ctx->client_pcb);
         } else if (err == ERR_MEM) {
+            // Debug log for memory pressure
+            printf("[LwIP] tcp_write ERR_MEM. Waiting for ACK.\n");
             break;
         } else {
+            printf("[LwIP] tcp_write failed: %d. Closing.\n", err);
             close_tcp_ctx(ctx);
             return;
         }
@@ -178,6 +184,8 @@ void handle_proxy_read(TcpCtx* ctx) {
     int r = recv(ctx->proxy_socket, (char*)read_buf.data(), (int)read_buf.size(), 0);
     
     if (r > 0) {
+        // printf("[TCP] Recv %d bytes from Proxy. Forwarding to Client...\n", r); // Trace log
+        
         // Copy only actual data
         std::vector<uint8_t> data(read_buf.begin(), read_buf.begin() + r);
         
