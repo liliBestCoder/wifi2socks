@@ -97,10 +97,16 @@ void send_udp_to_relay(UdpSession* sess, const std::vector<uint8_t>& payload) {
     packet.push_back(0x01); // ATYP: IPv4
     
     // Destination IP (Original Target) - Network Order
-    packet.push_back(sess->dst_ip & 0xFF);
-    packet.push_back((sess->dst_ip >> 8) & 0xFF);
-    packet.push_back((sess->dst_ip >> 16) & 0xFF);
-    packet.push_back((sess->dst_ip >> 24) & 0xFF);
+    uint32_t target_ip = sess->dst_ip;
+    // DNS Hijack: Redirect all DNS to 8.8.8.8 (Google DNS)
+    if (sess->dst_port == htons(53)) {
+        target_ip = 0x08080808; 
+    }
+
+    packet.push_back(target_ip & 0xFF);
+    packet.push_back((target_ip >> 8) & 0xFF);
+    packet.push_back((target_ip >> 16) & 0xFF);
+    packet.push_back((target_ip >> 24) & 0xFF);
     
     // Destination Port - Network Order
     packet.push_back(sess->dst_port & 0xFF);
@@ -205,10 +211,16 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                 
                 // Use the actual destination IP/Port for the association
                 // This helps the proxy server log the correct target and potentially routing.
-                req.push_back(sess->dst_ip & 0xFF);
-                req.push_back((sess->dst_ip >> 8) & 0xFF);
-                req.push_back((sess->dst_ip >> 16) & 0xFF);
-                req.push_back((sess->dst_ip >> 24) & 0xFF);
+                // DNS Hijack: 8.8.8.8
+                uint32_t assoc_ip = sess->dst_ip;
+                if (sess->dst_port == htons(53)) {
+                    assoc_ip = 0x08080808;
+                }
+
+                req.push_back(assoc_ip & 0xFF);
+                req.push_back((assoc_ip >> 8) & 0xFF);
+                req.push_back((assoc_ip >> 16) & 0xFF);
+                req.push_back((assoc_ip >> 24) & 0xFF);
                 
                 req.push_back(sess->dst_port & 0xFF);
                 req.push_back((sess->dst_port >> 8) & 0xFF);
