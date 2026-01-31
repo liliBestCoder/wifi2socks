@@ -276,8 +276,10 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                 
                 // Auth OK. Send UDP ASSOCIATE.
                 // Ver(5) Cmd(3) Rsv(0) Atyp(1) DstAddr(4) DstPort(2)
-                // Use 0.0.0.0:0 to bind to any client address
-                uint8_t req[] = { 0x05, 0x03, 0x00, 0x01, 0,0,0,0, 0,0 };
+                // FIX: Use 127.0.0.1:0. Sing-box log showing 0.0.0.0:0 might indicate it expects 
+                // packets to match that logic, but sending 127.0.0.1 is more explicit and matches 
+                // the actual source IP of our UDP packets.
+                uint8_t req[] = { 0x05, 0x03, 0x00, 0x01, 127,0,0,1, 0,0 };
                 send(sess->tcp_sock, (const char*)req, sizeof(req), 0);
                 sess->state = UdpSession::HANDSHAKE_ASSOC;
             } else {
