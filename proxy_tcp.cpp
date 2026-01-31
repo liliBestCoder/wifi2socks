@@ -1,6 +1,7 @@
 #include "proxy_tcp.h"
 #include "worker.h"
 #include "nat_table.h"
+#include "tls_parser.h"
 #include "app_config.h"
 #include "lwip_handler.h"
 #include "main_dispatcher.h"
@@ -22,7 +23,10 @@ struct TcpCtx {
     std::atomic<bool> connected;
     bool read_paused;
     NatEntry target;
-    std::vector<uint8_t> upstream_data; // Pre-connect buffer
+    
+    // Sniffing Buffer
+    std::vector<uint8_t> sni_buffer;
+    std::vector<uint8_t> upstream_data; // Pre-connect buffer (Payload to be sent after connect)
     
     // Zero-Copy Queue
     std::deque<std::vector<uint8_t>> tx_queue;
@@ -33,17 +37,22 @@ struct TcpCtx {
     std::mutex data_mtx;
     Worker* worker;
 
-    enum State { PRE_CONNECT, CONNECTING, HANDSHAKE_AUTH, HANDSHAKE_CONNECT, ESTABLISHED } state;
+    // States: 
+    // PRE_CONNECT: buffering client data to sniff SNI
+    // CONNECTING: socket connecting to proxy
+    // HANDSHAKE: sent CONNECT, waiting for 200 OK
+    // ESTABLISHED: tunnel ready
+    enum State { PRE_CONNECT, CONNECTING, HANDSHAKE, ESTABLISHED } state;
 
     TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
                tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0) {
+        sni_buffer.reserve(MAX_SNI_LEN);
         upstream_data.reserve(8192); 
     }
 };
 
 void close_tcp_ctx(TcpCtx* ctx);
 void handle_proxy_read(TcpCtx* ctx);
-void connect_to_proxy_async(TcpCtx* ctx);
 
 // Internal helper to finalize cleanup on Main Thread
 void final_cleanup_on_main(TcpCtx* ctx) {
@@ -197,65 +206,37 @@ void handle_proxy_read(TcpCtx* ctx) {
     }
 }
 
+// Wait for HTTP 200 OK
 void handle_handshake_read(TcpCtx* ctx) {
     if (ctx->closed) return;
-    char buf[512];
-    int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
+    char buf[1024];
+    int r = recv(ctx->proxy_socket, buf, sizeof(buf) - 1, 0);
     
     if (r > 0) {
-        if (ctx->state == TcpCtx::HANDSHAKE_AUTH) {
-            // SOCKS5 Auth Response: 05 00 (No Auth Accepted)
-            if (r >= 2 && buf[0] == 0x05 && buf[1] == 0x00) {
-                // Auth OK. Send Connect Request (IPv4 only).
-                std::vector<uint8_t> req;
-                req.push_back(0x05); // Ver
-                req.push_back(0x01); // Cmd: Connect
-                req.push_back(0x00); // Rsv
-                req.push_back(0x01); // ATYP: IPv4
-                
-                uint32_t ip = ctx->target.original_dst_ip;
-                // IP is typically Network Order in NatEntry/LwIP. SOCKS5 expects Network Order.
-                req.push_back(ip & 0xFF);
-                req.push_back((ip >> 8) & 0xFF);
-                req.push_back((ip >> 16) & 0xFF);
-                req.push_back((ip >> 24) & 0xFF);
-                
-                // Port: Network Order (2 bytes)
-                uint16_t port = ctx->target.original_dst_port; 
-                req.push_back(port & 0xFF);
-                req.push_back((port >> 8) & 0xFF);
-                
-                send(ctx->proxy_socket, (const char*)req.data(), (int)req.size(), 0);
-                ctx->state = TcpCtx::HANDSHAKE_CONNECT;
-            } else {
-                // Auth failed or unexpected response
-                close_tcp_ctx(ctx);
-            }
-        } else if (ctx->state == TcpCtx::HANDSHAKE_CONNECT) {
-            // SOCKS5 Connect Response: 05 00 ...
-            if (r >= 4 && buf[0] == 0x05 && buf[1] == 0x00) {
-                 {
-                    std::lock_guard<std::mutex> lock(ctx->data_mtx);
-                    // Flush pending upstream data
-                    if (!ctx->upstream_data.empty()) {
-                         send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
-                         ctx->upstream_data.clear();
-                    }
-                    ctx->connected = true;
-                    ctx->state = TcpCtx::ESTABLISHED;
+        buf[r] = 0;
+        // Check for "200" in response (HTTP/1.1 200 Connection Established)
+        if (strstr(buf, "200") != NULL) {
+             {
+                std::lock_guard<std::mutex> lock(ctx->data_mtx);
+                // Handshake success, flush upstream data (ClientHello etc)
+                if (!ctx->upstream_data.empty()) {
+                     send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
+                     ctx->upstream_data.clear();
                 }
-                
-                // Switch to standard read handler
-                ctx->worker->add_socket(
-                    ctx->proxy_socket,
-                    [ctx]() { handle_proxy_read(ctx); },
-                    nullptr,
-                    [ctx]() { close_tcp_ctx(ctx); }
-                );
-            } else {
-                // Connection refused by proxy
-                close_tcp_ctx(ctx);
+                ctx->connected = true;
+                ctx->state = TcpCtx::ESTABLISHED;
             }
+            
+            // Switch to standard read handler
+            ctx->worker->add_socket(
+                ctx->proxy_socket,
+                [ctx]() { handle_proxy_read(ctx); },
+                nullptr,
+                [ctx]() { close_tcp_ctx(ctx); }
+            );
+        } else {
+            // Proxy rejected connection
+            close_tcp_ctx(ctx);
         }
     } else {
         close_tcp_ctx(ctx);
@@ -275,11 +256,37 @@ void handle_proxy_connect(TcpCtx* ctx) {
         return;
     }
 
-    // Initiate SOCKS5 Handshake: Auth Methods
-    // 0x05: Ver, 0x01: NMethods, 0x00: No Auth
-    uint8_t auth_req[] = { 0x05, 0x01, 0x00 };
+    // Try Parse SNI or Host
+    std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());
+    std::string target_host;
     
-    int sent = send(ctx->proxy_socket, (const char*)auth_req, sizeof(auth_req), 0);
+    if (!sni.empty()) {
+        target_host = sni;
+        printf("[TCP] SNI Found: %s\n", sni.c_str());
+    } else {
+        target_host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
+        if (!target_host.empty()) {
+            printf("[TCP] HTTP Host Found: %s\n", target_host.c_str());
+        }
+    }
+
+    char cmd[1024];
+    uint16_t port = ntohs(ctx->target.original_dst_port);
+
+    if (!target_host.empty()) {
+        // Use Domain Name
+        sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", target_host.c_str(), port, target_host.c_str(), port);
+    } else {
+        // Use IP Address (Fallback)
+        uint32_t ip = ctx->target.original_dst_ip;
+        char ip_buf[32];
+        sprintf_s(ip_buf, "%d.%d.%d.%d", 
+            ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+        sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", ip_buf, port, ip_buf, port);
+        printf("[TCP] No SNI/Host. Connecting to IP: %s:%d\n", ip_buf, port);
+    }
+    
+    int sent = send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
     if (sent == SOCKET_ERROR) {
          if (WSAGetLastError() != WSAEWOULDBLOCK) {
              close_tcp_ctx(ctx);
@@ -289,7 +296,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
          return;
     }
 
-    ctx->state = TcpCtx::HANDSHAKE_AUTH;
+    ctx->state = TcpCtx::HANDSHAKE;
 
     ctx->worker->add_socket(
         ctx->proxy_socket,
@@ -339,7 +346,7 @@ void connect_to_proxy_async(TcpCtx* ctx) {
         }
 
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(PROXY_PORT);
+        addr.sin_port = htons(PROXY_PORT); // Ensure app_config.h PROXY_PORT is correct (2080)
 
         // IOCP Update: Use connect_async
         ctx->worker->connect_async(
@@ -383,15 +390,50 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         });
 
     } else {
-        // Handshaking: Buffer data
+        // Handshaking/Pre-Connect: Buffer data for SNI sniffing
         std::lock_guard<std::mutex> lock(ctx->data_mtx);
         
         for (struct pbuf* q = p; q != NULL; q = q->next) {
             uint8_t* d = (uint8_t*)q->payload;
             ctx->upstream_data.insert(ctx->upstream_data.end(), d, d + q->len);
+            
+            // Also accumulate into sni_buffer for parsing
+            if (ctx->state == TcpCtx::PRE_CONNECT) {
+                if (ctx->sni_buffer.size() < MAX_SNI_LEN) {
+                    size_t to_copy = (std::min)((size_t)q->len, (size_t)(MAX_SNI_LEN - ctx->sni_buffer.size()));
+                    ctx->sni_buffer.insert(ctx->sni_buffer.end(), d, d + to_copy);
+                }
+            }
         }
         
-        // No SNI parsing. Just buffer until SOCKS5 handshake completes and flushes this buffer.
+        if (ctx->state == TcpCtx::PRE_CONNECT) {
+            bool ready = false;
+            // 1. TLS Check
+            if (ctx->sni_buffer.size() >= 5 && ctx->sni_buffer[0] == 0x16) {
+                uint16_t tls_len = ((uint16_t)ctx->sni_buffer[3] << 8) | ctx->sni_buffer[4];
+                if (ctx->sni_buffer.size() >= (size_t)5 + tls_len) {
+                    ready = true; // Full ClientHello received
+                }
+            }
+            // 2. HTTP Check
+            else if (is_http_start(ctx->sni_buffer.data(), ctx->sni_buffer.size())) {
+                std::string host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
+                if (!host.empty()) {
+                    ready = true; // Host header found
+                } else if (ctx->sni_buffer.size() > 1024) {
+                    ready = true; // Buffer too big, give up and fallback to IP
+                }
+            }
+            // 3. Unknown Check
+            else if (ctx->sni_buffer.size() > 64) {
+                // Not TLS, Not HTTP start (e.g. SSH, FTP), fallback to IP immediately
+                ready = true;
+            }
+            
+            if (ready) {
+                connect_to_proxy_async(ctx);
+            }
+        }
     }
     pbuf_free(p);
     return ERR_OK;
@@ -420,8 +462,8 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
         close_tcp_ctx(c); 
     });
 
-    // Start SOCKS5 connection immediately
-    connect_to_proxy_async(ctx);
+    // Don't connect immediately. Wait for data to sniff SNI.
+    // connect_to_proxy_async(ctx); 
 
     return ERR_OK;
 }
