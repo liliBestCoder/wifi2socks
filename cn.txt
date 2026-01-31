@@ -1,0 +1,58 @@
+# Domestic Domain Rules for wifi2socks
+# Lines starting with # are comments.
+# Format: domain suffix (e.g. "baidu.com" matches "www.baidu.com", "api.baidu.com")
+
+# Top Level Domains
+cn
+
+# Major Internet Companies
+baidu.com
+qq.com
+tencent.com
+aliyun.com
+taobao.com
+tmall.com
+jd.com
+alipay.com
+163.com
+126.com
+sogou.com
+sohu.com
+360.cn
+mi.com
+xiaomi.com
+huawei.com
+oppo.com
+vivo.com
+
+# Social & Media
+zhihu.com
+bilibili.com
+weibo.com
+douyin.com
+kuaishou.com
+xiaohongshu.com
+iqiyi.com
+youku.com
+mgtv.com
+
+# Tech & Dev
+csdn.net
+cnblogs.com
+gitee.com
+oschina.net
+
+# News & Gov
+xinhuanet.com
+people.com.cn
+gov.cn
+
+# Others
+12306.cn
+ctrip.com
+meituan.com
+dianping.com
+58.com
+amemv.com
+zijieapi.com
+byteoversea.com
