@@ -2,6 +2,9 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <unordered_set>
+#include <string>
+#include <vector>
 
 struct NatEntry {
     uint32_t original_dst_ip;
@@ -43,4 +46,19 @@ private:
     std::map<uint32_t, std::string> m_ip_to_domain;
     std::mutex m_mtx;
     uint32_t m_next_ip = 1; 
+};
+
+// Singleton for Domain Rules (CN List)
+class DomainRules {
+public:
+    static DomainRules& instance();
+    
+    bool is_domestic(const std::string& domain);
+    void reload();
+
+private:
+    DomainRules();
+    std::unordered_set<std::string> m_cn_rules;
+    bool m_loaded;
+    std::mutex m_mtx;
 };
