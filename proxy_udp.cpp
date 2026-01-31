@@ -163,8 +163,8 @@ void handle_dns_fake_ip(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
     resp.push_back(0x00); resp.push_back(0x01);
     // Class IN (1)
     resp.push_back(0x00); resp.push_back(0x01);
-    // TTL (60s)
-    resp.push_back(0x00); resp.push_back(0x00); resp.push_back(0x00); resp.push_back(0x3C);
+    // TTL: 1 second (Don't cache long to avoid issues on restart)
+    resp.push_back(0x00); resp.push_back(0x00); resp.push_back(0x00); resp.push_back(0x01);
     // Len (4)
     resp.push_back(0x00); resp.push_back(0x04);
     // IP
