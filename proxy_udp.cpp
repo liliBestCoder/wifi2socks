@@ -179,15 +179,16 @@ void send_udp_to_relay(UdpSession* sess, const std::vector<uint8_t>& payload) {
         packet.push_back(0x01); // ATYP: IPv4
         
         uint32_t target_ip = sess->dst_ip;
+        bool hijacked = false;
         
-    // DNS Hijack: Redirect all DNS to 223.5.5.5 (AliDNS)
+    // DNS Hijack: Redirect all DNS to 8.8.8.8 (Google DNS)
     if (sess->dst_port == htons(53)) {
         hijacked = true;
-        // 223.5.5.5
-        packet.push_back(223);
-        packet.push_back(5);
-        packet.push_back(5);
-        packet.push_back(5);
+        // 8.8.8.8
+        packet.push_back(8);
+        packet.push_back(8);
+        packet.push_back(8);
+        packet.push_back(8);
     } else {
         packet.push_back(target_ip & 0xFF);
         packet.push_back((target_ip >> 8) & 0xFF);
@@ -277,12 +278,13 @@ void handle_socks5_tcp_read(UdpSession* sess) {
         if (sess->state == UdpSession::HANDSHAKE_AUTH) {
             if (r >= 2 && buf[0] == 0x05 && buf[1] == 0x00) {
                 if (sess->is_dns_tcp) {
-                    printf("[DNS-TCP] Auth OK. Connecting to 223.5.5.5:53 via TCP...\n");
-                    // CONNECT 223.5.5.5:53
+                    printf("[DNS-TCP] Auth OK. Connecting to 8.8.8.8:53 via TCP...\n");
+                    // CONNECT 8.8.8.8:53
                     std::vector<uint8_t> req;
                     req.push_back(0x05); req.push_back(0x01); req.push_back(0x00); req.push_back(0x01);
-                    // 223.5.5.5
-                    req.push_back(223); req.push_back(5); req.push_back(5); req.push_back(5);
+                    uint32_t ip = 0x08080808; // 8.8.8.8
+                    req.push_back(ip & 0xFF); req.push_back((ip >> 8) & 0xFF);
+                    req.push_back((ip >> 16) & 0xFF); req.push_back((ip >> 24) & 0xFF);
                     uint16_t port = htons(53);
                     req.push_back(port & 0xFF); req.push_back((port >> 8) & 0xFF);
                     send(sess->tcp_sock, (const char*)req.data(), (int)req.size(), 0);
