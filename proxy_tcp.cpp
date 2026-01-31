@@ -446,8 +446,13 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         
         if (ctx->state == TcpCtx::PRE_CONNECT) {
             bool ready = false;
+            
+            // Force ready if buffer is full to prevent hanging on large packets
+            if (ctx->sni_buffer.size() >= MAX_SNI_LEN) {
+                ready = true;
+            }
             // 1. TLS Check
-            if (ctx->sni_buffer.size() >= 5 && ctx->sni_buffer[0] == 0x16) {
+            else if (ctx->sni_buffer.size() >= 5 && ctx->sni_buffer[0] == 0x16) {
                 uint16_t tls_len = ((uint16_t)ctx->sni_buffer[3] << 8) | ctx->sni_buffer[4];
                 if (ctx->sni_buffer.size() >= (size_t)5 + tls_len) {
                     ready = true; // Full ClientHello received
