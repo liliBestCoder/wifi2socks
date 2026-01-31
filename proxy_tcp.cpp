@@ -27,6 +27,8 @@ struct TcpCtx {
     // Client Info for Logging
     uint32_t client_ip;
     uint16_t client_port;
+
+    bool is_direct; // Add this for bypass
     
     // Sniffing
     std::vector<uint8_t> sni_buffer;
@@ -45,7 +47,7 @@ struct TcpCtx {
     enum State { PRE_CONNECT, CONNECTING, HANDSHAKE, ESTABLISHED } state;
 
     TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
-               tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0), client_ip(0), client_port(0) {
+               tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0), client_ip(0), client_port(0), is_direct(false) {
         sni_buffer.reserve(MAX_SNI_LEN);
         upstream_data.reserve(8192); 
     }
@@ -278,6 +280,30 @@ void handle_proxy_connect(TcpCtx* ctx) {
         return;
     }
 
+    if (ctx->is_direct) {
+        LOG_INFO("[TCP] Direct Tunnel Established: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
+            ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
+            ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
+        
+        {
+            std::lock_guard<std::mutex> lock(ctx->data_mtx);
+            if (!ctx->upstream_data.empty()) {
+                 send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
+                 ctx->upstream_data.clear();
+            }
+            ctx->connected = true;
+            ctx->state = TcpCtx::ESTABLISHED;
+        }
+
+        ctx->worker->add_socket(
+            ctx->proxy_socket,
+            [ctx]() { handle_proxy_read(ctx); },
+            nullptr,
+            [ctx]() { close_tcp_ctx(ctx); }
+        );
+        return;
+    }
+
     std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());
     std::string target_host;
     
@@ -350,11 +376,16 @@ void connect_to_proxy_async(TcpCtx* ctx) {
         memset(&addr, 0, sizeof(addr));
         
         unsigned int a, b, c, d;
-        if (sscanf_s(PROXY_IP, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
-            addr.sin_addr.S_addr = (a) | (b << 8) | (c << 16) | (d << 24);
-        } else { addr.sin_addr.S_addr = 0x0100007F; }
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(PROXY_PORT);
+        if (ctx->is_direct) {
+            addr.sin_addr.S_addr = ctx->target.original_dst_ip;
+            addr.sin_port = ctx->target.original_dst_port;
+        } else {
+            if (sscanf_s(PROXY_IP, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+                addr.sin_addr.S_addr = (a) | (b << 8) | (c << 16) | (d << 24);
+            } else { addr.sin_addr.S_addr = 0x0100007F; }
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(PROXY_PORT);
+        }
 
         ctx->worker->connect_async(
             ctx->proxy_socket, *(sockaddr_in*)&addr, 
@@ -428,6 +459,38 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
             }
             
             if (ready) {
+                std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());
+                if (sni.empty()) {
+                    sni = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
+                }
+                
+                if (!sni.empty()) {
+                    ctx->detected_domain = sni;
+                    bool bypass = false;
+                    // Check QQ/VX Keywords
+                    if (sni.find("qq.com") != std::string::npos || 
+                        sni.find("tencent.com") != std::string::npos ||
+                        sni.find("wechat.com") != std::string::npos ||
+                        sni.find("weixin.com") != std::string::npos ||
+                        sni.find("qpic.cn") != std::string::npos ||
+                        sni.find("qlogo.cn") != std::string::npos ||
+                        sni.find("gtimg.com") != std::string::npos ||
+                        sni.find("gtimg.cn") != std::string::npos ||
+                        sni.find("tencent.cn") != std::string::npos ||
+                        sni.find("wechatpay.com") != std::string::npos ||
+                        sni.find("servicewechat.com") != std::string::npos) {
+                        bypass = true;
+                    }
+                    // Check Domestic List
+                    if (!bypass && DomainRules::instance().is_domestic(sni)) {
+                        bypass = true;
+                    }
+
+                    if (bypass) {
+                        ctx->is_direct = true;
+                        LOG_INFO("[TCP] Bypass Domain Detected: %s. Switching to Direct Connect.\n", sni.c_str());
+                    }
+                }
                 connect_to_proxy_async(ctx);
             }
         }
