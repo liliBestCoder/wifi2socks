@@ -53,11 +53,30 @@ bool is_domestic(const std::string& domain) {
     if (!g_rules_loaded) load_cn_rules();
     if (domain.empty()) return false;
 
+    // Convert to lowercase for matching
+    std::string temp = domain;
+    std::transform(temp.begin(), temp.end(), temp.begin(), 
+                   [](unsigned char c){ return std::tolower(c); });
+
+    // Strip local suffixes caused by Windows ICS / Router DNS
+    // This allows "baidu.com.mshome.net" to be identified as "baidu.com" -> Domestic
+    const char* suffixes[] = { ".mshome.net", ".lan", ".local", ".localdomain" };
+    for (const char* suffix : suffixes) {
+        size_t suffix_len = strlen(suffix);
+        if (temp.length() > suffix_len) {
+            if (temp.compare(temp.length() - suffix_len, suffix_len, suffix) == 0) {
+                printf("[Rules] Stripped local suffix: %s -> ", temp.c_str());
+                temp = temp.substr(0, temp.length() - suffix_len);
+                printf("%s\\n", temp.c_str());
+                break; 
+            }
+        }
+    }
+
     // Check full domain or suffixes
     // e.g. www.baidu.com -> check "baidu.com", "com", "www.baidu.com"
     // Heuristic: check last parts
     
-    std::string temp = domain;
     // Simple suffix matching
     // If domain ends with ".cn", it's domestic
     if (temp.length() > 3 && temp.substr(temp.length() - 3) == ".cn") return true;
