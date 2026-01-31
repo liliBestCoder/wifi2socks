@@ -39,19 +39,23 @@ thread_local std::map<UdpKey, UdpSession*> t_udp_sessions;
 
 // Helper to log DNS answers for debugging
 void log_dns_packet(const uint8_t* payload, int len) {
-    if (len < 12) return;
+    // Unconditional logging for debugging
+    if (len < 12) {
+        printf("[DNS] Received short packet len=%d\n", len);
+        return;
+    }
     
-    // Header: ID (2), Flags (2), QD(2), AN(2), ...
+    uint16_t id = ntohs(*(uint16_t*)payload);
     uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
-    bool is_response = (flags & 0x8000) != 0;
-    
-    if (!is_response) return; 
-
+    uint16_t qd_count = ntohs(*(uint16_t*)(payload + 4));
     uint16_t an_count = ntohs(*(uint16_t*)(payload + 6));
-    if (an_count == 0) return;
+
+    printf("[DNS] ID:%04x Flags:%04x QD:%d AN:%d Len:%d\n", id, flags, qd_count, an_count, len);
+
+    bool is_response = (flags & 0x8000) != 0;
+    if (!is_response || an_count == 0) return;
 
     // We only do a rough skip of Queries to get to Answers
-    uint16_t qd_count = ntohs(*(uint16_t*)(payload + 4));
     int pos = 12;
 
     // Skip Queries
@@ -65,8 +69,6 @@ void log_dns_packet(const uint8_t* payload, int len) {
         }
         pos += 4; // Type(2), Class(2)
     }
-
-    printf("[DNS] Received %d Answers:\n", an_count);
 
     // Parse Answers
     for (int i=0; i<an_count; ++i) {
@@ -175,7 +177,10 @@ void send_udp_to_relay(UdpSession* sess, const std::vector<uint8_t>& payload) {
     
     packet.insert(packet.end(), payload.begin(), payload.end());
     
-    sendto(sess->udp_sock, (const char*)packet.data(), (int)packet.size(), 0, (sockaddr*)&sess->relay_addr, sizeof(sess->relay_addr));
+    int sent = sendto(sess->udp_sock, (const char*)packet.data(), (int)packet.size(), 0, (sockaddr*)&sess->relay_addr, sizeof(sess->relay_addr));
+    if (sent == SOCKET_ERROR) {
+        printf("[UDP] sendto Relay failed! Err: %d\n", WSAGetLastError());
+    }
 }
 
 void handle_udp_relay_read(UdpSession* sess) {
@@ -252,6 +257,7 @@ void handle_udp_relay_read(UdpSession* sess) {
         TapDriver::instance().send_async(frame, 14 + 20 + 8 + payload_len);
     } else if (r == SOCKET_ERROR) {
         if (WSAGetLastError() != WSAEWOULDBLOCK) {
+             printf("[UDP] recvfrom error: %d\n", WSAGetLastError());
              close_udp_session_internal(sess);
         }
     }
@@ -268,21 +274,10 @@ void handle_socks5_tcp_read(UdpSession* sess) {
             // Expect 05 00
             if (r >= 2 && buf[0] == 0x05 && buf[1] == 0x00) {
                 // Auth OK. Send UDP ASSOCIATE.
-                // Ver(5) Cmd(3) Rsv(0) Atyp(1) DstAddr(4) DstPort(2)
-                std::vector<uint8_t> req;
-                req.push_back(0x05); 
-                req.push_back(0x03); 
-                req.push_back(0x00); 
-                req.push_back(0x01); // IPv4
-                
-                // RFC 1928: DST.ADDR/PORT contains the address/port that the CLIENT expects to use.
-                // Since we bind to a random port later, we MUST send 0.0.0.0:0 here.
-                // Sending the target IP (e.g. 8.8.8.8) here was wrong and caused the proxy 
-                // to reject our UDP packets because they came from 127.0.0.1, not 8.8.8.8.
-                req.push_back(0); req.push_back(0); req.push_back(0); req.push_back(0); // 0.0.0.0
-                req.push_back(0); req.push_back(0); // Port 0
-
-                send(sess->tcp_sock, (const char*)req.data(), (int)req.size(), 0);
+                // 05 03 00 01 00 00 00 00 00 00
+                // FIX: Use 0.0.0.0:0 to allow relay from any source (our local interface)
+                uint8_t req[] = { 0x05, 0x03, 0x00, 0x01, 0,0,0,0, 0,0 };
+                send(sess->tcp_sock, (const char*)req, sizeof(req), 0);
                 sess->state = UdpSession::HANDSHAKE_ASSOC;
             } else {
                 close_udp_session_internal(sess);
@@ -294,29 +289,38 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                 int addr_len = 0;
                 if (buf[3] == 0x01) addr_len = 4;
                 else if (buf[3] == 0x04) addr_len = 16;
-                else { close_udp_session_internal(sess); return; } // Domain not typically returned here
+                else { close_udp_session_internal(sess); return; } 
                 
                 if (r < 6 + addr_len + 2) { close_udp_session_internal(sess); return; }
                 
-                // Copy Relay Address
                 sess->relay_addr.sin_family = AF_INET;
-                // We only support IPv4 relay for now in this struct, 
-                // but SOCKS5 might return IPv6. 
-                // For simplicity, assume proxy is on localhost IPv4 (127.0.0.1) as configured.
-                // But we must use the port returned.
                 
-                // Note: The BND.ADDR returned by proxy is where we should send UDP.
-                // If proxy is 127.0.0.1, it returns 127.0.0.1 or 0.0.0.0.
                 if (buf[3] == 0x01) {
-                    memcpy(&sess->relay_addr.sin_addr, buf + 4, 4);
+                    uint32_t relay_ip = *(uint32_t*)(buf + 4);
+                    // Check if Relay IP is 0.0.0.0, if so, use Proxy IP (127.0.0.1)
+                    if (relay_ip == 0) {
+                        unsigned int a, b, c, d;
+                        if (sscanf_s(PROXY_IP, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+                             sess->relay_addr.sin_addr.S_un.S_addr = (a) | (b << 8) | (c << 16) | (d << 24);
+                        } else {
+                             sess->relay_addr.sin_addr.S_un.S_addr = 0x0100007F; 
+                        }
+                    } else {
+                        sess->relay_addr.sin_addr.S_un.S_addr = relay_ip;
+                    }
                 } else {
-                    // Fallback: If IPv6, we can't easily use it with sockaddr_in. 
-                    // But our PROXY_IP is IPv4. The relay usually binds on same family.
-                    // If we get here, something is complex. For now, assume IPv4.
+                    // IPv6 unsupported fallback
                 }
                 
-                uint16_t port = *(uint16_t*)(buf + 4 + addr_len);
-                sess->relay_addr.sin_port = port;
+                // Safe copy for port (Network Order)
+                memcpy(&sess->relay_addr.sin_port, buf + 4 + addr_len, 2);
+                
+                printf("[SOCKS5] UDP Assoc OK. Relay: %d.%d.%d.%d:%d\n", 
+                    sess->relay_addr.sin_addr.S_un.S_un_b.s_b1,
+                    sess->relay_addr.sin_addr.S_un.S_un_b.s_b2,
+                    sess->relay_addr.sin_addr.S_un.S_un_b.s_b3,
+                    sess->relay_addr.sin_addr.S_un.S_un_b.s_b4,
+                    ntohs(sess->relay_addr.sin_port));
                 
                 // Create UDP Socket
                 sess->udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -341,7 +345,7 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                     sess->udp_sock,
                     [sess]() { handle_udp_relay_read(sess); },
                     nullptr, 
-                    nullptr // Don't auto-close session on UDP close, let control channel handle it
+                    nullptr 
                 );
                 
                 sess->state = UdpSession::ESTABLISHED;
