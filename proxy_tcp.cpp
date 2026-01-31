@@ -35,7 +35,7 @@ struct TcpCtx {
     std::mutex data_mtx;
     Worker* worker;
 
-    enum State { PRE_CONNECT, CONNECTING, HANDSHAKE, ESTABLISHED } state;
+    enum State { PRE_CONNECT, CONNECTING, HANDSHAKE_AUTH, HANDSHAKE_CONNECT, ESTABLISHED } state;
 
     TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
                tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0) {
@@ -206,30 +206,77 @@ void handle_proxy_read(TcpCtx* ctx) {
 
 void handle_handshake_read(TcpCtx* ctx) {
     if (ctx->closed) return;
-    char resp[1024];
-    int r = recv(ctx->proxy_socket, resp, sizeof(resp) - 1, 0);
+    char buf[512];
+    int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
     
     if (r > 0) {
-        resp[r] = 0;
-        if (strstr(resp, "200") != NULL) {
-             {
-                std::lock_guard<std::mutex> lock(ctx->data_mtx);
-                if (!ctx->upstream_data.empty()) {
-                     send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
-                     ctx->upstream_data.clear();
+        if (ctx->state == TcpCtx::HANDSHAKE_AUTH) {
+            // SOCKS5 Auth Response: 05 00
+            if (r >= 2 && buf[0] == 0x05 && buf[1] == 0x00) {
+                // Auth OK. Send Connect Request.
+                // Re-parse target to construct request
+                std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());
+                std::string http_host;
+                if (sni.empty()) http_host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
+
+                std::vector<uint8_t> req;
+                req.push_back(0x05); // Ver
+                req.push_back(0x01); // Cmd: Connect
+                req.push_back(0x00); // Rsv
+                
+                if (!sni.empty()) {
+                    req.push_back(0x03); // Domain
+                    req.push_back((uint8_t)sni.length());
+                    req.insert(req.end(), sni.begin(), sni.end());
+                } else if (!http_host.empty()) {
+                    req.push_back(0x03); // Domain
+                    req.push_back((uint8_t)http_host.length());
+                    req.insert(req.end(), http_host.begin(), http_host.end());
+                } else {
+                    req.push_back(0x01); // IPv4
+                    uint32_t ip = ctx->target.original_dst_ip;
+                    // IP is stored in network order in target (from raw packet)? 
+                    // NatEntry original_dst_ip is uint32_t. In lwip_handler, it is ip->dest.addr.
+                    // ip->dest.addr is Network Order.
+                    // So we can just copy bytes.
+                    req.push_back(ip & 0xFF);
+                    req.push_back((ip >> 8) & 0xFF);
+                    req.push_back((ip >> 16) & 0xFF);
+                    req.push_back((ip >> 24) & 0xFF);
                 }
-                ctx->connected = true;
-                ctx->state = TcpCtx::ESTABLISHED;
+                
+                // Port: Network Order (2 bytes)
+                uint16_t port = ctx->target.original_dst_port; 
+                req.push_back(port & 0xFF);
+                req.push_back((port >> 8) & 0xFF);
+                
+                send(ctx->proxy_socket, (const char*)req.data(), (int)req.size(), 0);
+                ctx->state = TcpCtx::HANDSHAKE_CONNECT;
+            } else {
+                close_tcp_ctx(ctx);
             }
-            
-            ctx->worker->add_socket(
-                ctx->proxy_socket,
-                [ctx]() { handle_proxy_read(ctx); },
-                nullptr,
-                [ctx]() { close_tcp_ctx(ctx); }
-            );
-        } else {
-            close_tcp_ctx(ctx);
+        } else if (ctx->state == TcpCtx::HANDSHAKE_CONNECT) {
+            // SOCKS5 Connect Response: 05 00 ...
+            if (r >= 4 && buf[0] == 0x05 && buf[1] == 0x00) {
+                 {
+                    std::lock_guard<std::mutex> lock(ctx->data_mtx);
+                    if (!ctx->upstream_data.empty()) {
+                         send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
+                         ctx->upstream_data.clear();
+                    }
+                    ctx->connected = true;
+                    ctx->state = TcpCtx::ESTABLISHED;
+                }
+                
+                ctx->worker->add_socket(
+                    ctx->proxy_socket,
+                    [ctx]() { handle_proxy_read(ctx); },
+                    nullptr,
+                    [ctx]() { close_tcp_ctx(ctx); }
+                );
+            } else {
+                close_tcp_ctx(ctx);
+            }
         }
     } else {
         close_tcp_ctx(ctx);
@@ -249,30 +296,11 @@ void handle_proxy_connect(TcpCtx* ctx) {
         return;
     }
 
-    std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());
-    std::string target_host;
+    // Initiate SOCKS5 Handshake: Auth Methods
+    // 0x05: Ver, 0x01: NMethods, 0x00: No Auth
+    uint8_t auth_req[] = { 0x05, 0x01, 0x00 };
     
-    if (!sni.empty()) {
-        target_host = sni;
-    } else {
-        // Try HTTP Host
-        std::string http_host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
-        if (!http_host.empty()) {
-            target_host = http_host;
-        } else {
-            uint32_t ip = ctx->target.original_dst_ip;
-            char ip_buf[32];
-            sprintf_s(ip_buf, "%d.%d.%d.%d", 
-                ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
-            target_host = ip_buf;
-        }
-    }
-
-    char cmd[1024];
-    uint16_t port = ntohs(ctx->target.original_dst_port);
-    sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", target_host.c_str(), port, target_host.c_str(), port);
-    
-    int sent = send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
+    int sent = send(ctx->proxy_socket, (const char*)auth_req, sizeof(auth_req), 0);
     if (sent == SOCKET_ERROR) {
          if (WSAGetLastError() != WSAEWOULDBLOCK) {
              close_tcp_ctx(ctx);
@@ -282,7 +310,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
          return;
     }
 
-    ctx->state = TcpCtx::HANDSHAKE;
+    ctx->state = TcpCtx::HANDSHAKE_AUTH;
 
     ctx->worker->add_socket(
         ctx->proxy_socket,
