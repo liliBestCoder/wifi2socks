@@ -20,7 +20,6 @@ bool g_rules_loaded = false;
 void load_cn_rules() {
     if (g_rules_loaded) return;
     
-    // Default fallback list
     std::vector<std::string> defaults = {
         "cn", "baidu.com", "qq.com", "163.com", "126.com", "taobao.com", 
         "jd.com", "tmall.com", "zhihu.com", "bilibili.com", "weibo.com", 
@@ -31,14 +30,14 @@ void load_cn_rules() {
     
     for (const auto& d : defaults) g_cn_rules.insert(d);
 
-    // Try load from file
     std::ifstream file("cn.txt");
     if (file.is_open()) {
         std::string line;
         while (std::getline(file, line)) {
-            // Trim whitespace
-            line.erase(0, line.find_first_not_of(" 	\r\n"));
-            line.erase(line.find_last_not_of(" 	\r\n") + 1);
+            line.erase(0, line.find_first_not_of(" 	
+"));
+            line.erase(line.find_last_not_of(" 	
+") + 1);
             if (line.empty() || line[0] == '#') continue;
             g_cn_rules.insert(line);
         }
@@ -49,40 +48,22 @@ void load_cn_rules() {
     g_rules_loaded = true;
 }
 
+// Check if domain matches CN rules
+// Returns true if domestic
 bool is_domestic(const std::string& domain) {
     if (!g_rules_loaded) load_cn_rules();
     if (domain.empty()) return false;
 
-    // Convert to lowercase for matching
     std::string temp = domain;
+    // Lowercase for checking
     std::transform(temp.begin(), temp.end(), temp.begin(), 
                    [](unsigned char c){ return std::tolower(c); });
 
-    // Strip local suffixes caused by Windows ICS / Router DNS
-    // This allows "baidu.com.mshome.net" to be identified as "baidu.com" -> Domestic
-    const char* suffixes[] = { ".mshome.net", ".lan", ".local", ".localdomain" };
-    for (const char* suffix : suffixes) {
-        size_t suffix_len = strlen(suffix);
-        if (temp.length() > suffix_len) {
-            if (temp.compare(temp.length() - suffix_len, suffix_len, suffix) == 0) {
-                printf("[Rules] Stripped local suffix: %s -> ", temp.c_str());
-                temp = temp.substr(0, temp.length() - suffix_len);
-                printf("%s\\n", temp.c_str());
-                break; 
-            }
-        }
-    }
+    // Note: We don't strip suffix here anymore, we do it in handle_udp_packet 
+    // to capture the logic. Here we just check the clean domain.
 
-    // Check full domain or suffixes
-    // e.g. www.baidu.com -> check "baidu.com", "com", "www.baidu.com"
-    // Heuristic: check last parts
-    
-    // Simple suffix matching
-    // If domain ends with ".cn", it's domestic
     if (temp.length() > 3 && temp.substr(temp.length() - 3) == ".cn") return true;
 
-    // Check mapping
-    // Iterate parts: www.baidu.com -> www.baidu.com, baidu.com, com
     size_t pos = 0;
     while (pos != std::string::npos) {
         std::string suffix = temp.substr(pos);
@@ -95,7 +76,7 @@ bool is_domestic(const std::string& domain) {
     return false;
 }
 
-// --- UDP Session (Thread Local) ---
+// --- UDP Session ---
 struct UdpKey {
     uint32_t src_ip, dst_ip;
     uint16_t src_port, dst_port;
@@ -103,11 +84,14 @@ struct UdpKey {
 };
 
 struct UdpSession {
-    SOCKET sock; // Only use direct socket now
+    SOCKET sock;
     uint32_t src_ip, dst_ip;
     uint16_t src_port, dst_port;
     uint64_t last_active;
     Worker* worker;
+    
+    // DNS Reconstruction State
+    std::string original_domain_with_suffix; // If set, we need to rewrite response
     
     UdpSession() : sock(INVALID_SOCKET), worker(NULL) { 
         last_active = GetTickCount64(); 
@@ -118,7 +102,6 @@ thread_local std::map<UdpKey, UdpSession*> t_udp_sessions;
 
 void close_udp_session_internal(UdpSession* sess) {
     if (!sess) return; 
-    
     UdpKey key = { sess->src_ip, sess->dst_ip, sess->src_port, sess->dst_port };
     t_udp_sessions.erase(key);
 
@@ -133,6 +116,87 @@ void close_udp_session_internal(UdpSession* sess) {
     }
 }
 
+// Helper to build a DNS Response with an IP (A Record)
+void send_dns_response(UdpSession* sess, uint16_t id, const std::string& domain, uint32_t ip_addr) {
+    // Construct Response Packet
+    std::vector<uint8_t> resp;
+    resp.reserve(512);
+    
+    // Header
+    resp.push_back(id & 0xFF); resp.push_back((id >> 8) & 0xFF);
+    resp.push_back(0x81); resp.push_back(0x80); // Std Response, No Error
+    resp.push_back(0x00); resp.push_back(0x01); // QD=1
+    resp.push_back(0x00); resp.push_back(0x01); // AN=1
+    resp.push_back(0x00); resp.push_back(0x00);
+    resp.push_back(0x00); resp.push_back(0x00);
+    
+    // Question Section
+    // Encode domain name: www.baidu.com -> 3www5baidu3com0
+    size_t pos = 0;
+    while (pos < domain.length()) {
+        size_t next_dot = domain.find('.', pos);
+        std::string label;
+        if (next_dot == std::string::npos) {
+            label = domain.substr(pos);
+            pos = domain.length();
+        } else {
+            label = domain.substr(pos, next_dot - pos);
+            pos = next_dot + 1;
+        }
+        if (label.length() > 63) label = label.substr(0, 63); // Truncate if too long
+        resp.push_back((uint8_t)label.length());
+        for (char c : label) resp.push_back(c);
+    }
+    resp.push_back(0); // Root
+    
+    resp.push_back(0x00); resp.push_back(0x01); // Type A
+    resp.push_back(0x00); resp.push_back(0x01); // Class IN
+    
+    // Answer Section
+    // Use Pointer to Question Name (Offset 12) => 0xC00C
+    resp.push_back(0xC0); resp.push_back(0x0C);
+    
+    resp.push_back(0x00); resp.push_back(0x01); // Type A
+    resp.push_back(0x00); resp.push_back(0x01); // Class IN
+    resp.push_back(0x00); resp.push_back(0x00); resp.push_back(0x00); resp.push_back(0x3C); // TTL 60
+    resp.push_back(0x00); resp.push_back(0x04); // Len 4
+    
+    // IP (Network Order)
+    resp.push_back(ip_addr & 0xFF);
+    resp.push_back((ip_addr >> 8) & 0xFF);
+    resp.push_back((ip_addr >> 16) & 0xFF);
+    resp.push_back((ip_addr >> 24) & 0xFF);
+    
+    // Send
+    uint8_t frame[2048];
+    if (14 + 20 + 8 + resp.size() > 2048) return;
+
+    memcpy(frame, HOST_MAC, 6);
+    memcpy(frame + 6, TapDriver::TAP_MAC, 6);
+    *(uint16_t*)(frame + 12) = htons(0x0800);
+
+    uint8_t* ip_hdr = frame + 14;
+    uint8_t* udp_hdr = ip_hdr + 20;
+    
+    memset(ip_hdr, 0, 20);
+    ip_hdr[0] = 0x45; ip_hdr[9] = 17; ip_hdr[8] = 64;
+    *(uint16_t*)(ip_hdr + 2) = htons((uint16_t)(20 + 8 + resp.size()));
+    *(uint32_t*)(ip_hdr + 12) = sess->dst_ip; 
+    *(uint32_t*)(ip_hdr + 16) = sess->src_ip; 
+    *(uint16_t*)(ip_hdr + 10) = ip_chksum_simple(ip_hdr, 20);
+
+    *(uint16_t*)(udp_hdr + 0) = sess->dst_port; 
+    *(uint16_t*)(udp_hdr + 2) = sess->src_port; 
+    *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + resp.size()));
+    *(uint16_t*)(udp_hdr + 6) = 0;
+    memcpy(udp_hdr + 8, resp.data(), resp.size());
+
+    TapDriver::instance().send_async(frame, 14 + 20 + 8 + (int)resp.size());
+    
+    // printf("[SmartDNS] Re-wrapped response for %s -> %d.%d.%d.%d\n", domain.c_str(),
+    //    ip_addr & 0xFF, (ip_addr >> 8) & 0xFF, (ip_addr >> 16) & 0xFF, (ip_addr >> 24) & 0xFF);
+}
+
 void handle_direct_udp_read(UdpSession* sess) {
     char buf[4096];
     sockaddr_in from;
@@ -142,6 +206,61 @@ void handle_direct_udp_read(UdpSession* sess) {
     if (r > 0) {
         sess->last_active = GetTickCount64();
         
+        // INTERCEPT: If this session was for a suffix-stripped domain, we need to rewrite the response.
+        if (!sess->original_domain_with_suffix.empty()) {
+            // We received a valid DNS response from 223.5.5.5 for the STRIPPED domain.
+            // We need to extract the IP and build a new response for the ORIGINAL domain.
+            if (r > 12) {
+                uint8_t* payload = (uint8_t*)buf;
+                uint16_t id = *(uint16_t*)payload;
+                uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
+                uint16_t an_count = ntohs(*(uint16_t*)(payload + 6));
+                
+                // Only process successful responses with answers
+                if ((flags & 0x8000) && an_count > 0) {
+                    // Skip Header + Query to find Answer
+                    uint16_t qd_count = ntohs(*(uint16_t*)(payload + 4));
+                    int pos = 12;
+                    for(int i=0; i<qd_count; i++) {
+                        while(pos < r) {
+                            uint8_t n = payload[pos];
+                            if(n==0) { pos++; break; }
+                            if((n&0xC0)==0xC0) { pos+=2; break; }
+                            pos += n+1;
+                        }
+                        pos += 4; // Type/Class
+                    }
+                    
+                    // Look for first A record
+                    for(int i=0; i<an_count; i++) {
+                        if(pos >= r) break;
+                        while(pos < r) { // Skip Name
+                            uint8_t n = payload[pos];
+                            if(n==0) { pos++; break; }
+                            if((n&0xC0)==0xC0) { pos+=2; break; }
+                            pos += n+1;
+                        }
+                        if(pos+10 > r) break;
+                        uint16_t type = ntohs(*(uint16_t*)(payload+pos));
+                        uint16_t rdlen = ntohs(*(uint16_t*)(payload+pos+8));
+                        pos += 10;
+                        if (type == 1 && rdlen == 4 && pos + 4 <= r) {
+                            // Found IP!
+                            uint32_t ip = *(uint32_t*)(payload + pos);
+                            // REWRITE Response!
+                            send_dns_response(sess, id, sess->original_domain_with_suffix, ip);
+                            printf("[SmartDNS] Fixed suffix: %s -> %d.%d.%d.%d\n", 
+                                sess->original_domain_with_suffix.c_str(),
+                                ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+                            return; // Done, don't forward raw packet
+                        }
+                        pos += rdlen;
+                    }
+                }
+            }
+            // If failed to parse or no answer, fall through (maybe OS will retry)
+        }
+
         uint8_t frame[2048];
         if (14 + 20 + 8 + r > 2048) return;
 
@@ -155,23 +274,8 @@ void handle_direct_udp_read(UdpSession* sess) {
         memset(ip, 0, 20);
         ip[0] = 0x45; ip[9] = 17; ip[8] = 64;
         *(uint16_t*)(ip + 2) = htons((uint16_t)(20 + 8 + r));
-        // Use Session IP for return path.
-        // Important: If we hijacked DNS to 223.5.5.5, sess->dst_ip is 223.5.5.5.
-        // But the OS might have sent to 192.168.1.1.
-        // If we reply from 223.5.5.5, OS will accept it? Usually yes if it matches the transaction ID.
-        // BUT, better to spoof the source IP as the one the client intended to send to (sess->dst_ip).
-        // Wait, if we hijacked, sess->dst_ip IS the hijacked target (223).
-        // We should probably store the ORIGINAL dst ip if we want to be perfect.
-        // However, standard DNS resolvers usually reply from the IP they were queried at.
-        // If we diverted the query to 223.5.5.5, we should probably reply as 223.5.5.5?
-        // No, the OS thinks it sent to X. If reply comes from Y, OS drops it.
-        // WE need to reply as X.
-        // IN our handle_udp_packet logic below, we change dst_ip passed to `sendto`, 
-        // BUT we keep the UdpSession key and structure using the ORIGINAL dst_ip requested by client.
-        // Let's check handle_udp_packet.
-        
-        *(uint32_t*)(ip + 12) = sess->dst_ip; // Src = Server (Original Target)
-        *(uint32_t*)(ip + 16) = sess->src_ip; // Dst = Client
+        *(uint32_t*)(ip + 12) = sess->dst_ip; 
+        *(uint32_t*)(ip + 16) = sess->src_ip; 
         *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
 
         *(uint16_t*)(udp_hdr + 0) = sess->dst_port; 
@@ -200,7 +304,7 @@ std::string parse_dns_qname(const uint8_t* payload, int len, int* qname_len) {
             pos++; 
             break; 
         }
-        if ((n & 0xC0) == 0xC0) return ""; // Pointers not expected in Query
+        if ((n & 0xC0) == 0xC0) return ""; 
         
         if (pos + n + 1 > len) return "";
         
@@ -213,74 +317,64 @@ std::string parse_dns_qname(const uint8_t* payload, int len, int* qname_len) {
     return domain;
 }
 
+// Helper to build a standard DNS Query packet
+std::vector<uint8_t> build_dns_query(uint16_t id, const std::string& domain) {
+    std::vector<uint8_t> req;
+    req.reserve(64);
+    
+    req.push_back(id & 0xFF); req.push_back((id >> 8) & 0xFF);
+    req.push_back(0x01); req.push_back(0x00); // Flags: Std Query, Recurse
+    req.push_back(0x00); req.push_back(0x01); // QD=1
+    req.push_back(0x00); req.push_back(0x00); // AN=0
+    req.push_back(0x00); req.push_back(0x00);
+    req.push_back(0x00); req.push_back(0x00); 
+    
+    size_t pos = 0;
+    while (pos < domain.length()) {
+        size_t next_dot = domain.find('.', pos);
+        std::string label;
+        if (next_dot == std::string::npos) {
+            label = domain.substr(pos);
+            pos = domain.length();
+        } else {
+            label = domain.substr(pos, next_dot - pos);
+            pos = next_dot + 1;
+        }
+        if (label.length() > 63) label = label.substr(0, 63); 
+        req.push_back((uint8_t)label.length());
+        for (char c : label) req.push_back(c);
+    }
+    req.push_back(0); 
+    
+    req.push_back(0x00); req.push_back(0x01); // A
+    req.push_back(0x00); req.push_back(0x01); // IN
+    
+    return req;
+}
+
 void handle_dns_fake_ip(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len, const std::string& domain) {
     if (len < 12) return; 
     
     uint16_t id = *(uint16_t*)payload;
-    int qname_len = 0;
-    // We already parsed domain in handle_udp_packet, just need len to skip
-    parse_dns_qname(payload, len, &qname_len); 
-    int pos = 12 + qname_len;
-    
-    if (pos + 4 > len) return;
     
     // Get Fake IP
     uint32_t fake_ip = FakeIpMapper::instance().get_fake_ip(domain);
     
+    // Use the new helper to send response
+    // We create a temp session just for info structure or pass parameters?
+    // send_dns_response takes sess to know src/dst ip/port.
+    // We can just construct a temp one on stack or refactor helper.
+    // Let's manually invoke the logic from send_dns_response but adapted.
+    // Actually, send_dns_response is perfect, we just need a dummy session.
+    
+    UdpSession sess;
+    sess.src_ip = src_ip; sess.dst_ip = dst_ip; 
+    sess.src_port = src_port; sess.dst_port = dst_port;
+    
+    send_dns_response(&sess, id, domain, fake_ip);
+    
     printf("[FakeDNS] Query: %s -> FakeIP: %d.%d.%d.%d\n", domain.c_str(), 
         fake_ip & 0xFF, (fake_ip >> 8) & 0xFF, (fake_ip >> 16) & 0xFF, (fake_ip >> 24) & 0xFF);
-
-    // Build Response
-    std::vector<uint8_t> resp;
-    resp.reserve(512);
-    
-    // Header
-    resp.push_back(id & 0xFF); resp.push_back((id >> 8) & 0xFF);
-    resp.push_back(0x81); resp.push_back(0x80); // Flags
-    resp.push_back(0x00); resp.push_back(0x01); // QD=1
-    resp.push_back(0x00); resp.push_back(0x01); // AN=1
-    resp.push_back(0x00); resp.push_back(0x00);
-    resp.push_back(0x00); resp.push_back(0x00);
-    
-    // Question Section
-    resp.insert(resp.end(), payload + 12, payload + pos + 4);
-    
-    // Answer Section
-    resp.push_back(0xC0); resp.push_back(0x0C); // Ptr
-    resp.push_back(0x00); resp.push_back(0x01); // A
-    resp.push_back(0x00); resp.push_back(0x01); // IN
-    resp.push_back(0x00); resp.push_back(0x00); resp.push_back(0x00); resp.push_back(0x01); // TTL=1s
-    resp.push_back(0x00); resp.push_back(0x04); // Len
-    resp.push_back(fake_ip & 0xFF);
-    resp.push_back((fake_ip >> 8) & 0xFF);
-    resp.push_back((fake_ip >> 16) & 0xFF);
-    resp.push_back((fake_ip >> 24) & 0xFF);
-    
-    // Send back to Tap
-    uint8_t frame[2048];
-    if (14 + 20 + 8 + resp.size() > 2048) return;
-
-    memcpy(frame, HOST_MAC, 6);
-    memcpy(frame + 6, TapDriver::TAP_MAC, 6);
-    *(uint16_t*)(frame + 12) = htons(0x0800);
-
-    uint8_t* ip = frame + 14;
-    uint8_t* udp_hdr = ip + 20;
-    
-    memset(ip, 0, 20);
-    ip[0] = 0x45; ip[9] = 17; ip[8] = 64;
-    *(uint16_t*)(ip + 2) = htons((uint16_t)(20 + 8 + resp.size()));
-    *(uint32_t*)(ip + 12) = dst_ip; 
-    *(uint32_t*)(ip + 16) = src_ip; 
-    *(uint16_t*)(ip + 10) = ip_chksum_simple(ip, 20);
-
-    *(uint16_t*)(udp_hdr + 0) = dst_port; 
-    *(uint16_t*)(udp_hdr + 2) = src_port; 
-    *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + resp.size()));
-    *(uint16_t*)(udp_hdr + 6) = 0;
-    memcpy(udp_hdr + 8, resp.data(), resp.size());
-
-    TapDriver::instance().send_async(frame, 14 + 20 + 8 + (int)resp.size());
 }
 
 // Called by Main Thread
@@ -303,32 +397,105 @@ void udp_check_timeouts() {
 
 // Called by Main Thread
 void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
-    // 1. DROP QUIC
     if (dst_port == htons(443)) return;
 
-    // 2. DNS Handling (Split DNS)
+    // Split DNS & Suffix Stripping
     if (dst_port == htons(53)) {
         int qname_len = 0;
-        std::string domain = parse_dns_qname(payload, len, &qname_len);
+        std::string full_domain = parse_dns_qname(payload, len, &qname_len);
         
-        if (!domain.empty()) {
-            if (!is_domestic(domain)) {
+        if (!full_domain.empty()) {
+            std::string clean_domain = full_domain;
+            std::string temp = full_domain;
+            std::transform(temp.begin(), temp.end(), temp.begin(), [](unsigned char c){ return std::tolower(c); });
+            
+            // Check & Strip Suffix
+            const char* suffixes[] = { ".mshome.net", ".lan", ".local", ".localdomain" };
+            bool stripped = false;
+            for (const char* suffix : suffixes) {
+                size_t suffix_len = strlen(suffix);
+                if (temp.length() > suffix_len) {
+                    if (temp.compare(temp.length() - suffix_len, suffix_len, suffix) == 0) {
+                        clean_domain = full_domain.substr(0, full_domain.length() - suffix_len);
+                        stripped = true;
+                        break; 
+                    }
+                }
+            }
+
+            if (!is_domestic(clean_domain)) {
                 // Foreign -> FakeIP
-                handle_dns_fake_ip(src_ip, dst_ip, src_port, dst_port, payload, len, domain);
+                handle_dns_fake_ip(src_ip, dst_ip, src_port, dst_port, payload, len, clean_domain);
                 return;
             }
-            // Domestic -> Continue to Direct UDP (but hijack target to AliDNS)
-            // We want to force domestic queries to 223.5.5.5 to ensure they resolve properly and fast.
-            // NOTE: We do NOT modify 'dst_ip' here. We must keep the ORIGINAL destination (e.g. 192.168.1.1)
-            // in the session so that when we reply to the OS, we spoof the source IP correctly.
-            // The actual hijacking to 223.5.5.5 happens inside `send_udp_to_relay`.
-            printf("[Direct-DNS] Domestic: %s -> Forwarding to 223.5.5.5 (Spoofing %d.%d.%d.%d)\n", 
-                domain.c_str(),
-                dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF);
+            
+            // Domestic -> 223.5.5.5
+            // But if we stripped the suffix, we must rewrite the query packet to send to 223.5.5.5!
+            // If we send "baidu.com.mshome.net" to 223.5.5.5, it replies NXDOMAIN.
+            // We must send "baidu.com" to 223.5.5.5.
+            
+            // Prepare Modified Payload
+            std::vector<uint8_t> new_payload;
+            if (stripped) {
+                uint16_t id = *(uint16_t*)payload;
+                new_payload = build_dns_query(id, clean_domain);
+                payload = new_payload.data();
+                len = (int)new_payload.size();
+                printf("[SmartDNS] Stripped suffix: %s -> %s. Forwarding to AliDNS.\n", full_domain.c_str(), clean_domain.c_str());
+            } else {
+                printf("[Direct-DNS] Domestic: %s -> Forwarding to 223.5.5.5\n", full_domain.c_str());
+            }
+
+            // Continue to create session, but need to store context if we need to fix reply
+            uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
+            Worker* w = WorkerPool::instance().get_worker(hash);
+            if (!w) w = WorkerPool::instance().get_next_worker();
+            
+            // Deep copy payload for lambda
+            std::vector<uint8_t> data(payload, payload + len);
+            
+            w->queue_task([src_ip, dst_ip, src_port, dst_port, data = std::move(data), w, full_domain, stripped]() {
+                UdpKey key = { src_ip, dst_ip, src_port, dst_port };
+                UdpSession* sess = nullptr;
+                auto it = t_udp_sessions.find(key);
+                if (it != t_udp_sessions.end()) {
+                    sess = it->second;
+                } else {
+                    sess = new UdpSession();
+                    sess->src_ip = src_ip; sess->dst_ip = dst_ip; 
+                    sess->src_port = src_port; sess->dst_port = dst_port;
+                    sess->worker = w;
+                    // If we stripped suffix, we must remember to fix the reply!
+                    if (stripped) sess->original_domain_with_suffix = full_domain;
+                    
+                    sess->sock = socket(AF_INET, SOCK_DGRAM, 0);
+                    u_long mode = 1; ioctlsocket(sess->sock, FIONBIO, &mode);
+                    t_udp_sessions[key] = sess;
+                    
+                    sockaddr_in local; memset(&local, 0, sizeof(local));
+                    local.sin_family = AF_INET; local.sin_addr.S_un.S_addr = INADDR_ANY; local.sin_port = 0;
+                    bind(sess->sock, (sockaddr*)&local, sizeof(local));
+                    
+                    sess->worker->add_socket(sess->sock, [sess](){ handle_direct_udp_read(sess); }, nullptr, [sess](){ close_udp_session_internal(sess); });
+                }
+                
+                if (sess) {
+                    sess->last_active = GetTickCount64();
+                    sockaddr_in dest; memset(&dest, 0, sizeof(dest)); dest.sin_family = AF_INET;
+                    
+                    // Hijack to AliDNS 223.5.5.5
+                    uint8_t ali[4] = {223, 5, 5, 5};
+                    memcpy(&dest.sin_addr.S_un.S_addr, ali, 4);
+                    dest.sin_port = dst_port;
+                    
+                    sendto(sess->sock, (const char*)data.data(), (int)data.size(), 0, (sockaddr*)&dest, sizeof(dest));
+                }
+            });
+            return; // Done
         }
     }
 
-    // 3. Direct UDP for others (and Domestic DNS)
+    // 3. Direct UDP for others (Non-DNS)
     uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
     Worker* w = WorkerPool::instance().get_worker(hash);
     if (!w) w = WorkerPool::instance().get_next_worker();
@@ -344,25 +511,8 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
             sess = it->second;
         } else {
             sess = new UdpSession();
-            sess->src_ip = src_ip; 
-            sess->dst_ip = dst_ip; // This should be ORIGINAL.
-            // Wait, if we hijacked 'dst_ip' in handle_udp_packet, it's passed here as 'dst_ip'.
-            // So sess->dst_ip will be 223.5.5.5.
-            // BUT, when responding to OS, we need to reply as the ORIGINAL destination (e.g. 192.168.1.1).
-            // Logic gap: The OS expects reply from 192.168.1.1, but we will send reply from 223.5.5.5.
-            // FIX: We need to pass BOTH actual_target AND original_target to this lambda?
-            // Actually, for NAT to work transparently, we usually need to masquerade the source IP of the reply
-            // to match the destination IP of the request.
-            // In 'handle_direct_udp_read', we use sess->dst_ip as the Source IP of the reply packet.
-            // So sess->dst_ip MUST be the IP the client *thinks* it sent to.
-            
-            // Correction: We need to store the ORIGINAL destination in UdpSession to spoof the reply correctly,
-            // but use the HIJACKED destination for the actual `sendto`.
-            
-            sess->src_ip = src_ip; 
-            sess->dst_ip = dst_ip; // This should be ORIGINAL.
-            sess->src_port = src_port; 
-            sess->dst_port = dst_port;
+            sess->src_ip = src_ip; sess->dst_ip = dst_ip; 
+            sess->src_port = src_port; sess->dst_port = dst_port;
             sess->worker = w;
             
             sess->sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -390,23 +540,8 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
             sess->last_active = GetTickCount64();
             sockaddr_in dest;
             dest.sin_family = AF_INET;
-            
-            // Check if this is a Domestic DNS case that needs hijacking *for the sendto only*
-            // We don't have the domain here easily.
-            // Strategy: Use the port. If port 53, send to 223.5.5.5.
-            // Note: This applies to ALL Port 53 traffic that reaches here. 
-            // Since Foreign DNS is filtered out by `handle_udp_packet` (returns early),
-            // any Port 53 reaching here IS Domestic DNS.
-            if (dst_port == htons(53)) {
-                 unsigned int a, b, c, d;
-                 // 223.5.5.5
-                 uint8_t ali[4] = {223, 5, 5, 5};
-                 memcpy(&dest.sin_addr.S_un.S_addr, ali, 4);
-            } else {
-                 dest.sin_addr.S_un.S_addr = dst_ip;
-            }
+            dest.sin_addr.S_un.S_addr = dst_ip;
             dest.sin_port = dst_port;
-            
             sendto(sess->sock, (const char*)data.data(), (int)data.size(), 0, (sockaddr*)&dest, sizeof(dest));
         }
     });
