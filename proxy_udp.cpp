@@ -39,7 +39,6 @@ thread_local std::map<UdpKey, UdpSession*> t_udp_sessions;
 
 // Helper to log DNS answers for debugging
 void log_dns_packet(const uint8_t* payload, int len) {
-    // Unconditional logging for debugging
     if (len < 12) {
         printf("[DNS] Received short packet len=%d\n", len);
         return;
@@ -107,13 +106,7 @@ void close_udp_session_internal(UdpSession* sess) {
     t_udp_sessions.erase(key);
 
     if (sess->worker) {
-        // Need to remove potentially two sockets
         auto worker = sess->worker;
-        
-        // Helper to delete session only after both sockets are removed
-        // We use a simple counter mechanism or just sequential removal.
-        // Since callbacks are sequential in worker, we can nest them.
-        
         SOCKET s1 = sess->tcp_sock;
         SOCKET s2 = sess->udp_sock;
         
@@ -161,9 +154,11 @@ void send_udp_to_relay(UdpSession* sess, const std::vector<uint8_t>& payload) {
     
     // Destination IP (Original Target) - Network Order
     uint32_t target_ip = sess->dst_ip;
+    bool hijacked = false;
     // DNS Hijack: Redirect all DNS to 8.8.8.8 (Google DNS)
     if (sess->dst_port == htons(53)) {
         target_ip = 0x08080808; 
+        hijacked = true;
     }
 
     packet.push_back(target_ip & 0xFF);
@@ -181,14 +176,9 @@ void send_udp_to_relay(UdpSession* sess, const std::vector<uint8_t>& payload) {
     if (sent == SOCKET_ERROR) {
         printf("[UDP] sendto Relay failed! Err: %d\n", WSAGetLastError());
     } else {
-        // Debug: Log sending (reduce frequency if needed, but useful now)
-        // printf("[UDP] Sent %d bytes to Relay %d.%d.%d.%d:%d\n", 
-        //    sent,
-        //    sess->relay_addr.sin_addr.S_un.S_un_b.s_b1,
-        //    sess->relay_addr.sin_addr.S_un.S_un_b.s_b2,
-        //    sess->relay_addr.sin_addr.S_un.S_un_b.s_b3,
-        //    sess->relay_addr.sin_addr.S_un.S_un_b.s_b4,
-        //    ntohs(sess->relay_addr.sin_port));
+        if (hijacked) {
+             printf("[UDP-Tx] Sent %d bytes to Relay. Hijacked to 8.8.8.8.\n", sent);
+        }
     }
 }
 
@@ -279,9 +269,6 @@ void handle_socks5_tcp_read(UdpSession* sess) {
     int r = recv(sess->tcp_sock, buf, sizeof(buf), 0);
     
     if (r > 0) {
-        // Debug: Log handshake progress
-        // printf("[SOCKS5-UDP] State: %d, Recv: %d bytes\n", sess->state, r);
-        
         if (sess->state == UdpSession::HANDSHAKE_AUTH) {
             // Expect 05 00
             if (r >= 2 && buf[0] == 0x05 && buf[1] == 0x00) {
@@ -299,7 +286,7 @@ void handle_socks5_tcp_read(UdpSession* sess) {
             }
         } else if (sess->state == UdpSession::HANDSHAKE_ASSOC) {
             // Expect 05 00 00 ATYP BND.ADDR BND.PORT
-            // Note: r >= 10 checks minimum size for IPv4 address response
+            // Header (4) + Addr + Port (2)
             if (r >= 10 && buf[0] == 0x05 && buf[1] == 0x00) {
                 // Parse Relay Address
                 int addr_len = 0;
@@ -311,8 +298,6 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                     return; 
                 } 
                 
-                // Basic length safety check
-                // Header (4) + Addr + Port (2)
                 if (r < 4 + addr_len + 2) { 
                     printf("[SOCKS5-UDP] Packet too short for address type. Len: %d, Expected: %d\n", r, 4 + addr_len + 2);
                     close_udp_session_internal(sess); 
@@ -336,7 +321,6 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                         sess->relay_addr.sin_addr.S_un.S_addr = relay_ip;
                     }
                 } else {
-                    // IPv6 unsupported fallback logic or just error log
                     printf("[SOCKS5-UDP] IPv6 Relay Address received (unsupported path), trying IPv4 fallback interpretation...\n");
                 }
                 
@@ -349,7 +333,7 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                     sess->relay_addr.sin_addr.S_un.S_un_b.s_b3,
                     sess->relay_addr.sin_addr.S_un.S_un_b.s_b4,
                     ntohs(sess->relay_addr.sin_port));
-                fflush(stdout); // Force print
+                fflush(stdout);
                 
                 // Create UDP Socket
                 sess->udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -395,10 +379,7 @@ void handle_socks5_tcp_read(UdpSession* sess) {
             }
         }
     } else {
-        // TCP Closed or Error
-        if (r == 0) {
-             // printf("[SOCKS5-UDP] TCP Control Channel Closed Gracefully.\n");
-        } else {
+        if (r != 0) {
              printf("[SOCKS5-UDP] TCP Control Read Error: %d\n", WSAGetLastError());
         }
         close_udp_session_internal(sess);
