@@ -59,11 +59,36 @@ uint16_t GeoChecker::get_or_create_geosite_code(const std::string& code) {
     geosite_code_cache_[upper_code] = idx;
 
     // 预计算关键 Tag
-    if (upper_code.find("CN") != std::string::npos) cn_site_idxs_.insert(idx);
+    bool is_cn = false;
+    if (upper_code.find("CN") != std::string::npos) is_cn = true;
+    else if (upper_code.find("TENCENT") != std::string::npos) is_cn = true;
+    else if (upper_code.find("QQ") != std::string::npos) is_cn = true;
+    else if (upper_code.find("WECHAT") != std::string::npos) is_cn = true;
+    else if (upper_code.find("ALIBABA") != std::string::npos) is_cn = true;
+    else if (upper_code.find("TAOBAO") != std::string::npos) is_cn = true;
+    else if (upper_code.find("NETEASE") != std::string::npos) is_cn = true;
+    else if (upper_code.find("BAIDU") != std::string::npos) is_cn = true;
+    else if (upper_code.find("BILIBILI") != std::string::npos) is_cn = true;
+    else if (upper_code.find("HUAWEI") != std::string::npos) is_cn = true;
+    else if (upper_code.find("XIAOMI") != std::string::npos) is_cn = true;
+    else if (upper_code.find("JD") != std::string::npos) is_cn = true;
+    else if (upper_code.find("360") != std::string::npos) is_cn = true;
+    else if (upper_code.find("OPPO") != std::string::npos) is_cn = true;
+    else if (upper_code.find("VIVO") != std::string::npos) is_cn = true;
+    else if (upper_code.find("ONEPLUS") != std::string::npos) is_cn = true;
+    else if (upper_code.find("IQOO") != std::string::npos) is_cn = true;
+    else if (upper_code.find("DOUYIN") != std::string::npos) is_cn = true;
+    else if (upper_code.find("BYTE") != std::string::npos && upper_code.find("DANCE") != std::string::npos) is_cn = true;
+
+    if (is_cn) cn_site_idxs_.insert(idx);
+
     if (upper_code.find("GOOGLE") != std::string::npos) google_site_idxs_.insert(idx);
-    if (upper_code.find("TENCENT") != std::string::npos) tencent_site_idxs_.insert(idx);
-    if (upper_code.find("QQ") != std::string::npos) tencent_site_idxs_.insert(idx);
-    if (upper_code.find("WECHAT") != std::string::npos) tencent_site_idxs_.insert(idx);
+    
+    bool is_tencent = false;
+    if (upper_code.find("TENCENT") != std::string::npos) is_tencent = true;
+    else if (upper_code.find("QQ") != std::string::npos) is_tencent = true;
+    else if (upper_code.find("WECHAT") != std::string::npos) is_tencent = true;
+    if (is_tencent) tencent_site_idxs_.insert(idx);
 
     return idx;
 }
@@ -174,8 +199,7 @@ std::string GeoChecker::query_ip(const std::string& ip_bytes) {
         auto candidate = std::prev(it);
         if (ip_num >= candidate->start_ip && ip_num <= candidate->end_ip) {
             return geoip_codes_[candidate->code_index];
-        }
-    }
+        }\n    }
     return "UNKNOWN";
 }
 
@@ -251,7 +275,7 @@ bool is_in_set(const std::string& domain,
     // 1. Exact
     auto it_exact = exact.find(d);
     if (it_exact != exact.end()) {
-        if (target_idxs.count(it_exact->second)) return true;
+        return target_idxs.count(it_exact->second) > 0;
     }
 
     // 2. Suffix
@@ -260,7 +284,7 @@ bool is_in_set(const std::string& domain,
         std::string s = d.substr(pos);
         auto it = suffix.find(s);
         if (it != suffix.end()) {
-            if (target_idxs.count(it->second)) return true;
+             return target_idxs.count(it->second) > 0;
         }
         size_t next_dot = d.find('.', pos);
         if (next_dot == std::string::npos) break;
