@@ -331,7 +331,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
         sprintf_s(ip_buf, "%d.%d.%d.%d", 
             ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
         // Direct CONNECT to IP
-        LOG_INFO("[TCP] No SNI. CONNECT %s:%d (%d.%d.%d.%d:%d)\n", ip_buf, port,
+        LOG_INFO("[TCP] No SNI detected. Proxying to IP: %s:%d (%d.%d.%d.%d:%d)\n", ip_buf, port,
              ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
         sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", ip_buf, port, ip_buf, port);
     }
@@ -475,7 +475,8 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
                         LOG_INFO("[TCP] Domain Detected: %s. Direct.\n", sni.c_str());
                     } else {
                         ctx->is_direct = false;
-                        LOG_INFO("[TCP] Domain Detected: %s. Proxy.\n", sni.c_str());
+                        std::string tag = GeoChecker::instance().query_domain(sni);
+                        LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Proxy.\n", sni.c_str(), tag.c_str());
                     }
                 } else {
                     // 如果没提取到域名，保留在 tcp_proxy_accept 中根据 IP 做的初始判定

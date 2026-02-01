@@ -65,6 +65,7 @@ uint16_t GeoChecker::get_or_create_geosite_code(const std::string& code) {
     else if (upper_code.find("QQ") != std::string::npos) is_cn = true;
     else if (upper_code.find("WECHAT") != std::string::npos) is_cn = true;
     else if (upper_code.find("ALIBABA") != std::string::npos) is_cn = true;
+    else if (upper_code.find("ALIYUN") != std::string::npos) is_cn = true;
     else if (upper_code.find("TAOBAO") != std::string::npos) is_cn = true;
     else if (upper_code.find("NETEASE") != std::string::npos) is_cn = true;
     else if (upper_code.find("BAIDU") != std::string::npos) is_cn = true;
@@ -72,6 +73,14 @@ uint16_t GeoChecker::get_or_create_geosite_code(const std::string& code) {
     else if (upper_code.find("JD") != std::string::npos) is_cn = true;
     else if (upper_code.find("DOUYIN") != std::string::npos) is_cn = true;
     else if (upper_code.find("BYTE") != std::string::npos && upper_code.find("DANCE") != std::string::npos) is_cn = true;
+    else if (upper_code.find("XIAOMI") != std::string::npos) is_cn = true;
+    else if (upper_code.find("HUAWEI") != std::string::npos) is_cn = true;
+    else if (upper_code.find("OPPO") != std::string::npos) is_cn = true;
+    else if (upper_code.find("VIVO") != std::string::npos) is_cn = true;
+    else if (upper_code.find("ONEPLUS") != std::string::npos) is_cn = true;
+    else if (upper_code.find("ALLAWN") != std::string::npos) is_cn = true;
+    else if (upper_code.find("360") != std::string::npos) is_cn = true;
+    else if (upper_code.find("IQOO") != std::string::npos) is_cn = true;
 
     if (is_cn) cn_site_idxs_.insert(idx);
 
@@ -157,9 +166,14 @@ void GeoChecker::load_geosite(const std::string& filepath) {
                         auto it = domain_exact_.find(val);
                         if (it != domain_exact_.end()) {
                             // 冲突：保护 Google Tag 不被覆盖
+                            // 冲突解决：保护高优先级 Tag (Google, CN)
                             bool old_is_google = google_site_idxs_.count(it->second);
                             bool new_is_google = google_site_idxs_.count(idx);
-                            if (old_is_google && !new_is_google) break; 
+                            bool old_is_cn = cn_site_idxs_.count(it->second);
+                            bool new_is_cn = cn_site_idxs_.count(idx);
+
+                            if (old_is_google && !new_is_google) break;
+                            if (old_is_cn && !new_is_cn && !new_is_google) break; 
                         }
                         domain_exact_[val] = idx;
                     }
@@ -169,9 +183,14 @@ void GeoChecker::load_geosite(const std::string& filepath) {
                         auto it = domain_suffix_.find(val);
                         if (it != domain_suffix_.end()) {
                             // 冲突：保护 Google Tag 不被覆盖
+                            // 冲突解决：保护高优先级 Tag (Google, CN)
                             bool old_is_google = google_site_idxs_.count(it->second);
                             bool new_is_google = google_site_idxs_.count(idx);
-                            if (old_is_google && !new_is_google) break; 
+                            bool old_is_cn = cn_site_idxs_.count(it->second);
+                            bool new_is_cn = cn_site_idxs_.count(idx);
+
+                            if (old_is_google && !new_is_google) break;
+                            if (old_is_cn && !new_is_cn && !new_is_google) break; 
                         }
                         domain_suffix_[val] = idx;
                     }
@@ -191,9 +210,14 @@ void GeoChecker::load_geosite(const std::string& filepath) {
                     {
                         auto it = domain_suffix_.find(val);
                         if (it != domain_suffix_.end()) {
+                            // 冲突解决：保护高优先级 Tag (Google, CN)
                             bool old_is_google = google_site_idxs_.count(it->second);
                             bool new_is_google = google_site_idxs_.count(idx);
-                            if (old_is_google && !new_is_google) break; 
+                            bool old_is_cn = cn_site_idxs_.count(it->second);
+                            bool new_is_cn = cn_site_idxs_.count(idx);
+
+                            if (old_is_google && !new_is_google) break;
+                            if (old_is_cn && !new_is_cn && !new_is_google) break; 
                         }
                         domain_suffix_[val] = idx;
                     }
