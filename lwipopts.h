@@ -21,6 +21,7 @@
 #define TCP_MSS                         1460  // Adjusted for Ethernet MTU
 #define TCP_WND                         (512 * 1024)   // 512KB window for high throughput
 #define TCP_SND_BUF                     (512 * 1024) // 512KB for HD streaming
+#define TCP_SNDLOWAT                    (32 * 1024)  // Fixed: Prevent u16_t overflow with large SND_BUF
 #define LWIP_WND_SCALE                  1
 #define TCP_RCV_SCALE                   4     // Scale 4 (x16) -> 1MB Max Window
 
