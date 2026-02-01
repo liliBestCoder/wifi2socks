@@ -550,6 +550,16 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         }
     }
 
+    // 3. Drop Noisy Protocols (mDNS, NetBIOS, SSDP)
+    // 这些是局域网发现协议，不需要代理也不需要转发
+    uint16_t dport_h = ntohs(dst_port);
+    if (dport_h == 5353 ||  // mDNS
+        dport_h == 137 ||   // NetBIOS Name Service
+        dport_h == 138 ||   // NetBIOS Datagram Service
+        dport_h == 1900) {  // SSDP (UPnP)
+        return;
+    }
+
 direct_udp:
     // Direct UDP Logic
     LOG_DEBUG("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
