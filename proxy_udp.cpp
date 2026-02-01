@@ -272,6 +272,56 @@ void send_dns_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     TapDriver::instance().send_async(frame, 14 + 20 + 8 + (int)resp.size());
 }
 
+// Helper to build an empty DNS Response (e.g. for AAAA blocking)
+void send_dns_empty_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, uint16_t id, const uint8_t* query_payload, int query_len) {
+    // Basic strict check
+    if (query_len > 1024) return;
+
+    std::vector<uint8_t> resp;
+    resp.reserve(query_len + 16);
+    
+    // Header
+    resp.push_back(id & 0xFF); resp.push_back((id >> 8) & 0xFF);
+    resp.push_back(0x81); resp.push_back(0x80); // Std Response, No Error
+    resp.push_back(0x00); resp.push_back(0x01); // QD=1
+    resp.push_back(0x00); resp.push_back(0x00); // AN=0 (No Answers)
+    resp.push_back(0x00); resp.push_back(0x00);
+    resp.push_back(0x00); resp.push_back(0x00);
+    
+    // Copy Question Section from request (skip header 12 bytes)
+    if (query_len > 12) {
+        const uint8_t* q_ptr = query_payload + 12;
+        int q_len = query_len - 12;
+        for(int i=0; i<q_len; i++) resp.push_back(q_ptr[i]);
+    }
+
+    // Send
+    uint8_t frame[2048];
+    if (14 + 20 + 8 + resp.size() > 2048) return;
+
+    memcpy(frame, HOST_MAC, 6);
+    memcpy(frame + 6, TapDriver::TAP_MAC, 6);
+    *(uint16_t*)(frame + 12) = htons(0x0800);
+
+    uint8_t* ip_hdr = frame + 14;
+    uint8_t* udp_hdr = ip_hdr + 20;
+    
+    memset(ip_hdr, 0, 20);
+    ip_hdr[0] = 0x45; ip_hdr[9] = 17; ip_hdr[8] = 64;
+    *(uint16_t*)(ip_hdr + 2) = htons((uint16_t)(20 + 8 + resp.size()));
+    *(uint32_t*)(ip_hdr + 12) = dst_ip; 
+    *(uint32_t*)(ip_hdr + 16) = src_ip; 
+    *(uint16_t*)(ip_hdr + 10) = ip_chksum_simple(ip_hdr, 20);
+
+    *(uint16_t*)(udp_hdr + 0) = dst_port; 
+    *(uint16_t*)(udp_hdr + 2) = src_port; 
+    *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + resp.size()));
+    *(uint16_t*)(udp_hdr + 6) = 0;
+    memcpy(udp_hdr + 8, resp.data(), resp.size());
+
+    TapDriver::instance().send_async(frame, 14 + 20 + 8 + (int)resp.size());
+}
+
 void send_dns_over_tcp(UdpSession* sess, const std::vector<uint8_t>& payload) {
     if (sess->state != UdpSession::ESTABLISHED) return;
 
@@ -592,6 +642,18 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         std::string full_domain = parse_dns_qname(payload, len, &qname_len);
         
         if (!full_domain.empty()) {
+            // Check Query Type (A=1, AAAA=28)
+            // Header(12) + QName(qname_len) + QType(2) + QClass(2)
+            if (12 + qname_len + 2 <= len) {
+                uint16_t qtype = ntohs(*(uint16_t*)(payload + 12 + qname_len));
+                if (qtype == 28) { // AAAA (IPv6)
+                    uint16_t id = *(uint16_t*)payload;
+                    // LOG_INFO(\"[DNS] Blocked IPv6 (AAAA) for: %s\\n\", full_domain.c_str());
+                    send_dns_empty_response(src_ip, dst_ip, src_port, dst_port, id, payload, len);
+                    return; 
+                }
+            }
+
             std::string clean_domain = full_domain;
             // ... (省略后缀处理逻辑，保持原样)
             std::string temp = full_domain;
