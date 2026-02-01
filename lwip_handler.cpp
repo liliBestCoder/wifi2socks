@@ -217,6 +217,51 @@ void process_tap_frame(uint8_t* buf, int len) {
             }
         }
 
+        // --- FAKE ICMP REPLY FOR EXTERNAL PINGS ---
+        if (IPH_PROTO(ip) == IP_PROTO_ICMP) {
+            // If the ping is NOT for our Gateway (e.g. phone pings 8.8.8.8),
+            // LwIP will drop it because it doesn't know how to route to 8.8.8.8.
+            // We must fake a reply to satisfy the OS connectivity check.
+            if (ip->dest.addr != ::inet_addr(TAP_GW)) {
+                uint8_t* icmp_base = buf + 14 + IPH_HL(ip) * 4;
+                // Check if it is Echo Request (Type 8)
+                if (icmp_base[0] == 8) {
+                    // 1. Swap MAC addresses
+                    uint8_t tmp_mac[6];
+                    memcpy(tmp_mac, buf, 6);      // Save Dst (Gateway MAC)
+                    memcpy(buf, buf + 6, 6);      // Move Src (Phone MAC) to Dst
+                    memcpy(buf + 6, tmp_mac, 6);  // Move Gateway MAC to Src
+
+                    // 2. Swap IP addresses
+                    uint32_t tmp_ip = ip->src.addr;
+                    ip->src.addr = ip->dest.addr; // Src becomes 8.8.8.8 (Fake)
+                    ip->dest.addr = tmp_ip;       // Dst becomes Phone IP
+
+                    // 3. Change ICMP Type to Echo Reply (0)
+                    icmp_base[0] = 0; 
+                    
+                    // 4. Update Checksums
+                    // Update IP Checksum
+                    IPH_CHKSUM_SET(ip, 0);
+                    IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+
+                    // Update ICMP Checksum
+                    // ICMP checksum covers the ICMP header and data.
+                    // Since we only changed Type (8->0) and Code (0->0), we could do incremental update,
+                    // but full recalc is safer and simple enough here.
+                    int ip_len = ::ntohs(IPH_LEN(ip));
+                    int icmp_len = ip_len - IPH_HL(ip) * 4;
+                    *(uint16_t*)(icmp_base + 2) = 0; // Clear old checksum
+                    *(uint16_t*)(icmp_base + 2) = ip_chksum_simple(icmp_base, icmp_len);
+
+                    // 5. Send back
+                    TapDriver::instance().send_async(buf, len);
+                    return; // Don't let LwIP see this, it would just drop it.
+                }
+            }
+            // If dest IS Gateway, fall through to g_netif.input so LwIP answers naturally.
+        }
+
         struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         if (p) {
             pbuf_take(p, buf, len);
