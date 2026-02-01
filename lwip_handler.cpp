@@ -188,30 +188,12 @@ void process_tap_frame(uint8_t* buf, int len) {
             uint8_t* payload = udp_ptr + 8;
             int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
 
-            // QUIC BLOCKING (Optimization):
-            // Silent Drop for UDP 443.
-            // Sending ICMP Port Unreachable causes aggressive clients (Chrome/YouTube)
-            // to retry in a tight loop, causing CPU spikes.
-            // Silent drop forces a timeout fallback to TCP, which is CPU friendly.
-            if (dst_port == ::htons(443)) {
-                return;
-            }
-
-            // FILTER: Silent Drop for LAN Broadcast/Discovery Noise
-            // Windows sends a lot of junk on TAP interface:
-            // 137, 138: NetBIOS / Browser
-            // 1900: SSDP (UPnP)
-            // 5355: LLMNR
-            if (dst_port == ::htons(137) || dst_port == ::htons(138) || 
-                dst_port == ::htons(1900) || dst_port == ::htons(5355)) {
-                return;
-            }
-
+            // All UDP processing logic (including drops/filtering) is now 
+            // delegated to handle_udp_packet in proxy_udp.cpp
             if (pay_len >= 0) {
                 handle_udp_packet(ip->src.addr, ip->dest.addr, src_port, dst_port, payload, pay_len);
             }
             return; // Done with UDP
-
         }
 
         if (IPH_PROTO(ip) == IP_PROTO_TCP) {
