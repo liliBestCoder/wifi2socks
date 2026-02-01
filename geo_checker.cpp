@@ -199,7 +199,8 @@ std::string GeoChecker::query_ip(const std::string& ip_bytes) {
         auto candidate = std::prev(it);
         if (ip_num >= candidate->start_ip && ip_num <= candidate->end_ip) {
             return geoip_codes_[candidate->code_index];
-        }\n    }
+        }
+    }
     return "UNKNOWN";
 }
 
