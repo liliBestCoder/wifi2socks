@@ -60,7 +60,7 @@
     <ClCompile Include="wifi2socks.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="common.pb.cc">
+    <ClCompile Include="routercommon.pb.cc">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="worker.cpp">

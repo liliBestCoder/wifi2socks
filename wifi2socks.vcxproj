@@ -128,7 +128,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="wifi2socks.cpp" />
-    <ClCompile Include="common.pb.cc" />
+    <ClCompile Include="routercommon.pb.cc" />
     <ClCompile Include="worker.cpp" />
     <ClCompile Include="nat_table.cpp" />
     <ClCompile Include="tls_parser.cpp" />
