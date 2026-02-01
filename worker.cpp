@@ -34,6 +34,7 @@ void Worker::start() {
     if (m_running) return;
     m_running = true;
     m_thread = std::thread(&Worker::loop, this);
+    SetThreadPriority(m_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
 }
 
 void Worker::stop() {

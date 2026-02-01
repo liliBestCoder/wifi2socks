@@ -15,6 +15,8 @@
 #define MEM_LIBC_MALLOC                 1
 #define MEMP_MEM_MALLOC                 1
 #define MEM_ALIGNMENT                   4
+#define PBUF_POOL_SIZE                  512  // Increased for streaming
+#define PBUF_POOL_BUFSIZE               2048 // Large enough for MTU + Headers
 
 // --- 4. TCP/IP ---
 #define LWIP_TCP                        1
