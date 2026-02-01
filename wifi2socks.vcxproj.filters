@@ -60,7 +60,10 @@
     <ClCompile Include="wifi2socks.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="routercommon.pb.cc">
+    <ClCompile Include="common.pb.cc">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="geo_checker.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="worker.cpp">
@@ -87,6 +90,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="common.pb.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="geo_checker.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="worker.h">

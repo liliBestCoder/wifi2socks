@@ -128,9 +128,10 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="wifi2socks.cpp" />
-    <ClCompile Include="routercommon.pb.cc" />
+    <ClCompile Include="common.pb.cc" />
     <ClCompile Include="worker.cpp" />
     <ClCompile Include="nat_table.cpp" />
+    <ClCompile Include="geo_checker.cpp" />
     <ClCompile Include="tls_parser.cpp" />
     <ClCompile Include="tap_driver.cpp" />
     <ClCompile Include="proxy_tcp.cpp" />
@@ -166,6 +167,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="common.pb.h" />
+    <ClInclude Include="geo_checker.h" />
     <ClInclude Include="lwipopts.h" />
     <ClInclude Include="packet.h" />
     <ClInclude Include="utils.h" />
