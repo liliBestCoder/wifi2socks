@@ -52,6 +52,73 @@ struct UdpSession {
     }
 };
 
+std::string parse_dns_qname(const uint8_t* payload, int len, int* qname_len);
+
+void parse_and_log_dns_response(const uint8_t* payload, int len, const char* mode) {
+    if (len < 12) return;
+    
+    uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
+    uint16_t an_count = ntohs(*(uint16_t*)(payload + 6));
+    
+    if ((flags & 0x8000) && an_count > 0) { 
+        uint16_t qd_count = ntohs(*(uint16_t*)(payload + 4));
+        int pos = 12;
+        
+        std::string domain;
+        if (qd_count > 0) {
+            int qname_len = 0;
+            domain = parse_dns_qname(payload, len, &qname_len);
+            for(int i=0; i<qd_count; i++) {
+                if (i > 0) { 
+                     while(pos < len) {
+                        uint8_t n = payload[pos];
+                        if(n==0) { pos++; break; }
+                        if((n&0xC0)==0xC0) { pos+=2; break; }
+                        pos += n+1;
+                    }
+                } else {
+                    if (!domain.empty() && qname_len > 0) pos += qname_len;
+                    else {
+                         while(pos < len) {
+                            uint8_t n = payload[pos];
+                            if(n==0) { pos++; break; }
+                            if((n&0xC0)==0xC0) { pos+=2; break; }
+                            pos += n+1;
+                        }
+                    }
+                }
+                pos += 4; 
+            }
+        }
+
+        for(int i=0; i<an_count; i++) {
+            if(pos >= len) break;
+            while(pos < len) {
+                uint8_t n = payload[pos];
+                if(n==0) { pos++; break; }
+                if((n&0xC0)==0xC0) { pos+=2; break; }
+                pos += n+1;
+            }
+            if(pos+10 > len) break;
+            
+            uint16_t type = ntohs(*(uint16_t*)(payload+pos));
+            uint32_t ttl = ntohl(*(uint32_t*)(payload+pos+4));
+            uint16_t rdlen = ntohs(*(uint16_t*)(payload+pos+8));
+            pos += 10;
+            
+            if (type == 1 && rdlen == 4 && pos + 4 <= len) { 
+                uint32_t ip = *(uint32_t*)(payload + pos);
+                LOG_INFO("[DNS] Resolved: %s -> %d.%d.%d.%d (TTL: %d) via %s\n", 
+                    domain.empty() ? "(unknown)" : domain.c_str(),
+                    ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF, ttl, mode);
+                if (!domain.empty()) DnsCache::instance().put(domain, ip, ttl);
+                return; 
+            }
+            pos += rdlen;
+        }
+    }
+}
+
 thread_local std::map<UdpKey, UdpSession*> t_udp_sessions;
 
 void close_udp_session_internal(UdpSession* sess) {
@@ -119,6 +186,11 @@ void handle_udp_direct_read(UdpSession* sess) {
         *(uint16_t*)(udp_hdr + 6) = 0; 
         
         memcpy(udp_hdr + 8, buf, r);
+
+        // Try Log DNS Response for Direct UDP
+        if (sess->original_dst_port == htons(53)) {
+            parse_and_log_dns_response((const uint8_t*)buf, r, "Direct (UDP)");
+        }
 
         sess->last_active = GetTickCount64();
         TapDriver::instance().send_async(frame, 14 + 20 + 8 + r);
@@ -273,13 +345,24 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                     
                     // Parse Response to get IP and TTL
                     uint16_t id = *(uint16_t*)payload;
+                    
+                    // Parse and Log (updates cache internally)
+                    parse_and_log_dns_response(payload, pkt_len, "Proxy (TCP)");
+
+                    // Re-parse just to get IP for send_dns_response construction?
+                    // Actually we need the IP to construct the UDP response. 
+                    // But wait, parse_and_log_dns_response does NOT return the IP.
+                    // We need to keep the original logic for constructing the response, 
+                    // OR modify the helper to return the IP.
+                    // For minimal risk, I will KEEP the original parsing logic for response construction,
+                    // but REMOVE the logging and cache update from it, since helper does it.
+                    
                     uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
                     uint16_t an_count = ntohs(*(uint16_t*)(payload + 6));
                     
                     if ((flags & 0x8000) && an_count > 0) {
                         uint16_t qd_count = ntohs(*(uint16_t*)(payload + 4));
                         int pos = 12;
-                        // Skip Queries
                         for(int i=0; i<qd_count; i++) {
                             while(pos < pkt_len) {
                                 uint8_t n = payload[pos];
@@ -290,7 +373,6 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                             pos += 4;
                         }
                         
-                        // Parse Answers
                         for(int i=0; i<an_count; i++) {
                             if(pos >= pkt_len) break;
                             while(pos < pkt_len) {
@@ -301,30 +383,15 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                             }
                             if(pos+10 > pkt_len) break;
                             uint16_t type = ntohs(*(uint16_t*)(payload+pos));
-                            // uint16_t class = ntohs(*(uint16_t*)(payload+pos+2));
-                            uint32_t ttl = ntohl(*(uint32_t*)(payload+pos+4));
                             uint16_t rdlen = ntohs(*(uint16_t*)(payload+pos+8));
                             pos += 10;
                             
                             if (type == 1 && rdlen == 4 && pos + 4 <= pkt_len) {
                                 uint32_t ip = *(uint32_t*)(payload + pos);
                                 
-                                // UPDATE CACHE (Store REAL IP)
-                                // Use the clean domain name for cache key
-                                if (!sess->clean_domain.empty()) {
-                                    DnsCache::instance().put(sess->clean_domain, ip, ttl);
-                                    LOG_INFO("[DNS] Resolved: %s -> %d.%d.%d.%d (TTL: %d)\n", 
-                                        sess->clean_domain.c_str(),
-                                        ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF, ttl);
-                                }
-                                
-                                // REWRITE Response if needed (for suffix) or just forward
-                                // Actually, we should always reconstruct response to handle suffix
+                                // REWRITE Response
                                 std::string target_domain = sess->original_domain_with_suffix.empty() ? sess->clean_domain : sess->original_domain_with_suffix;
-                                
                                 send_dns_response(sess->src_ip, sess->original_dst_ip, sess->src_port, sess->original_dst_port, id, target_domain, ip);
-                                
-                                // Done with this packet
                                 goto next_packet;
                             }
                             pos += rdlen;
@@ -543,7 +610,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
             
             if (domestic) {
                 // 国内域名：不走 DNS-over-TCP，直接直连阿里 DNS
-                LOG_INFO("[DNS] Domestic Domain: %s. Using Direct UDP to 223.5.5.5\n", clean_domain.c_str());
+                // LOG_INFO("[DNS] Domestic Domain: %s. Using Direct UDP to 223.5.5.5\n", clean_domain.c_str());
                 uint32_t ali_dns;
                 uint8_t ali_ip[4] = {223, 5, 5, 5};
                 memcpy(&ali_dns, ali_ip, 4);
@@ -557,7 +624,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                 uint8_t google_ip[4] = {8, 8, 8, 8};
                 memcpy(&google_dns, google_ip, 4);
 
-                LOG_INFO("[DNS] International Domain: %s. Using DNS-over-TCP via Proxy\n", clean_domain.c_str());
+                // LOG_INFO("[DNS] International Domain: %s. Using DNS-over-TCP via Proxy\n", clean_domain.c_str());
 
                 std::vector<uint8_t> query_packet;
                 const uint8_t* p_data = payload;

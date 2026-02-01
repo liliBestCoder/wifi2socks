@@ -205,7 +205,7 @@ void handle_handshake_read(TcpCtx* ctx) {
         if (header_end != std::string::npos) {
             std::string header = s.substr(0, header_end);
             if (header.find("200") != std::string::npos) {
-                LOG_INFO("[TCP] Tunnel Established: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
+                LOG_INFO("[TCP] Proxy Tunnel Established: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
                     ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
                     ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
                 
@@ -472,10 +472,10 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
                     if (GeoChecker::instance().is_cn_domain(sni) || 
                         GeoChecker::instance().is_tencent_domain(sni)) {
                         ctx->is_direct = true;
-                        LOG_INFO("[TCP] Domestic Domain Detected: %s. Switching to Direct Connect.\n", sni.c_str());
+                        LOG_INFO("[TCP] Domain Detected: %s. Direct.\n", sni.c_str());
                     } else {
                         ctx->is_direct = false;
-                        LOG_INFO("[TCP] International Domain Detected: %s. Switching to Proxy.\n", sni.c_str());
+                        LOG_INFO("[TCP] Domain Detected: %s. Proxy.\n", sni.c_str());
                     }
                 } else {
                     // 如果没提取到域名，保留在 tcp_proxy_accept 中根据 IP 做的初始判定
@@ -504,7 +504,7 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     std::string ip_bytes((char*)&target.original_dst_ip, 4);
     if (GeoChecker::instance().is_cn_ip(ip_bytes)) {
         ctx->is_direct = true;
-        LOG_INFO("[TCP] Bypass IP Detected: %d.%d.%d.%d. Switching to Direct Connect.\n",
+        LOG_INFO("[TCP] IP Detected: %d.%d.%d.%d. Direct.\n",
             target.original_dst_ip & 0xFF, (target.original_dst_ip >> 8) & 0xFF, 
             (target.original_dst_ip >> 16) & 0xFF, (target.original_dst_ip >> 24) & 0xFF);
     }
