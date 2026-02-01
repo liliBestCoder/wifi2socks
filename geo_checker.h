@@ -16,7 +16,7 @@
 #endif
 
 // 注意：需要包含由 protoc 生成的头文件
-#include "routercommon.pb.h"
+#include "common.pb.h"
 
 struct IPRange {
     uint32_t start_ip;
