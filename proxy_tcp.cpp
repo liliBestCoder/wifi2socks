@@ -375,6 +375,7 @@ void connect_to_proxy_async(TcpCtx* ctx) {
             char sin_zero[8];
         } addr;
         memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
         
         unsigned int a, b, c, d;
         if (ctx->is_direct) {
@@ -384,7 +385,6 @@ void connect_to_proxy_async(TcpCtx* ctx) {
             if (sscanf_s(PROXY_IP, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
                 addr.sin_addr.S_addr = (a) | (b << 8) | (c << 16) | (d << 24);
             } else { addr.sin_addr.S_addr = 0x0100007F; }
-            addr.sin_family = AF_INET;
             addr.sin_port = htons(PROXY_PORT);
         }
 
