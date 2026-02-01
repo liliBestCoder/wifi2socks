@@ -80,7 +80,8 @@ uint16_t GeoChecker::get_or_create_geosite_code(const std::string& code) {
     bool is_cn = false;
     
     // 规则 A: 包含 "CN" 子串 (如 "CATEGORY-CN", "GEOLOCATION-CN")
-    if (upper_code.find("CN") != std::string::npos) {
+    // 修正: 排除 "!CN" (如 "GEOLOCATION-!CN")
+    if (upper_code.find("CN") != std::string::npos && upper_code.find("!CN") == std::string::npos) {
         is_cn = true;
     }
     // 规则 B: 包含 "BYTE" 且 "DANCE" (特殊处理)
