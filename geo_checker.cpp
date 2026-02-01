@@ -69,14 +69,7 @@ uint16_t GeoChecker::get_or_create_geosite_code(const std::string& code) {
     else if (upper_code.find("NETEASE") != std::string::npos) is_cn = true;
     else if (upper_code.find("BAIDU") != std::string::npos) is_cn = true;
     else if (upper_code.find("BILIBILI") != std::string::npos) is_cn = true;
-    else if (upper_code.find("HUAWEI") != std::string::npos) is_cn = true;
-    else if (upper_code.find("XIAOMI") != std::string::npos) is_cn = true;
     else if (upper_code.find("JD") != std::string::npos) is_cn = true;
-    else if (upper_code.find("360") != std::string::npos) is_cn = true;
-    else if (upper_code.find("OPPO") != std::string::npos) is_cn = true;
-    else if (upper_code.find("VIVO") != std::string::npos) is_cn = true;
-    else if (upper_code.find("ONEPLUS") != std::string::npos) is_cn = true;
-    else if (upper_code.find("IQOO") != std::string::npos) is_cn = true;
     else if (upper_code.find("DOUYIN") != std::string::npos) is_cn = true;
     else if (upper_code.find("BYTE") != std::string::npos && upper_code.find("DANCE") != std::string::npos) is_cn = true;
 
@@ -160,10 +153,28 @@ void GeoChecker::load_geosite(const std::string& filepath) {
 
             switch (type) {
                 case 3: // Full (Exact)
-                    domain_exact_[val] = idx;
+                    {
+                        auto it = domain_exact_.find(val);
+                        if (it != domain_exact_.end()) {
+                            // 冲突：保护 Google Tag 不被覆盖
+                            bool old_is_google = google_site_idxs_.count(it->second);
+                            bool new_is_google = google_site_idxs_.count(idx);
+                            if (old_is_google && !new_is_google) break; 
+                        }
+                        domain_exact_[val] = idx;
+                    }
                     break;
                 case 2: // Domain (Suffix)
-                    domain_suffix_[val] = idx;
+                    {
+                        auto it = domain_suffix_.find(val);
+                        if (it != domain_suffix_.end()) {
+                            // 冲突：保护 Google Tag 不被覆盖
+                            bool old_is_google = google_site_idxs_.count(it->second);
+                            bool new_is_google = google_site_idxs_.count(idx);
+                            if (old_is_google && !new_is_google) break; 
+                        }
+                        domain_suffix_[val] = idx;
+                    }
                     break;
                 case 0: // Plain (Keyword/Substring)
                     domain_keyword_.push_back({val, idx});
@@ -177,7 +188,15 @@ void GeoChecker::load_geosite(const std::string& filepath) {
                     break;
                 default:
                     // 默认当作 Suffix
-                    domain_suffix_[val] = idx;
+                    {
+                        auto it = domain_suffix_.find(val);
+                        if (it != domain_suffix_.end()) {
+                            bool old_is_google = google_site_idxs_.count(it->second);
+                            bool new_is_google = google_site_idxs_.count(idx);
+                            if (old_is_google && !new_is_google) break; 
+                        }
+                        domain_suffix_[val] = idx;
+                    }
                     break;
             }
         }
