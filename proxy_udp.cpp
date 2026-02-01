@@ -421,9 +421,76 @@ void udp_check_timeouts() {
     });
 }
 
+// Helper: Forward UDP packet directly
+void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
+    LOG_DEBUG("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
+        src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
+        dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
+
+    uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
+    Worker* w = WorkerPool::instance().get_worker(hash);
+    if (!w) w = WorkerPool::instance().get_next_worker();
+
+    std::vector<uint8_t> data(payload, payload + len);
+
+    w->queue_task([src_ip, dst_ip, src_port, dst_port, data = std::move(data), w]() {
+        UdpKey key = { src_ip, dst_ip, src_port, dst_port };
+        UdpSession* sess = nullptr;
+        auto it = t_udp_sessions.find(key);
+        
+        if (it != t_udp_sessions.end()) {
+            sess = it->second;
+        } else {
+            sess = new UdpSession();
+            sess->src_ip = src_ip; 
+            sess->original_dst_ip = dst_ip; 
+            sess->src_port = src_port; 
+            sess->original_dst_port = dst_port;
+            sess->worker = w;
+            sess->is_dns_tcp = false;
+            
+            sess->udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
+            if (sess->udp_sock == INVALID_SOCKET) { delete sess; return; }
+            u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);
+            
+            t_udp_sessions[key] = sess;
+            
+            sess->worker->add_socket(
+                sess->udp_sock,
+                [sess]() { handle_udp_direct_read(sess); },
+                nullptr,
+                [sess]() { close_udp_session_internal(sess); }
+            );
+            
+            sess->state = UdpSession::ESTABLISHED;
+        }
+        
+        if (sess && sess->state != UdpSession::CLOSED) {
+            sess->last_active = GetTickCount64();
+            
+            sockaddr_in dest_addr;
+            memset(&dest_addr, 0, sizeof(dest_addr));
+            dest_addr.sin_family = AF_INET;
+            dest_addr.sin_addr.S_un.S_addr = dst_ip;
+            dest_addr.sin_port = dst_port; 
+            
+            sendto(sess->udp_sock, (const char*)data.data(), (int)data.size(), 0, (sockaddr*)&dest_addr, sizeof(dest_addr));
+        }
+    });
+}
+
 // Called by Main Thread
 void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
-    // 1. UDP 443 (QUIC) 优化
+    // 0. Drop Noisy Protocols (mDNS, NetBIOS, SSDP) - Check FIRST
+    uint16_t dport_h = ntohs(dst_port);
+    if (dport_h == 5353 ||  // mDNS
+        dport_h == 137 ||   // NetBIOS Name Service
+        dport_h == 138 ||   // NetBIOS Datagram Service
+        dport_h == 1900) {  // SSDP (UPnP)
+        return; // Drop immediately
+    }
+
+    // 1. UDP 443 (QUIC) Optimization
     if (dst_port == htons(443)) {
         std::string ip_bytes((char*)&dst_ip, 4);
         std::string country = GeoChecker::instance().query_ip(ip_bytes);
@@ -438,10 +505,11 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
 
         // 尝试解析域名（QUIC SNI 探测较为复杂，这里先以 IP 判定为主，后续可扩展）
         // 如果不属于 Google，则走直连逻辑
-        goto direct_udp;
+        forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);
+        return;
     }
 
-    // 2. UDP 53 (DNS) 优化
+    // 2. UDP 53 (DNS) Optimization
     if (dst_port == htons(53)) {
         int qname_len = 0;
         std::string full_domain = parse_dns_qname(payload, len, &qname_len);
@@ -479,9 +547,9 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                 uint8_t ali_ip[4] = {223, 5, 5, 5};
                 memcpy(&ali_dns, ali_ip, 4);
                 
-                // 修改目标并跳转到直连逻辑
-                dst_ip = ali_dns;
-                goto direct_udp;
+                // 修改目标并直连转发
+                forward_udp_packet(src_ip, ali_dns, src_port, dst_port, payload, len);
+                return;
             } else {
                 // 国外域名：继续走 DNS-over-TCP 代理
                 uint32_t google_dns;
@@ -550,70 +618,6 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         }
     }
 
-    // 3. Drop Noisy Protocols (mDNS, NetBIOS, SSDP)
-    // 这些是局域网发现协议，不需要代理也不需要转发
-    uint16_t dport_h = ntohs(dst_port);
-    if (dport_h == 5353 ||  // mDNS
-        dport_h == 137 ||   // NetBIOS Name Service
-        dport_h == 138 ||   // NetBIOS Datagram Service
-        dport_h == 1900) {  // SSDP (UPnP)
-        return;
-    }
-
-direct_udp:
-    // Direct UDP Logic
-    LOG_DEBUG("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
-        src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
-        dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
-
-    uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
-    Worker* w = WorkerPool::instance().get_worker(hash);
-    if (!w) w = WorkerPool::instance().get_next_worker();
-
-    std::vector<uint8_t> data(payload, payload + len);
-
-    w->queue_task([src_ip, dst_ip, src_port, dst_port, data = std::move(data), w]() {
-        UdpKey key = { src_ip, dst_ip, src_port, dst_port };
-        UdpSession* sess = nullptr;
-        auto it = t_udp_sessions.find(key);
-        
-        if (it != t_udp_sessions.end()) {
-            sess = it->second;
-        } else {
-            sess = new UdpSession();
-            sess->src_ip = src_ip; 
-            sess->original_dst_ip = dst_ip; 
-            sess->src_port = src_port; 
-            sess->original_dst_port = dst_port;
-            sess->worker = w;
-            sess->is_dns_tcp = false;
-            
-            sess->udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-            if (sess->udp_sock == INVALID_SOCKET) { delete sess; return; }
-            u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);
-            
-            t_udp_sessions[key] = sess;
-            
-            sess->worker->add_socket(
-                sess->udp_sock,
-                [sess]() { handle_udp_direct_read(sess); },
-                nullptr,
-                [sess]() { close_udp_session_internal(sess); }
-            );
-            
-            sess->state = UdpSession::ESTABLISHED;
-        }
-        
-        if (sess && sess->state != UdpSession::CLOSED) {
-            sess->last_active = GetTickCount64();
-            
-            sockaddr_in dest_addr;
-            memset(&dest_addr, 0, sizeof(dest_addr));
-            dest_addr.sin_family = AF_INET;
-            dest_addr.sin_addr.S_un.S_addr = dst_ip;
-            dest_addr.sin_port = dst_port; 
-            
-            sendto(sess->udp_sock, (const char*)data.data(), (int)data.size(), 0, (sockaddr*)&dest_addr, sizeof(dest_addr));
-        }
-    });
+    // Default: Direct UDP Logic
+    forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);
 }
