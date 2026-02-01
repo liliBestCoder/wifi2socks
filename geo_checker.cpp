@@ -58,32 +58,55 @@ uint16_t GeoChecker::get_or_create_geosite_code(const std::string& code) {
     geosite_codes_.push_back(upper_code);
     geosite_code_cache_[upper_code] = idx;
 
-    // 预计算关键 Tag
+    // --- 1. 定义已知国内 Tag 列表 (白名单) ---
+    // 使用 static set 避免重复构造，且查找快
+    static const std::unordered_set<std::string> CN_TAGS = {
+        // 核心互联网巨头
+        "TENCENT", "QQ", "WECHAT", 
+        "ALIBABA", "TAOBAO", "ALIYUN", "TMALL", "DINGTALK",
+        "BAIDU", "NETEASE", "163", "JD", "360", "SINA", "SOHU",
+        "BILIBILI", "DOUYIN", "BYTEDANCE", "TIKTOK", // TikTok 虽是国际版，但 ByteDance Tag 下往往包含公共基础资源
+        "IQOO", 
+        
+        // 手机/硬件厂商 (用于云服务直连)
+        "HUAWEI", "XIAOMI", "OPPO", "VIVO", "ONEPLUS", "ALLAWN", "MEIZU", "ZTE", "DJI",
+        
+        // 其他常见国内服务
+        "CTRIP", "MEITUAN", "PINDUODUO", "KUAISHOU", "XHS", // 小红书
+        "ELEVOC", "KINGSOFT", "IFLYTEK"
+    };
+
+    // --- 2. 判定是否为 CN ---
     bool is_cn = false;
-    if (upper_code.find("CN") != std::string::npos) is_cn = true;
-    else if (upper_code.find("TENCENT") != std::string::npos) is_cn = true;
-    else if (upper_code.find("QQ") != std::string::npos) is_cn = true;
-    else if (upper_code.find("WECHAT") != std::string::npos) is_cn = true;
-    else if (upper_code.find("ALIBABA") != std::string::npos) is_cn = true;
-    else if (upper_code.find("ALIYUN") != std::string::npos) is_cn = true;
-    else if (upper_code.find("TAOBAO") != std::string::npos) is_cn = true;
-    else if (upper_code.find("NETEASE") != std::string::npos) is_cn = true;
-    else if (upper_code.find("BAIDU") != std::string::npos) is_cn = true;
-    else if (upper_code.find("BILIBILI") != std::string::npos) is_cn = true;
-    else if (upper_code.find("JD") != std::string::npos) is_cn = true;
-    else if (upper_code.find("DOUYIN") != std::string::npos) is_cn = true;
-    else if (upper_code.find("BYTE") != std::string::npos && upper_code.find("DANCE") != std::string::npos) is_cn = true;
-    else if (upper_code.find("XIAOMI") != std::string::npos) is_cn = true;
-    else if (upper_code.find("HUAWEI") != std::string::npos) is_cn = true;
-    else if (upper_code.find("OPPO") != std::string::npos) is_cn = true;
-    else if (upper_code.find("VIVO") != std::string::npos) is_cn = true;
-    else if (upper_code.find("ONEPLUS") != std::string::npos) is_cn = true;
-    else if (upper_code.find("ALLAWN") != std::string::npos) is_cn = true;
-    else if (upper_code.find("360") != std::string::npos) is_cn = true;
-    else if (upper_code.find("IQOO") != std::string::npos) is_cn = true;
+    
+    // 规则 A: 包含 "CN" 子串 (如 "CATEGORY-CN", "GEOLOCATION-CN")
+    if (upper_code.find("CN") != std::string::npos) {
+        is_cn = true;
+    }
+    // 规则 B: 包含 "BYTE" 且 "DANCE" (特殊处理)
+    else if (upper_code.find("BYTE") != std::string::npos && upper_code.find("DANCE") != std::string::npos) {
+        is_cn = true;
+    }
+    // 规则 C: 命中白名单 (精确查找或子串包含)
+    else {
+        // 优先精确查找
+        if (CN_TAGS.count(upper_code)) {
+            is_cn = true;
+        } else {
+            // 遍历白名单检查是否包含 (例如 "CATEGORY-HUAWEI" 包含 "HUAWEI")
+            // 虽然是 O(N)，但 N 较小且仅在加载时执行一次
+            for (const auto& tag : CN_TAGS) {
+                if (upper_code.find(tag) != std::string::npos) {
+                    is_cn = true;
+                    break;
+                }
+            }
+        }
+    }
 
     if (is_cn) cn_site_idxs_.insert(idx);
 
+    // --- 3. 判定特定大厂 (用于更细粒度的逻辑) ---
     if (upper_code.find("GOOGLE") != std::string::npos) google_site_idxs_.insert(idx);
     
     bool is_tencent = false;
