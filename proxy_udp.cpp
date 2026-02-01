@@ -490,9 +490,9 @@ void udp_check_timeouts() {
 
 // Helper: Forward UDP packet directly
 void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
-    LOG_DEBUG("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
-        src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
-        dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
+    // LOG_DEBUG("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
+    //    src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
+    //    dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
 
     uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
     Worker* w = WorkerPool::instance().get_worker(hash);
@@ -508,6 +508,10 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
         if (it != t_udp_sessions.end()) {
             sess = it->second;
         } else {
+            LOG_INFO("[UDP] Direct Tunnel Established: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
+                src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
+                dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
+
             sess = new UdpSession();
             sess->src_ip = src_ip; 
             sess->original_dst_ip = dst_ip; 
@@ -519,6 +523,11 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
             sess->udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
             if (sess->udp_sock == INVALID_SOCKET) { delete sess; return; }
             u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);
+
+            // Optimization: Increase UDP Buffer for Video/Streaming
+            int buf_size = 1024 * 1024; // 1MB
+            setsockopt(sess->udp_sock, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
+            setsockopt(sess->udp_sock, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
             
             t_udp_sessions[key] = sess;
             
@@ -566,7 +575,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         // 如果 IP 属于 Google 或者是国外已知服务，可以进一步判定
         // 这里根据需求：如果是 Google 则 drop
         if (country == "GOOGLE") {
-            LOG_DEBUG("[UDP] Drop Google QUIC packet: %d.%d.%d.%d:443\n", 
+            LOG_INFO("[UDP] Blocked Google QUIC: %d.%d.%d.%d:443\n", 
                 dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF);
             return;
         }
