@@ -49,18 +49,3 @@ private:
     std::map<std::string, DnsCacheEntry> m_cache;
     std::mutex m_mtx;
 };
-
-// Singleton for Domain Rules (CN List)
-class DomainRules {
-public:
-    static DomainRules& instance();
-    
-    bool is_domestic(const std::string& domain);
-    void reload();
-
-private:
-    DomainRules();
-    std::unordered_set<std::string> m_cn_rules;
-    bool m_loaded;
-    std::mutex m_mtx;
-};

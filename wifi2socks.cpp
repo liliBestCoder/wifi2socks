@@ -18,11 +18,20 @@ LogLevel g_log_level = LOG_LEVEL_DEBUG;
 #include "proxy_udp.h"
 #include "main_dispatcher.h"
 #include "nat_table.h"
+#include "geo_checker.h"
 #include <iostream>
 #include <thread>
 
 // Main Entry Point
 int main() {
+    // 0. Pre-load GeoIP/GeoSite
+    try {
+        GeoChecker::instance();
+        LOG_INFO("GeoChecker loaded successfully.\n");
+    } catch (const std::exception& e) {
+        LOG_INFO("Warning: GeoChecker failed to load: %s. IP/Domain bypass may not work.\n", e.what());
+    }
+
     // 1. Initialize TAP Device
     const char* tap_guid = "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}";
     printf("Opening TAP device...\n");

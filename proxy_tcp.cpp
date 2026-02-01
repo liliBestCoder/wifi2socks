@@ -5,6 +5,7 @@
 #include "app_config.h"
 #include "lwip_handler.h"
 #include "main_dispatcher.h"
+#include "geo_checker.h"
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -466,30 +467,19 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
                 
                 if (!sni.empty()) {
                     ctx->detected_domain = sni;
-                    bool bypass = false;
-                    // Check QQ/VX Keywords
-                    if (sni.find("qq.com") != std::string::npos || 
-                        sni.find("tencent.com") != std::string::npos ||
-                        sni.find("wechat.com") != std::string::npos ||
-                        sni.find("weixin.com") != std::string::npos ||
-                        sni.find("qpic.cn") != std::string::npos ||
-                        sni.find("qlogo.cn") != std::string::npos ||
-                        sni.find("gtimg.com") != std::string::npos ||
-                        sni.find("gtimg.cn") != std::string::npos ||
-                        sni.find("tencent.cn") != std::string::npos ||
-                        sni.find("wechatpay.com") != std::string::npos ||
-                        sni.find("servicewechat.com") != std::string::npos) {
-                        bypass = true;
-                    }
-                    // Check Domestic List
-                    if (!bypass && DomainRules::instance().is_domestic(sni)) {
-                        bypass = true;
-                    }
-
-                    if (bypass) {
+                    
+                    // 域名判定具有最高优先级
+                    if (GeoChecker::instance().is_cn_domain(sni) || 
+                        GeoChecker::instance().is_tencent_domain(sni)) {
                         ctx->is_direct = true;
-                        LOG_INFO("[TCP] Bypass Domain Detected: %s. Switching to Direct Connect.\n", sni.c_str());
+                        LOG_INFO("[TCP] Domestic Domain Detected: %s. Switching to Direct Connect.\n", sni.c_str());
+                    } else {
+                        ctx->is_direct = false;
+                        LOG_INFO("[TCP] International Domain Detected: %s. Switching to Proxy.\n", sni.c_str());
                     }
+                } else {
+                    // 如果没提取到域名，保留在 tcp_proxy_accept 中根据 IP 做的初始判定
+                    LOG_DEBUG("[TCP] No SNI/Host detected. Using IP-based decision (is_direct: %s)\n", ctx->is_direct ? "true" : "false");
                 }
                 connect_to_proxy_async(ctx);
             }
@@ -509,6 +499,16 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     ctx->target = target;
     ctx->client_ip = newpcb->remote_ip.addr;
     ctx->client_port = newpcb->remote_port;
+
+    // IP Bypass Check
+    std::string ip_bytes((char*)&target.original_dst_ip, 4);
+    if (GeoChecker::instance().is_cn_ip(ip_bytes)) {
+        ctx->is_direct = true;
+        LOG_INFO("[TCP] Bypass IP Detected: %d.%d.%d.%d. Switching to Direct Connect.\n",
+            target.original_dst_ip & 0xFF, (target.original_dst_ip >> 8) & 0xFF, 
+            (target.original_dst_ip >> 16) & 0xFF, (target.original_dst_ip >> 24) & 0xFF);
+    }
+
     tcp_arg(newpcb, ctx);
     tcp_recv(newpcb, tcp_client_recv);
     tcp_sent(newpcb, tcp_client_sent);
