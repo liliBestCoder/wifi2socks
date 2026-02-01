@@ -484,6 +484,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     // 0. Drop Noisy Protocols (mDNS, NetBIOS, SSDP) - Check FIRST
     uint16_t dport_h = ntohs(dst_port);
     if (dport_h == 5353 ||  // mDNS
+        dport_h == 5355 ||  // LLMNR
         dport_h == 137 ||   // NetBIOS Name Service
         dport_h == 138 ||   // NetBIOS Datagram Service
         dport_h == 1900) {  // SSDP (UPnP)
