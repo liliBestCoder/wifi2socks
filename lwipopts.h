@@ -20,7 +20,7 @@
 #define LWIP_TCP                        1
 #define TCP_MSS                         1460  // Adjusted for Ethernet MTU
 #define TCP_WND                         (512 * 1024)   // 512KB window for high throughput
-#define TCP_SND_BUF                     (64 * TCP_MSS) // ~93KB
+#define TCP_SND_BUF                     (512 * 1024) // 512KB for HD streaming
 #define LWIP_WND_SCALE                  1
 #define TCP_RCV_SCALE                   4     // Scale 4 (x16) -> 1MB Max Window
 
