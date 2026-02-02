@@ -571,11 +571,33 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
             sess->is_dns_tcp = false;
             
             sess->udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-            if (sess->udp_sock == INVALID_SOCKET) { delete sess; return; }
+            if (sess->udp_sock == INVALID_SOCKET) { 
+                delete sess; 
+                return; 
+            }
+
+            // Optimization 1: Bind to local port for Symmetric NAT behavior (STUN friendliness)
+            sockaddr_in local_addr;
+            memset(&local_addr, 0, sizeof(local_addr));
+            local_addr.sin_family = AF_INET;
+            local_addr.sin_addr.s_addr = INADDR_ANY;
+            local_addr.sin_port = src_port; // Try to match LwIP source port
+
+            if (bind(sess->udp_sock, (sockaddr*)&local_addr, sizeof(local_addr)) != 0) {
+                // Port likely in use (e.g. by host system), fall back to random port
+                LOG_INFO("[UDP] Bind to port %d failed, letting OS assign random port.\n", ntohs(src_port));
+                local_addr.sin_port = 0;
+                if (bind(sess->udp_sock, (sockaddr*)&local_addr, sizeof(local_addr)) != 0) {
+                    closesocket(sess->udp_sock);
+                    delete sess;
+                    return;
+                }
+            }
+
             u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);
 
-            // Optimization: Increase UDP Buffer for Video/Streaming
-            int buf_size = 512 * 1024; // 1MB
+            // Optimization 2: Increase UDP Buffer for Video/Streaming (Correct 1MB)
+            int buf_size = 1024 * 1024; 
             setsockopt(sess->udp_sock, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
             setsockopt(sess->udp_sock, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
             
