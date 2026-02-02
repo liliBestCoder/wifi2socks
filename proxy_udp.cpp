@@ -157,10 +157,10 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
     
     if (len > 0 && data && addr) {
         // Log incoming packet (Debug)
-        uint32_t src_ip_net = addr->sin_addr.S_un.S_addr;
-        LOG_DEBUG("[UDP] Recv %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
-            src_ip_net & 0xFF, (src_ip_net >> 8) & 0xFF, (src_ip_net >> 16) & 0xFF, (src_ip_net >> 24) & 0xFF, ntohs(addr->sin_port),
-            sess->src_ip & 0xFF, (sess->src_ip >> 8) & 0xFF, (sess->src_ip >> 16) & 0xFF, (sess->src_ip >> 24) & 0xFF, ntohs(sess->src_port));
+        // uint32_t src_ip_net = addr->sin_addr.S_un.S_addr;
+        // LOG_DEBUG("[UDP] Recv %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
+        //    src_ip_net & 0xFF, (src_ip_net >> 8) & 0xFF, (src_ip_net >> 16) & 0xFF, (src_ip_net >> 24) & 0xFF, ntohs(addr->sin_port),
+        //    sess->src_ip & 0xFF, (sess->src_ip >> 8) & 0xFF, (sess->src_ip >> 16) & 0xFF, (sess->src_ip >> 24) & 0xFF, ntohs(sess->src_port));
 
         uint8_t frame[4096 + 100];
         if (14 + 20 + 8 + len > sizeof(frame)) return; 
@@ -539,9 +539,9 @@ void udp_check_timeouts() {
 
 // Helper: Forward UDP packet directly
 void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
-     LOG_DEBUG("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
-        src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
-        dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
+     // LOG_DEBUG("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
+     //   src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
+     //   dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
 
     uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
     Worker* w = WorkerPool::instance().get_worker(hash);
