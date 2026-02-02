@@ -580,17 +580,12 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
             memset(&local_addr, 0, sizeof(local_addr));
             local_addr.sin_family = AF_INET;
             local_addr.sin_addr.S_un.S_addr = INADDR_ANY;
-            local_addr.sin_port = src_port; // Try to match LwIP source port
+            local_addr.sin_port = 0; // Let OS assign random port directly (User Request)
 
             if (bind(sess->udp_sock, (sockaddr*)&local_addr, sizeof(local_addr)) != 0) {
-                // Port likely in use (e.g. by host system), fall back to random port
-                LOG_INFO("[UDP] Bind to port %d failed, letting OS assign random port.\n", ntohs(src_port));
-                local_addr.sin_port = 0;
-                if (bind(sess->udp_sock, (sockaddr*)&local_addr, sizeof(local_addr)) != 0) {
-                    closesocket(sess->udp_sock);
-                    delete sess;
-                    return;
-                }
+                closesocket(sess->udp_sock);
+                delete sess;
+                return;
             }
 
                         u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);
