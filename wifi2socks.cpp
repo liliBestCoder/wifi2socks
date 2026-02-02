@@ -11,6 +11,7 @@
 
 // Global Log Level
 LogLevel g_log_level = LOG_LEVEL_INFO;
+
 #include "tap_driver.h"
 #include "worker.h"
 #include "lwip_handler.h"

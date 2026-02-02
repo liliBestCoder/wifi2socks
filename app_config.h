@@ -15,6 +15,7 @@
 #define TAP_WIN_PATH "\\\\.\\%s.tap"
 
 #include <stdio.h>
+#include "logger.h"
 
 enum LogLevel {
     LOG_LEVEL_DEBUG = 0,
@@ -24,10 +25,10 @@ enum LogLevel {
 
 extern LogLevel g_log_level;
 
+
 #define LOG_PRINT(level, fmt, ...) do { \
     if (level >= g_log_level) { \
-        printf(fmt, ##__VA_ARGS__); \
-        fflush(stdout); \
+        AsyncLogger::instance().log(fmt, ##__VA_ARGS__); \
     } \
 } while(0)
 

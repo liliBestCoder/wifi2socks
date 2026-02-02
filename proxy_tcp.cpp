@@ -214,16 +214,20 @@ void handle_handshake_read(TcpCtx* ctx) {
                     if (!ctx->upstream_data.empty()) {
                          const char* ptr = (const char*)ctx->upstream_data.data();
                          int remaining = (int)ctx->upstream_data.size();
+                         
+                         // Try to send all data at once. On a fresh connection, this should not block.
+                         // If it blocks (WSAEWOULDBLOCK), it's better to close than to Sleep(1) and block the Worker.
                          while (remaining > 0) {
                              int sent = send(ctx->proxy_socket, ptr, remaining, 0);
                              if (sent == SOCKET_ERROR) {
-                                 if (WSAGetLastError() == WSAEWOULDBLOCK) {
-                                     Sleep(1); 
-                                     continue; 
-                                 } else {
-                                     close_tcp_ctx(ctx);
-                                     return;
+                                 // WSAEWOULDBLOCK on a fresh handshake implies severe congestion.
+                                 // We fail fast to protect other connections on this Worker.
+                                 int err = WSAGetLastError();
+                                 if (err != WSAEWOULDBLOCK) {
+                                     LOG_INFO("[TCP] Handshake flush failed: %d\n", err);
                                  }
+                                 close_tcp_ctx(ctx);
+                                 return;
                              }
                              ptr += sent;
                              remaining -= sent;
