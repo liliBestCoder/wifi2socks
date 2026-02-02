@@ -579,7 +579,7 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
             sockaddr_in local_addr;
             memset(&local_addr, 0, sizeof(local_addr));
             local_addr.sin_family = AF_INET;
-            local_addr.sin_addr.s_addr = INADDR_ANY;
+            local_addr.sin_addr.S_un.S_addr = INADDR_ANY;
             local_addr.sin_port = src_port; // Try to match LwIP source port
 
             if (bind(sess->udp_sock, (sockaddr*)&local_addr, sizeof(local_addr)) != 0) {

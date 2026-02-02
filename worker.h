@@ -101,7 +101,7 @@ public:
 
 private:
     void loop();
-    void post_zero_byte_read(SocketContext* ctx);
+    void post_read(SocketContext* ctx);
     
     // Reference counting helpers
     void retain_context(SocketContext* ctx);
