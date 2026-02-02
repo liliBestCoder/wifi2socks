@@ -305,34 +305,23 @@ void handle_proxy_connect(TcpCtx* ctx) {
         return;
     }
 
-    std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());
-    std::string target_host;
-    
-    if (!sni.empty()) {
-        target_host = sni;
-        LOG_INFO("[TCP] SNI: %s (%d.%d.%d.%d:%d)\n", sni.c_str(),
-            ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
-    } else {
-        target_host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
-        if (!target_host.empty()) {
-            LOG_INFO("[TCP] Host: %s (%d.%d.%d.%d:%d)\n", target_host.c_str(),
-                ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
-        }
-    }
+    std::string sni = ctx->detected_domain;
 
     char cmd[1024];
     uint16_t port = ntohs(ctx->target.original_dst_port);
 
-    if (!target_host.empty()) {
-        sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", target_host.c_str(), port, target_host.c_str(), port);
+    if (!sni.empty()) {
+        LOG_INFO("[TCP] SNI: %s (%d.%d.%d.%d:%d)\n", sni.c_str(),
+            ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
+        sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", sni.c_str(), port, sni.c_str(), port);
     } else {
         uint32_t ip = ctx->target.original_dst_ip;
         char ip_buf[32];
         sprintf_s(ip_buf, "%d.%d.%d.%d", 
             ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
         // Direct CONNECT to IP
-        LOG_INFO("[TCP] No SNI detected. Proxying to IP: %s:%d (%d.%d.%d.%d:%d)\n", ip_buf, port,
-             ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
+        //LOG_INFO("[TCP] No SNI detected. Proxying to IP: %s:%d (%d.%d.%d.%d:%d)\n", ip_buf, port,
+        //     ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
         sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", ip_buf, port, ip_buf, port);
     }
     
@@ -490,9 +479,11 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
                             std::string tag = GeoChecker::instance().query_domain(sni);
                             LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Direct (.cn suffix).\n", sni.c_str(), tag.c_str());
                         } else {
-                            ctx->is_direct = false;
-                            std::string tag = GeoChecker::instance().query_domain(sni);
-                            LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Proxy.\n", sni.c_str(), tag.c_str());
+                            if (!ctx->is_direct) {
+                                ctx->is_direct = false;
+                                std::string tag = GeoChecker::instance().query_domain(sni);
+                                LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Proxy.\n", sni.c_str(), tag.c_str());
+                            }
                         }
                     }
                 } else {

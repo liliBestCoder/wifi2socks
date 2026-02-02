@@ -10,7 +10,7 @@
 #include "app_config.h"
 
 // Global Log Level
-LogLevel g_log_level = LOG_LEVEL_DEBUG;
+LogLevel g_log_level = LOG_LEVEL_INFO;
 #include "tap_driver.h"
 #include "worker.h"
 #include "lwip_handler.h"
@@ -45,7 +45,7 @@ int main() {
     WSAStartup(MAKEWORD(2, 2), &wsa);
 
     // 3. Initialize Worker Pool
-    WorkerPool::instance().init(40);
+    WorkerPool::instance().init(80);
     LOG_INFO("Worker Pool Initialized.\n");
 
     // 4. Initialize LwIP

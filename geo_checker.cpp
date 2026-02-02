@@ -65,7 +65,7 @@ uint16_t GeoChecker::get_or_create_geosite_code(const std::string& code) {
         "TENCENT", "QQ", "WECHAT", 
         "ALIBABA", "TAOBAO", "ALIYUN", "TMALL", "DINGTALK",
         "BAIDU", "NETEASE", "163", "JD", "360", "SINA", "SOHU",
-        "BILIBILI", "DOUYIN", "BYTEDANCE", "TIKTOK", // TikTok 虽是国际版，但 ByteDance Tag 下往往包含公共基础资源
+        "BILIBILI", "DOUYIN", "UNKNOWN",
         "IQOO", 
         
         // 手机/硬件厂商 (用于云服务直连)
@@ -82,10 +82,6 @@ uint16_t GeoChecker::get_or_create_geosite_code(const std::string& code) {
     // 规则 A: 包含 "CN" 子串 (如 "CATEGORY-CN", "GEOLOCATION-CN")
     // 修正: 排除 "!CN" (如 "GEOLOCATION-!CN")
     if (upper_code.find("CN") != std::string::npos && upper_code.find("!CN") == std::string::npos) {
-        is_cn = true;
-    }
-    // 规则 B: 包含 "BYTE" 且 "DANCE" (特殊处理)
-    else if (upper_code.find("BYTE") != std::string::npos && upper_code.find("DANCE") != std::string::npos) {
         is_cn = true;
     }
     // 规则 C: 命中白名单 (精确查找或子串包含)
@@ -272,22 +268,27 @@ std::string GeoChecker::query_ip(const std::string& ip_bytes) {
 }
 
 bool GeoChecker::is_cn_ip(const std::string& ip_bytes) {
-    if (ip_bytes.size() != 4 || cn_ip_idx_ == 0xFFFF) return false;
-    uint32_t ip_num = ntohl(*reinterpret_cast<const uint32_t*>(ip_bytes.data()));
+    if (ip_bytes.size() != 4 || cn_ip_idx_ == UINT16_MAX) return false;
 
-    auto it = std::upper_bound(ip_ranges_.begin(), ip_ranges_.end(), ip_num, 
-        [](uint32_t val, const GeoIPRange& range) {
-            return val < range.start_ip;
-        });
+    uint32_t ip = ntohl(*reinterpret_cast<const uint32_t*>(ip_bytes.data()));
 
-    if (it != ip_ranges_.begin()) {
-        auto candidate = std::prev(it);
-        if (ip_num >= candidate->start_ip && ip_num <= candidate->end_ip) {
-            return candidate->code_index == cn_ip_idx_;
+    auto it = std::lower_bound(
+        ip_ranges_.begin(),
+        ip_ranges_.end(),
+        ip,
+        [](const GeoIPRange& r, uint32_t val) {
+            return r.end_ip < val;
         }
-    }
-    return false;
+    );
+
+    if (it == ip_ranges_.end()) return false;
+
+    return ip >= it->start_ip &&
+        ip <= it->end_ip &&
+        it->code_index == cn_ip_idx_;
 }
+
+
 
 std::string GeoChecker::query_domain(const std::string& domain) {
     std::string d = to_lower(domain);

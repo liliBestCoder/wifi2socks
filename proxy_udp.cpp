@@ -155,13 +155,13 @@ void close_udp_session_internal(UdpSession* sess) {
 void handle_udp_direct_read(UdpSession* sess) {
     if (sess->state == UdpSession::CLOSED) return;
     
-    char buf[4096];
+    char buf[256];
     sockaddr_in remote_addr;
     int addr_len = sizeof(remote_addr);
     int r = recvfrom(sess->udp_sock, buf, sizeof(buf), 0, (sockaddr*)&remote_addr, &addr_len);
     
     if (r > 0) {
-        uint8_t frame[4096 + 100]; 
+        uint8_t frame[256 + 100];
         if (14 + 20 + 8 + r > sizeof(frame)) return; 
 
         memcpy(frame, HOST_MAC, 6);
