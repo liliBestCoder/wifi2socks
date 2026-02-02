@@ -249,7 +249,7 @@ void handle_handshake_read(TcpCtx* ctx) {
                 
                 ctx->worker->add_socket(
                     ctx->proxy_socket,
-                    [ctx]() { handle_proxy_read(ctx); },
+                    [ctx](char*, int, sockaddr_in*) { handle_proxy_read(ctx); },
                     nullptr,
                     [ctx]() { close_tcp_ctx(ctx); }
                 );
@@ -298,7 +298,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
 
         ctx->worker->add_socket(
             ctx->proxy_socket,
-            [ctx]() { handle_proxy_read(ctx); },
+            [ctx](char*, int, sockaddr_in*) { handle_proxy_read(ctx); },
             nullptr,
             [ctx]() { close_tcp_ctx(ctx); }
         );
@@ -336,7 +336,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
 
     ctx->worker->add_socket(
         ctx->proxy_socket,
-        [ctx]() { handle_handshake_read(ctx); }, 
+        [ctx](char*, int, sockaddr_in*) { handle_handshake_read(ctx); }, 
         nullptr, 
         [ctx]() { close_tcp_ctx(ctx); }
     );

@@ -60,12 +60,9 @@ void Worker::release_context(SocketContext* ctx) {
     }
 }
 
-void Worker::post_zero_byte_read(SocketContext* ctx) {
+void Worker::post_read(SocketContext* ctx) {
     if (!ctx || ctx->read_pending) return;
 
-    static char dummy_buf[1];
-    static WSABUF wsaBuf = { 0, dummy_buf };
-    
     DWORD bytes = 0;
     DWORD flags = 0;
     
@@ -75,7 +72,23 @@ void Worker::post_zero_byte_read(SocketContext* ctx) {
     // RETAIN for IO
     retain_context(ctx);
 
-    if (WSARecv(ctx->sock, &wsaBuf, 1, &bytes, &flags, &ctx->read_io.overlapped, NULL) == SOCKET_ERROR) {
+    int ret = SOCKET_ERROR;
+
+    if (ctx->is_udp) {
+        ctx->wsaBuf.buf = ctx->buffer;
+        ctx->wsaBuf.len = 4096;
+        ctx->remote_addr_len = sizeof(ctx->remote_addr);
+        flags = 0;
+        
+        ret = WSARecvFrom(ctx->sock, &ctx->wsaBuf, 1, &bytes, &flags, (sockaddr*)&ctx->remote_addr, &ctx->remote_addr_len, &ctx->read_io.overlapped, NULL);
+    } else {
+        static char dummy_buf[1];
+        static WSABUF wsaBufZero = { 0, dummy_buf };
+        
+        ret = WSARecv(ctx->sock, &wsaBufZero, 1, &bytes, &flags, &ctx->read_io.overlapped, NULL);
+    }
+
+    if (ret == SOCKET_ERROR) {
         if (WSAGetLastError() != WSA_IO_PENDING) {
             // Immediate failure
             release_context(ctx);
@@ -88,10 +101,10 @@ void Worker::post_zero_byte_read(SocketContext* ctx) {
     }
 }
 
-void Worker::add_socket(SOCKET s, std::function<void()> on_read, std::function<void()> on_write, std::function<void()> on_close) {
+void Worker::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void()> on_write, std::function<void()> on_close, bool is_udp) {
     std::lock_guard<std::mutex> lock(m_mtx);
     
-    m_task_queue.push_back([this, s, on_read, on_write, on_close]() {
+    m_task_queue.push_back([this, s, on_read, on_write, on_close, is_udp]() {
         SocketContext* ctx = nullptr;
         
         auto it = m_sockets.find(s);
@@ -111,13 +124,14 @@ void Worker::add_socket(SOCKET s, std::function<void()> on_read, std::function<v
         ctx->on_read = on_read;
         ctx->on_write = on_write; 
         ctx->on_close = on_close;
+        ctx->is_udp = is_udp;
 
         if (new_association) {
             CreateIoCompletionPort((HANDLE)s, m_iocp, (ULONG_PTR)ctx, 0);
         }
 
         if (on_read && !ctx->read_pending) {
-            post_zero_byte_read(ctx);
+            post_read(ctx);
         }
     });
     
@@ -219,7 +233,7 @@ void Worker::resume_read(SOCKET s) {
                 ctx->paused = false;
                 // If no read is pending, we must kickstart it
                 if (!ctx->read_pending) {
-                    post_zero_byte_read(ctx);
+                    post_read(ctx);
                 }
             }
         }
@@ -271,12 +285,18 @@ void Worker::loop() {
                     // Success
                     if (ioCtx->type == IO_READ) {
                         ctx->read_pending = false;
-                        if (ctx->on_read) ctx->on_read();
+                        if (ctx->on_read) {
+                            if (ctx->is_udp) {
+                                ctx->on_read(ctx->buffer, (int)bytesTransferred, &ctx->remote_addr);
+                            } else {
+                                ctx->on_read(nullptr, 0, nullptr);
+                            }
+                        }
                         
                         // Re-post only if socket still alive in map AND NOT PAUSED
                         if (m_sockets.find(ctx->sock) != m_sockets.end()) {
                             if (!ctx->paused) {
-                                post_zero_byte_read(ctx);
+                                post_read(ctx);
                             }
                         }
                     } else if (ioCtx->type == IO_CONNECT) {
@@ -288,7 +308,19 @@ void Worker::loop() {
                     if (ioCtx->type == IO_READ) {
                         ctx->read_pending = false;
                         // Trigger read callback to let recv() fail properly
-                        if (ctx->on_read) ctx->on_read();
+                        if (ctx->on_read) {
+                             if (ctx->is_udp) {
+                                // For UDP, bytesTransferred might be 0 on failure?
+                                // Pass nullptr or 0 len to indicate error?
+                                // Actually, standard IOCP failure doesn't return data.
+                                // We can pass len=-1 or rely on WSAGetLastError() which might be lost?
+                                // proxy_udp.cpp won't call recvfrom, so it needs to know it failed.
+                                // Let's pass 0 len.
+                                ctx->on_read(nullptr, 0, nullptr);
+                            } else {
+                                ctx->on_read(nullptr, 0, nullptr);
+                            }
+                        }
                     } else if (ioCtx->type == IO_CONNECT) {
                         if (ctx->on_write) ctx->on_write();
                     }

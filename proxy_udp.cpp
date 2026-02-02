@@ -152,23 +152,18 @@ void close_udp_session_internal(UdpSession* sess) {
     }
 }
 
-void handle_udp_direct_read(UdpSession* sess) {
+void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* addr) {
     if (sess->state == UdpSession::CLOSED) return;
     
-    char buf[4096];
-    sockaddr_in remote_addr;
-    int addr_len = sizeof(remote_addr);
-    int r = recvfrom(sess->udp_sock, buf, sizeof(buf), 0, (sockaddr*)&remote_addr, &addr_len);
-    
-    if (r > 0) {
+    if (len > 0 && data && addr) {
         // Log incoming packet (Debug)
-        uint32_t src_ip_net = remote_addr.sin_addr.S_un.S_addr;
-        LOG_INFO("[UDP] Recv %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", r,
-            src_ip_net & 0xFF, (src_ip_net >> 8) & 0xFF, (src_ip_net >> 16) & 0xFF, (src_ip_net >> 24) & 0xFF, ntohs(remote_addr.sin_port),
+        uint32_t src_ip_net = addr->sin_addr.S_un.S_addr;
+        LOG_INFO("[UDP] Recv %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
+            src_ip_net & 0xFF, (src_ip_net >> 8) & 0xFF, (src_ip_net >> 16) & 0xFF, (src_ip_net >> 24) & 0xFF, ntohs(addr->sin_port),
             sess->src_ip & 0xFF, (sess->src_ip >> 8) & 0xFF, (sess->src_ip >> 16) & 0xFF, (sess->src_ip >> 24) & 0xFF, ntohs(sess->src_port));
 
         uint8_t frame[4096 + 100];
-        if (14 + 20 + 8 + r > sizeof(frame)) return; 
+        if (14 + 20 + 8 + len > sizeof(frame)) return; 
 
         memcpy(frame, HOST_MAC, 6);
         memcpy(frame + 6, TapDriver::TAP_MAC, 6);
@@ -181,30 +176,25 @@ void handle_udp_direct_read(UdpSession* sess) {
         ip_hdr[0] = 0x45; 
         ip_hdr[8] = 64; 
         ip_hdr[9] = 17; 
-        *(uint16_t*)(ip_hdr + 2) = htons((uint16_t)(20 + 8 + r));
+        *(uint16_t*)(ip_hdr + 2) = htons((uint16_t)(20 + 8 + len));
         *(uint32_t*)(ip_hdr + 12) = sess->original_dst_ip; 
         *(uint32_t*)(ip_hdr + 16) = sess->src_ip;          
         *(uint16_t*)(ip_hdr + 10) = ip_chksum_simple(ip_hdr, 20);
 
         *(uint16_t*)(udp_hdr + 0) = sess->original_dst_port; 
         *(uint16_t*)(udp_hdr + 2) = sess->src_port;          
-        *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + r));
+        *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + len));
         *(uint16_t*)(udp_hdr + 6) = 0; 
         
-        memcpy(udp_hdr + 8, buf, r);
+        memcpy(udp_hdr + 8, data, len);
 
         // Try Log DNS Response for Direct UDP
         if (sess->original_dst_port == htons(53)) {
-            parse_and_log_dns_response((const uint8_t*)buf, r, "Direct (UDP)");
+            parse_and_log_dns_response((const uint8_t*)data, len, "Direct (UDP)");
         }
 
         sess->last_active = GetTickCount64();
-        TapDriver::instance().send_async(frame, 14 + 20 + 8 + r);
-    } else {
-        int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK) {
-             LOG_INFO("[UDP] recvfrom failed: %d\n", err);
-        }
+        TapDriver::instance().send_async(frame, 14 + 20 + 8 + len);
     }
 }
 
@@ -630,9 +620,10 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
             
             sess->worker->add_socket(
                 sess->udp_sock,
-                [sess]() { handle_udp_direct_read(sess); },
+                [sess](char* data, int len, sockaddr_in* addr) { handle_udp_direct_read(sess, data, len, addr); },
                 nullptr,
-                [sess]() { close_udp_session_internal(sess); }
+                [sess]() { close_udp_session_internal(sess); },
+                true // IS_UDP = true
             );
             
             sess->state = UdpSession::ESTABLISHED;
@@ -789,7 +780,12 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                             uint8_t req[] = { 0x05, 0x01, 0x00 };
                             send(sess->tcp_sock, (const char*)req, sizeof(req), 0);
                             sess->state = UdpSession::HANDSHAKE_AUTH;
-                            sess->worker->add_socket(sess->tcp_sock, [sess]() { handle_socks5_tcp_read(sess); }, nullptr, [sess]() { close_udp_session_internal(sess); });
+                            sess->worker->add_socket(sess->tcp_sock, 
+                            [sess](char*, int, sockaddr_in*) { handle_socks5_tcp_read(sess); }, 
+                            nullptr, 
+                            [sess]() { close_udp_session_internal(sess); },
+                            false
+                        );
                         });
                     }
                     if (sess && sess->state != UdpSession::CLOSED) {

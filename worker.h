@@ -31,14 +31,24 @@ struct SocketContext {
     static const uint32_t MAGIC_VAL = 0xCAFEBABE;
     uint32_t magic;
     SOCKET sock;
-    std::function<void()> on_read;
+    
+    // Updated callback signature: data, len, addr (for UDP)
+    std::function<void(char*, int, sockaddr_in*)> on_read;
+    
     std::function<void()> on_write; // Used for Connect completion
     std::function<void()> on_close; 
     
     IO_CONTEXT read_io;    // Reuse for reads
     IO_CONTEXT connect_io; // Reuse for connects
     bool read_pending;     // Avoid double posting
-    bool paused;           // Flow control: if true, do not re-post read
+    bool paused;           // Flow control
+    
+    // UDP Support
+    bool is_udp;
+    char buffer[4096];
+    WSABUF wsaBuf;
+    sockaddr_in remote_addr;
+    int remote_addr_len;
     
     std::atomic<int> ref_count;         // Reference Counting for lifetime management
 
@@ -51,7 +61,14 @@ struct SocketContext {
         read_pending = false;
         paused = false;
         sock = INVALID_SOCKET;
-        ref_count = 0; 
+        ref_count = 0;
+        
+        is_udp = false;
+        memset(buffer, 0, sizeof(buffer));
+        wsaBuf.buf = buffer;
+        wsaBuf.len = 4096;
+        memset(&remote_addr, 0, sizeof(remote_addr));
+        remote_addr_len = sizeof(remote_addr);
     }
     
     ~SocketContext() {
@@ -68,7 +85,8 @@ public:
     void stop();
     
     // Thread-safe methods to add/remove sockets.
-    void add_socket(SOCKET s, std::function<void()> on_read, std::function<void()> on_write, std::function<void()> on_close);
+    // Updated: on_read takes data args. is_udp flag added.
+    void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void()> on_write, std::function<void()> on_close, bool is_udp = false);
     void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
     
     // Flow Control
