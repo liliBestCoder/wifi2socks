@@ -2,6 +2,7 @@
 #include "app_config.h"
 #include <cstdio>
 #include <winioctl.h>
+#include <algorithm>
 
 const uint8_t TapDriver::TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C };
 
@@ -10,7 +11,10 @@ TapDriver& TapDriver::instance() {
     return inst;
 }
 
-TapDriver::TapDriver() : m_tap(INVALID_HANDLE_VALUE), m_running(true) {
+TapDriver::TapDriver() 
+    : m_tap(INVALID_HANDLE_VALUE), m_running(true), 
+      m_write_idx(0), m_read_idx(0), m_size(TAP_RING_BUFFER_SIZE) {
+    m_buffer.resize(m_size);
     m_writer_thread = std::thread(&TapDriver::writer_loop, this);
 }
 
@@ -39,18 +43,42 @@ bool TapDriver::init(const char* device_guid) {
 }
 
 void TapDriver::send_async(const uint8_t* buf, int len) {
-    if (len <= 0) return;
+    if (len <= 0 || len > 2000) return; // Basic sanity check, Ethernet MTU is usually 1500
     
-    // Optimization: Copy data and push to queue. Return immediately.
-    // This unblocks the IOCP Worker thread.
     {
-        std::lock_guard<std::mutex> lk(m_queue_mtx);
-        if (m_write_queue.size() > 5000) {
-            // Drop packet if queue is too full (Backpressure)
-            // This prevents memory exhaustion if TAP is stuck
+        std::lock_guard<std::mutex> lock(m_mtx);
+        
+        // Calculate free space
+        size_t free_space = (m_read_idx - m_write_idx - 1 + m_size) % m_size;
+        
+        // Need space for: Length Header (4 bytes) + Data
+        size_t needed = sizeof(int) + len;
+
+        if (free_space < needed) {
+            // Buffer Full: Drop packet to preserve latency (Backpressure)
             return; 
         }
-        m_write_queue.emplace_back(buf, buf + len);
+
+        // A. Write Length Header
+        int packet_len = len;
+        if (m_write_idx + sizeof(int) <= m_size) {
+            memcpy(&m_buffer[m_write_idx], &packet_len, sizeof(int));
+        } else {
+            size_t first = m_size - m_write_idx;
+            memcpy(&m_buffer[m_write_idx], &packet_len, first);
+            memcpy(&m_buffer[0], ((char*)&packet_len) + first, sizeof(int) - first);
+        }
+        m_write_idx = (m_write_idx + sizeof(int)) % m_size;
+
+        // B. Write Packet Data
+        if (m_write_idx + len <= m_size) {
+            memcpy(&m_buffer[m_write_idx], buf, len);
+        } else {
+            size_t first = m_size - m_write_idx;
+            memcpy(&m_buffer[m_write_idx], buf, first);
+            memcpy(&m_buffer[0], buf + first, len - first);
+        }
+        m_write_idx = (m_write_idx + len) % m_size;
     }
     m_cv.notify_one();
 }
@@ -63,20 +91,47 @@ void TapDriver::writer_loop() {
     
     if (!ol.hEvent) return;
 
+    // Local buffer for writing to API
+    uint8_t local_buf[2048]; 
+
     while (m_running) {
-        std::vector<uint8_t> packet;
+        int len = 0;
         
         {
-            std::unique_lock<std::mutex> lk(m_queue_mtx);
-            m_cv.wait(lk, [this]() { return !m_write_queue.empty() || !m_running; });
+            std::unique_lock<std::mutex> lock(m_mtx);
+            m_cv.wait(lock, [this]() { return m_read_idx != m_write_idx || !m_running; });
             
-            if (!m_running && m_write_queue.empty()) break;
-            
-            packet = std::move(m_write_queue.front());
-            m_write_queue.pop_front();
-        }
-        
-        if (m_tap != INVALID_HANDLE_VALUE && !packet.empty()) {
+            if (!m_running && m_read_idx == m_write_idx) break;
+
+            if (m_read_idx != m_write_idx) {
+                // A. Read Length Header
+                if (m_read_idx + sizeof(int) <= m_size) {
+                    memcpy(&len, &m_buffer[m_read_idx], sizeof(int));
+                } else {
+                    size_t first = m_size - m_read_idx;
+                    memcpy(&len, &m_buffer[m_read_idx], first);
+                    memcpy(((char*)&len) + first, &m_buffer[0], sizeof(int) - first);
+                }
+                m_read_idx = (m_read_idx + sizeof(int)) % m_size;
+
+                // Safety clamp
+                if (len > sizeof(local_buf)) len = sizeof(local_buf);
+
+                // B. Read Data
+                if (len > 0) {
+                    if (m_read_idx + len <= m_size) {
+                        memcpy(local_buf, &m_buffer[m_read_idx], len);
+                    } else {
+                        size_t first = m_size - m_read_idx;
+                        memcpy(local_buf, &m_buffer[m_read_idx], first);
+                        memcpy(local_buf + first, &m_buffer[0], len - first);
+                    }
+                    m_read_idx = (m_read_idx + len) % m_size;
+                }
+            }
+        } // Unlock immediately to let Worker write more packets
+
+        if (m_tap != INVALID_HANDLE_VALUE && len > 0) {
             DWORD written = 0;
             // Reset Overlapped
             ol.Internal = 0;
@@ -85,9 +140,9 @@ void TapDriver::writer_loop() {
             ol.OffsetHigh = 0;
             ResetEvent(ol.hEvent);
 
-            if (!WriteFile(m_tap, packet.data(), (DWORD)packet.size(), &written, &ol)) {
+            if (!WriteFile(m_tap, local_buf, len, &written, &ol)) {
                 if (GetLastError() == ERROR_IO_PENDING) {
-                    WaitForSingleObject(ol.hEvent, 1000); // Wait here is fine, this is the dedicated writer thread
+                    WaitForSingleObject(ol.hEvent, 1000); 
                 }
             }
         }
