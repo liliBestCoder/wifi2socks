@@ -4,6 +4,11 @@
 #include <windows.h>
 #include <cstdint>
 #include <mutex>
+#include <deque>
+#include <vector>
+#include <thread>
+#include <condition_variable>
+#include <atomic>
 
 class TapDriver {
 public:
@@ -17,6 +22,16 @@ public:
     static const uint8_t TAP_MAC[6];
     
 private:
+    TapDriver();
+    ~TapDriver();
+    void writer_loop();
+
     HANDLE m_tap;
-    std::mutex m_write_mtx;
+    
+    // Asynchronous Write Queue
+    std::mutex m_queue_mtx;
+    std::deque<std::vector<uint8_t>> m_write_queue;
+    std::condition_variable m_cv;
+    std::atomic<bool> m_running;
+    std::thread m_writer_thread;
 };

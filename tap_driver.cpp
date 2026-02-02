@@ -10,6 +10,21 @@ TapDriver& TapDriver::instance() {
     return inst;
 }
 
+TapDriver::TapDriver() : m_tap(INVALID_HANDLE_VALUE), m_running(true) {
+    m_writer_thread = std::thread(&TapDriver::writer_loop, this);
+}
+
+TapDriver::~TapDriver() {
+    m_running = false;
+    m_cv.notify_all();
+    if (m_writer_thread.joinable()) {
+        m_writer_thread.join();
+    }
+    if (m_tap != INVALID_HANDLE_VALUE) {
+        CloseHandle(m_tap);
+    }
+}
+
 bool TapDriver::init(const char* device_guid) {
     char devicePath[256];
     sprintf_s(devicePath, sizeof(devicePath), TAP_WIN_PATH, device_guid);
@@ -24,16 +39,59 @@ bool TapDriver::init(const char* device_guid) {
 }
 
 void TapDriver::send_async(const uint8_t* buf, int len) {
-    if (len <= 0 || m_tap == INVALID_HANDLE_VALUE) return;
-    std::lock_guard<std::mutex> lk(m_write_mtx);
+    if (len <= 0) return;
+    
+    // Optimization: Copy data and push to queue. Return immediately.
+    // This unblocks the IOCP Worker thread.
+    {
+        std::lock_guard<std::mutex> lk(m_queue_mtx);
+        if (m_write_queue.size() > 5000) {
+            // Drop packet if queue is too full (Backpressure)
+            // This prevents memory exhaustion if TAP is stuck
+            return; 
+        }
+        m_write_queue.emplace_back(buf, buf + len);
+    }
+    m_cv.notify_one();
+}
+
+void TapDriver::writer_loop() {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    
     OVERLAPPED ol = {0};
     ol.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    
     if (!ol.hEvent) return;
-    DWORD written = 0;
-    if (!WriteFile(m_tap, buf, len, &written, &ol)) {
-        if (GetLastError() == ERROR_IO_PENDING) {
-            WaitForSingleObject(ol.hEvent, 1000); 
+
+    while (m_running) {
+        std::vector<uint8_t> packet;
+        
+        {
+            std::unique_lock<std::mutex> lk(m_queue_mtx);
+            m_cv.wait(lk, [this]() { return !m_write_queue.empty() || !m_running; });
+            
+            if (!m_running && m_write_queue.empty()) break;
+            
+            packet = std::move(m_write_queue.front());
+            m_write_queue.pop_front();
+        }
+        
+        if (m_tap != INVALID_HANDLE_VALUE && !packet.empty()) {
+            DWORD written = 0;
+            // Reset Overlapped
+            ol.Internal = 0;
+            ol.InternalHigh = 0;
+            ol.Offset = 0;
+            ol.OffsetHigh = 0;
+            ResetEvent(ol.hEvent);
+
+            if (!WriteFile(m_tap, packet.data(), (DWORD)packet.size(), &written, &ol)) {
+                if (GetLastError() == ERROR_IO_PENDING) {
+                    WaitForSingleObject(ol.hEvent, 1000); // Wait here is fine, this is the dedicated writer thread
+                }
+            }
         }
     }
+    
     CloseHandle(ol.hEvent);
 }
