@@ -267,24 +267,38 @@ std::string GeoChecker::query_ip(const std::string& ip_bytes) {
     return "UNKNOWN";
 }
 
-bool GeoChecker::is_cn_ip(const std::string& ip_bytes) {
-    if (ip_bytes.size() != 4 || cn_ip_idx_ == UINT16_MAX) return false;
+bool is_common_cn_range(uint32_t ip) {
+    // 112.0.0.0/8 主要是中国
+    if ((ip >> 24) == 112) return true;
+    // 223.x.x.x 主要是中国
+    if ((ip >> 24) == 223) return true;
+    // 36.x.x.x 主要是中国
+    if ((ip >> 24) == 36) return true;
+    return false;
+}
 
-    uint32_t ip = ntohl(*reinterpret_cast<const uint32_t*>(ip_bytes.data()));
+bool GeoChecker::is_cn_ip(uint32_t ip_host) {
+    if (cn_ip_idx_ == UINT16_MAX) return false;
 
     auto it = std::lower_bound(
         ip_ranges_.begin(),
         ip_ranges_.end(),
-        ip,
+        ip_host,
         [](const GeoIPRange& r, uint32_t val) {
             return r.end_ip < val;
         }
     );
 
-    if (it == ip_ranges_.end()) return false;
+    if (it == ip_ranges_.end() || ip_host < it->start_ip || ip_host > it->end_ip) {
+        // 回退：检查是否是中国常见大段（移动/联通/电信）
+        if (is_common_cn_range(ip_host)) {
+            return true;
+        }
+        return false;  // 未知 IP 默认走代理
+    }
 
-    return ip >= it->start_ip &&
-        ip <= it->end_ip &&
+    return ip_host >= it->start_ip &&
+        ip_host <= it->end_ip &&
         it->code_index == cn_ip_idx_;
 }
 

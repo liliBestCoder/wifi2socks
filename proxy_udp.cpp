@@ -540,9 +540,9 @@ void udp_check_timeouts() {
 
 // Helper: Forward UDP packet directly
 void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
-    // LOG_DEBUG("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
-    //    src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
-    //    dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
+     LOG_INFO("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
+        src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
+        dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
 
     uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
     Worker* w = WorkerPool::instance().get_worker(hash);
@@ -575,7 +575,7 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
             u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);
 
             // Optimization: Increase UDP Buffer for Video/Streaming
-            int buf_size = 1024 * 1024; // 1MB
+            int buf_size = 512 * 1024; // 1MB
             setsockopt(sess->udp_sock, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
             setsockopt(sess->udp_sock, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
             
@@ -613,23 +613,22 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         dport_h == 5355 ||  // LLMNR
         dport_h == 137 ||   // NetBIOS Name Service
         dport_h == 138 ||   // NetBIOS Datagram Service
-        dport_h == 1900) {  // SSDP (UPnP)
+        dport_h == 1900 ||  // SSDP (UPnP)
+        // NTP
+        dport_h == 123 ) {  
         return; // Drop immediately
     }
 
     // 1. UDP 443 (QUIC) Optimization
     if (dst_port == htons(443)) {
-        std::string ip_bytes((char*)&dst_ip, 4);
-        std::string country = GeoChecker::instance().query_ip(ip_bytes);
-        
+        bool cn = GeoChecker::instance().is_cn_ip(ntohl(dst_ip));
         // 如果 IP 属于 Google 或者是国外已知服务，可以进一步判定
         // 这里根据需求：如果是 Google 则 drop
-        if (country == "GOOGLE") {
+        if (!cn) {
             LOG_INFO("[UDP] Blocked Google QUIC: %d.%d.%d.%d:443\n", 
                 dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF);
             return;
         }
-
         // 尝试解析域名（QUIC SNI 探测较为复杂，这里先以 IP 判定为主，后续可扩展）
         // 如果不属于 Google，则走直连逻辑
         forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);

@@ -40,7 +40,7 @@ public:
     // --------- IP 查询 ----------
     // ip_bytes 应当为 4 字节的二进制字符串（网络字节序）
     std::string query_ip(const std::string& ip_bytes);
-    bool is_cn_ip(const std::string& ip_bytes);
+    bool is_cn_ip(const uint32_t ip_host);
 
     // --------- 域名查询 ----------
     std::string query_domain(const std::string& domain);

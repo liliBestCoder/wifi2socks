@@ -173,8 +173,8 @@ void handle_proxy_read(TcpCtx* ctx) {
     
     if (r > 0) {
         LOG_DEBUG("[TCP] Recv %d bytes: %d.%d.%d.%d:%d <- %d.%d.%d.%d:%d\n", r,
-            ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
-            ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
+            ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ntohs(ctx->client_port),
+            ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
         std::vector<uint8_t> data(read_buf.begin(), read_buf.begin() + r);
         
         MainDispatcher::instance().queue_task([ctx, d = std::move(data)]() mutable {
@@ -206,8 +206,8 @@ void handle_handshake_read(TcpCtx* ctx) {
             std::string header = s.substr(0, header_end);
             if (header.find("200") != std::string::npos) {
                 LOG_INFO("[TCP] Proxy Tunnel Established: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
-                    ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
-                    ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
+                    ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ntohs(ctx->client_port),
+                    ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
                 
                 {
                     std::lock_guard<std::mutex> lock(ctx->data_mtx);
@@ -255,8 +255,8 @@ void handle_handshake_read(TcpCtx* ctx) {
                 );
             } else {
                 LOG_INFO("[TCP] Handshake Rejected: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
-                    ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
-                    ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
+                    ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ntohs(ctx->client_port),
+                    ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
                 close_tcp_ctx(ctx);
             }
         } else { 
@@ -283,8 +283,8 @@ void handle_proxy_connect(TcpCtx* ctx) {
 
     if (ctx->is_direct) {
         LOG_INFO("[TCP] Direct Tunnel Established: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
-            ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
-            ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
+            ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ntohs(ctx->client_port),
+            ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
         
         {
             std::lock_guard<std::mutex> lock(ctx->data_mtx);
@@ -305,25 +305,22 @@ void handle_proxy_connect(TcpCtx* ctx) {
         return;
     }
 
-    std::string sni = ctx->detected_domain;
+    uint32_t ip = ctx->target.original_dst_ip;
 
+    std::string sni = ctx->detected_domain;
+    std::string ip_str = std::to_string(ip & 0xFF) + "." +
+        std::to_string((ip >> 8) & 0xFF) + "." +
+        std::to_string((ip >> 16) & 0xFF) + "." +
+        std::to_string((ip >> 24) & 0xFF);
+
+    std::string host = !sni.empty() ? sni : ip_str;
+    std::string host_print = !sni.empty() ? "SNI/HOST: " + sni : "IP: " + ip_str;
     char cmd[1024];
     uint16_t port = ntohs(ctx->target.original_dst_port);
 
-    if (!sni.empty()) {
-        LOG_INFO("[TCP] SNI: %s (%d.%d.%d.%d:%d)\n", sni.c_str(),
-            ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
-        sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", sni.c_str(), port, sni.c_str(), port);
-    } else {
-        uint32_t ip = ctx->target.original_dst_ip;
-        char ip_buf[32];
-        sprintf_s(ip_buf, "%d.%d.%d.%d", 
-            ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
-        // Direct CONNECT to IP
-        //LOG_INFO("[TCP] No SNI detected. Proxying to IP: %s:%d (%d.%d.%d.%d:%d)\n", ip_buf, port,
-        //     ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port);
-        sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", ip_buf, port, ip_buf, port);
-    }
+    LOG_INFO("[TCP] SNI/HOST: %s (%d.%d.%d.%d:%d)\n", host_print.c_str(),
+        ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ntohs(ctx->client_port));
+    sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", host.c_str(), port, host.c_str(), port);
     
     int sent = send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
     if (sent == SOCKET_ERROR) {
@@ -395,8 +392,8 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
 
     if (p->tot_len > 0) {
         LOG_DEBUG("[TCP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", p->tot_len,
-            ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ctx->client_port,
-            ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ctx->target.original_dst_port);
+            ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ntohs(ctx->client_port),
+            ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
     }
 
     if (ctx->connected && ctx->worker) {
@@ -487,8 +484,12 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
                         }
                     }
                 } else {
-                    // 如果没提取到域名，保留在 tcp_proxy_accept 中根据 IP 做的初始判定
-                    LOG_DEBUG("[TCP] No SNI/Host detected. Using IP-based decision (is_direct: %s)\n", ctx->is_direct ? "true" : "false");
+                    uint32_t ip = ctx->target.original_dst_ip;
+                    std::string ip_str = std::to_string(ip & 0xFF) + "." +
+                        std::to_string((ip >> 8) & 0xFF) + "." +
+                        std::to_string((ip >> 16) & 0xFF) + "." +
+                        std::to_string((ip >> 24) & 0xFF);
+                    LOG_DEBUG("[TCP] No SNI/Host detected. Using IP-based decision (is_direct: %s) (ip: %s) \n", ctx->is_direct ? "true" : "false", ip_str.c_str());
                 }
                 connect_to_proxy_async(ctx);
             }
@@ -510,8 +511,7 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     ctx->client_port = newpcb->remote_port;
 
     // IP Bypass Check
-    std::string ip_bytes((char*)&target.original_dst_ip, 4);
-    if (GeoChecker::instance().is_cn_ip(ip_bytes)) {
+    if (GeoChecker::instance().is_cn_ip(ntohl(target.original_dst_ip))) {
         ctx->is_direct = true;
         LOG_INFO("[TCP] IP Detected: %d.%d.%d.%d. Direct.\n",
             target.original_dst_ip & 0xFF, (target.original_dst_ip >> 8) & 0xFF, 
