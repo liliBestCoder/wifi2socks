@@ -9,13 +9,13 @@ AsyncLogger& AsyncLogger::instance() {
 }
 
 AsyncLogger::AsyncLogger() : m_running(true) {
-    m_thread = std::thread(&AsyncLogger::writer_loop, this);
+    m_writer_thread = std::thread(&AsyncLogger::writer_loop, this);
 }
 
 AsyncLogger::~AsyncLogger() {
     m_running = false;
     m_cv.notify_all();
-    if (m_thread.joinable()) m_thread.join();
+    if (m_writer_thread.joinable()) m_writer_thread.join();
 }
 
 void AsyncLogger::log(const char* fmt, ...) {
