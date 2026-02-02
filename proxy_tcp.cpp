@@ -318,7 +318,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
     char cmd[1024];
     uint16_t port = ntohs(ctx->target.original_dst_port);
 
-    LOG_INFO("[TCP] SNI/HOST: %s (%d.%d.%d.%d:%d)\n", host_print.c_str(),
+    LOG_INFO("[TCP] %s (%d.%d.%d.%d:%d)\n", host_print.c_str(),
         ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ntohs(ctx->client_port));
     sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", host.c_str(), port, host.c_str(), port);
     
