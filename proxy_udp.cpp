@@ -155,7 +155,7 @@ void close_udp_session_internal(UdpSession* sess) {
 void handle_udp_direct_read(UdpSession* sess) {
     if (sess->state == UdpSession::CLOSED) return;
     
-    char buf[256];
+    char buf[4096];
     sockaddr_in remote_addr;
     int addr_len = sizeof(remote_addr);
     int r = recvfrom(sess->udp_sock, buf, sizeof(buf), 0, (sockaddr*)&remote_addr, &addr_len);
@@ -167,7 +167,7 @@ void handle_udp_direct_read(UdpSession* sess) {
             src_ip_net & 0xFF, (src_ip_net >> 8) & 0xFF, (src_ip_net >> 16) & 0xFF, (src_ip_net >> 24) & 0xFF, ntohs(remote_addr.sin_port),
             sess->src_ip & 0xFF, (sess->src_ip >> 8) & 0xFF, (sess->src_ip >> 16) & 0xFF, (sess->src_ip >> 24) & 0xFF, ntohs(sess->src_port));
 
-        uint8_t frame[256 + 100];
+        uint8_t frame[4096 + 100];
         if (14 + 20 + 8 + r > sizeof(frame)) return; 
 
         memcpy(frame, HOST_MAC, 6);
@@ -201,7 +201,10 @@ void handle_udp_direct_read(UdpSession* sess) {
         sess->last_active = GetTickCount64();
         TapDriver::instance().send_async(frame, 14 + 20 + 8 + r);
     } else {
-        // Can't read? 
+        int err = WSAGetLastError();
+        if (err != WSAEWOULDBLOCK) {
+             LOG_INFO("[UDP] recvfrom failed: %d\n", err);
+        }
     }
 }
 
@@ -600,9 +603,25 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
                 }
             }
 
-            u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);
+                        u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);
 
-            // Optimization 2: Increase UDP Buffer for Video/Streaming (Correct 1MB)
+                        // Fix: Disable WSAECONNRESET to prevent UDP socket from dying on ICMP errors
+
+                        #ifndef SIO_UDP_CONNRESET
+
+                        #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+
+                        #endif
+
+                        BOOL bNewBehavior = FALSE;
+
+                        DWORD dwBytesReturned = 0;
+
+                        WSAIoctl(sess->udp_sock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
+
+            
+
+                        // Optimization 2: Increase UDP Buffer for Video/Streaming (Correct 1MB)
             int buf_size = 1024 * 1024; 
             setsockopt(sess->udp_sock, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
             setsockopt(sess->udp_sock, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
