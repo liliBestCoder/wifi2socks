@@ -161,6 +161,12 @@ void handle_udp_direct_read(UdpSession* sess) {
     int r = recvfrom(sess->udp_sock, buf, sizeof(buf), 0, (sockaddr*)&remote_addr, &addr_len);
     
     if (r > 0) {
+        // Log incoming packet (Debug)
+        uint32_t src_ip_net = remote_addr.sin_addr.S_un.S_addr;
+        LOG_INFO("[UDP] Recv %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", r,
+            src_ip_net & 0xFF, (src_ip_net >> 8) & 0xFF, (src_ip_net >> 16) & 0xFF, (src_ip_net >> 24) & 0xFF, ntohs(remote_addr.sin_port),
+            sess->src_ip & 0xFF, (sess->src_ip >> 8) & 0xFF, (sess->src_ip >> 16) & 0xFF, (sess->src_ip >> 24) & 0xFF, ntohs(sess->src_port));
+
         uint8_t frame[256 + 100];
         if (14 + 20 + 8 + r > sizeof(frame)) return; 
 
