@@ -132,6 +132,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="wifi2socks.cpp" />
+    <ClCompile Include="logger.cpp" />
     <ClCompile Include="common.pb.cc" />
     <ClCompile Include="worker.cpp" />
     <ClCompile Include="nat_table.cpp" />
@@ -177,6 +178,7 @@
     <ClInclude Include="utils.h" />
     <ClInclude Include="worker.h" />
     <ClInclude Include="app_config.h" />
+    <ClInclude Include="logger.h" />
     <ClInclude Include="nat_table.h" />
     <ClInclude Include="tls_parser.h" />
     <ClInclude Include="tap_driver.h" />
