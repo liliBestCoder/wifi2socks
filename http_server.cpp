@@ -187,14 +187,16 @@ std::string SimpleHttpServer::handle_rules_get() {
 
     auto list_to_json = [](const std::string& name, const std::vector<std::string>& list) {
         std::stringstream s;
-        s << \"" << name << "\":[";
+        // Output: "name":[
+        s << \"" << name << \"":[";
         for (size_t i = 0; i < list.size(); ++i) {
+            // Output: "item"
             s << \"" << list[i] << \""";
             if (i < list.size() - 1) s << ",";
         }
         s << "]";
         return s.str();
-    };
+        };
 
     ss << list_to_json("direct_ip", g_config.direct_ip_list) << ",";
     ss << list_to_json("direct_domain", g_config.direct_domain_list) << ",";
@@ -209,7 +211,8 @@ std::string SimpleHttpServer::handle_rules_get() {
 
 std::vector<std::string> SimpleHttpServer::json_parse_list(const std::string& json, const std::string& key) {
     std::vector<std::string> res;
-    std::string pattern = \"" + key + \"\";
+    // Match "key"
+    std::string pattern = \"" + key + \""";
     size_t key_pos = json.find(pattern);
     if (key_pos == std::string::npos) return res;
 
@@ -342,6 +345,7 @@ std::string SimpleHttpServer::handle_logs_get() {
 
         std::string escaped;
         for (char c : line) {
+            // Escape quote and backslash
             if (c == '"') escaped += "\\\"";
             else if (c == '\\') escaped += "\\\\";
             else escaped += c;

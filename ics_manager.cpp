@@ -4,109 +4,15 @@
 
 using namespace Microsoft::WRL;
 
-// --- Manual Definitions for Missing HNetCfg.h / NetCon.h definitions ---
-
-// Define the CLSID if not available
+// Check if CLSID_NetSharingManager is defined
 const CLSID CLSID_NetSharingManager = { 0x5C63C1AD, 0x3956, 0x4FF8, { 0x84, 0x86, 0x40, 0x03, 0x47, 0x58, 0x31, 0x5B } };
-
-// Define the Enum
-typedef enum tagSHARING_CONNECTION_TYPE {
-    ICSSHARINGTYPE_PUBLIC = 0,
-    ICSSHARINGTYPE_PRIVATE = 1
-} SHARING_CONNECTION_TYPE;
-
-// Forward declarations of interfaces
-struct INetSharingPortMappingCollection;
-struct INetSharingPortMapping;
-struct INetConnectionProps;
-
-// Define INetSharingConfiguration Interface
-MIDL_INTERFACE("F4217D55-1CD3-11D1-B1C5-00805FC1270E")
-INetSharingConfiguration : public IDispatch
-{
-public:
-    virtual HRESULT STDMETHODCALLTYPE get_EnumPortMappings(
-        /* [in] */ SHARING_CONNECTION_TYPE Flags,
-        /* [retval][out] */ INetSharingPortMappingCollection **ppColl) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE AddPortMapping(
-        /* [in] */ BSTR bstrName,
-        /* [in] */ unsigned char ucIPProtocol,
-        /* [in] */ unsigned short usExternalPort,
-        /* [in] */ unsigned short usInternalPort,
-        /* [in] */ DWORD dwOptions,
-        /* [in] */ BSTR bstrTargetNameOrIPAddress,
-        /* [in] */ BSTR bstrTargetPortName,
-        /* [retval][out] */ INetSharingPortMapping **ppMapping) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE RemovePortMapping(
-        /* [in] */ INetSharingPortMapping *pMapping) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE get_SharingEnabled(
-        /* [retval][out] */ VARIANT_BOOL *pbEnabled) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE get_SharingConnectionType(
-        /* [retval][out] */ SHARING_CONNECTION_TYPE *pType) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE DisableSharing( void) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE EnableSharing(
-        /* [in] */ SHARING_CONNECTION_TYPE Type) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE get_InternetFirewallEnabled(
-        /* [retval][out] */ VARIANT_BOOL *pbEnabled) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE DisableInternetFirewall( void) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE EnableInternetFirewall( void) = 0;
-};
-
-// Define INetSharingEveryConnectionCollection Interface
-MIDL_INTERFACE("33C56D62-1CD3-11D1-B1C5-00805FC1270E")
-INetSharingEveryConnectionCollection : public IDispatch
-{
-public:
-    virtual HRESULT STDMETHODCALLTYPE get__NewEnum(
-        /* [retval][out] */ IUnknown **pVal) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE get_Count(
-        /* [retval][out] */ long *pVal) = 0;
-};
-
-// Define INetSharingManager Interface
-MIDL_INTERFACE("C08956B7-1CD3-11D1-B1C5-00805FC1270E")
-INetSharingManager : public IDispatch
-{
-public:
-    virtual HRESULT STDMETHODCALLTYPE get_SharingInstalled(
-        /* [retval][out] */ VARIANT_BOOL *pbInstalled) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE get_EnumPublicConnections(
-        /* [in] */ SHARING_CONNECTION_TYPE Flags,
-        /* [retval][out] */ /*INetSharingPublicConnectionCollection*/ IUnknown **ppColl) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE get_EnumPrivateConnections(
-        /* [in] */ SHARING_CONNECTION_TYPE Flags,
-        /* [retval][out] */ /*INetSharingPrivateConnectionCollection*/ IUnknown **ppColl) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE get_INetSharingConfigurationForINetConnection(
-        /* [in] */ INetConnection *pNetConnection,
-        /* [retval][out] */ INetSharingConfiguration **ppNetSharingConfiguration) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE get_EnumEveryConnection(
-        /* [retval][out] */ INetSharingEveryConnectionCollection **ppColl) = 0;
-    
-    virtual HRESULT STDMETHODCALLTYPE get_NetConnectionProps(
-        /* [in] */ INetConnection *pNetConnection,
-        /* [retval][out] */ INetConnectionProps **ppProps) = 0;
-};
-
-// --- Implementation ---
 
 bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wstring& privateAdapterDesc) {
     HRESULT hr;
     
-    // Create the NetSharingManager
+    // Initialize COM if not already (Caller usually does, but we can check or just call CoCreate)
+    // Since Main uses RoInitialize(RO_INIT_MULTITHREADED), we are in MTA.
+    
     ComPtr<INetSharingManager> pNSM;
     hr = CoCreateInstance(CLSID_NetSharingManager, NULL, CLSCTX_ALL, __uuidof(INetSharingManager), &pNSM);
     if (FAILED(hr)) {
@@ -114,7 +20,6 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
         return false;
     }
 
-    // Get the collection of all connections
     ComPtr<INetSharingEveryConnectionCollection> pEveryConnectionCollection;
     hr = pNSM->get_EnumEveryConnection(&pEveryConnectionCollection);
     if (FAILED(hr)) {
@@ -122,14 +27,8 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
         return false;
     }
 
-    // Get the enumerator
     ComPtr<IEnumVARIANT> pEnum;
-    // get__NewEnum returns IUnknown, need to QueryInterface for IEnumVARIANT
-    ComPtr<IUnknown> pUnkEnum;
-    hr = pEveryConnectionCollection->get__NewEnum(&pUnkEnum);
-    if (FAILED(hr)) return false;
-    
-    hr = pUnkEnum.As(&pEnum);
+    hr = pEveryConnectionCollection->get__NewEnum(&pEnum);
     if (FAILED(hr)) return false;
 
     VARIANT v;
@@ -138,7 +37,6 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
     ComPtr<INetConnection> pPublicConn;
     ComPtr<INetConnection> pPrivateConn;
 
-    // Iterate through connections
     while (pEnum->Next(1, &v, NULL) == S_OK) {
         if (v.vt != VT_UNKNOWN && v.vt != VT_DISPATCH) {
             VariantClear(&v);
@@ -158,13 +56,12 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
         std::wstring name = pProps->pszwName;
         std::wstring desc = pProps->pszwDeviceName; 
 
-        // Check for Public Adapter (TUN)
+        // std::wcout << L"Scanning: " << name << L" (" << desc << L") Status:" << pProps->Status << std::endl;
+
         if (name == publicAdapterName) {
             pPublicConn = pConnection;
         }
-        // Check for Private Adapter (WiFi)
         else if (desc.find(privateAdapterDesc) != std::wstring::npos) {
-            // Only use if connected (WiFi AP must be started)
             if (pProps->Status == NCS_CONNECTED) {
                 pPrivateConn = pConnection;
             }
@@ -187,15 +84,13 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
     }
 
     // Enable Shared-Public on Public Connection
-    // Pass '0' for ICSSHARINGTYPE_PUBLIC
-    if (!SetConnectionSharing(pNSM.Get(), pPublicConn.Get(), 0)) {
+    if (!SetConnectionSharing(pNSM.Get(), pPublicConn.Get(), 0)) { // 0 = ICSSHARINGTYPE_PUBLIC
         std::wcerr << L"Failed to enable Public Sharing on " << publicAdapterName << std::endl;
         return false;
     }
 
     // Enable Shared-Private on Private Connection
-    // Pass '1' for ICSSHARINGTYPE_PRIVATE
-    if (!SetConnectionSharing(pNSM.Get(), pPrivateConn.Get(), 1)) {
+    if (!SetConnectionSharing(pNSM.Get(), pPrivateConn.Get(), 1)) { // 1 = ICSSHARINGTYPE_PRIVATE
         std::wcerr << L"Failed to enable Private Sharing on WiFi adapter" << std::endl;
         return false;
     }
@@ -211,10 +106,19 @@ bool IcsManager::SetConnectionSharing(INetSharingManager* pNSM, INetConnection* 
     hr = pNSM->get_INetSharingConfigurationForINetConnection(pConnection, &pConfig);
     if (FAILED(hr)) return false;
 
-    // Force enable sharing with the specified type
+    // Check if already enabled
+    // SHARING_CONNECTION_TYPE currentType;
+    // VARIANT_BOOL enabled;
+    // pConfig->get_SharingEnabled(&enabled);
+    // pConfig->get_SharingConnectionType(&currentType);
+    
+    // Force enable
+    // SHARING_CONNECTION_TYPE is an enum, simple cast to int works for COM methods usually
     hr = pConfig->EnableSharing((SHARING_CONNECTION_TYPE)type);
     if (FAILED(hr)) {
-        std::wcerr << L"EnableSharing failed with hr=" << std::hex << hr << std::endl;
+        // It might return S_FALSE if already enabled, but usually returns error if something conflicts
+        // If hr == 0x80070032 (Not supported), etc.
+        // std::wcerr << L"EnableSharing type " << type << L" failed: " << std::hex << hr << std::endl;
         return false;
     }
     return true;
