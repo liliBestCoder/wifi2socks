@@ -138,7 +138,7 @@ bool TunDriver::set_ip(const char* ip, const char* mask, const char* gateway) {
     // 1. Parse IP
     MIB_UNICASTIPADDRESS_ROW ipRow;
     InitializeUnicastIpAddressEntry(&ipRow);
-    ipRow.InterfaceLuid = luid;
+    ipRow.InterfaceLuid.Value = ((ULONG64)luid.HighPart << 32) | luid.LowPart;
     ipRow.Address.si_family = AF_INET;
     
     if (inet_pton(AF_INET, ip, &ipRow.Address.Ipv4.sin_addr) != 1) {
@@ -166,7 +166,7 @@ bool TunDriver::set_ip(const char* ip, const char* mask, const char* gateway) {
     if (gateway && strlen(gateway) > 0) {
         MIB_IPFORWARD_ROW2 routeRow;
         InitializeIpForwardEntry(&routeRow);
-        routeRow.InterfaceLuid = luid;
+        routeRow.InterfaceLuid.Value = ((ULONG64)luid.HighPart << 32) | luid.LowPart;
         routeRow.DestinationPrefix.Prefix.si_family = AF_INET;
         routeRow.DestinationPrefix.PrefixLength = 0; // 0.0.0.0/0
         routeRow.NextHop.si_family = AF_INET;
