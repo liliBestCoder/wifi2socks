@@ -31,6 +31,7 @@
 #define LWIP_ETHERNET                   1
 #define LWIP_IPV4                       1
 #define IP_FORWARD                      0
+#define ETHARP_SUPPORT_STATIC_ENTRIES   1
 
 // --- 5. OPTIMIZATIONS ---
 #define CHECKSUM_CHECK_IP               0
