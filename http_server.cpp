@@ -183,36 +183,36 @@ std::string SimpleHttpServer::handle_stats() {
 
 std::string SimpleHttpServer::handle_rules_get() {
     std::stringstream ss;
-    ss << "{";
+    ss << '{';
 
     auto list_to_json = [](const std::string& name, const std::vector<std::string>& list) {
         std::stringstream s;
-        // Output: "name":[
-        s << \"" << name << \"":[";
+        // Construct: "name":[
+        s << '"' << name << '"' << ':' << '[';
         for (size_t i = 0; i < list.size(); ++i) {
-            // Output: "item"
-            s << \"" << list[i] << \""";
-            if (i < list.size() - 1) s << ",";
+            // Construct: "item"
+            s << '"' << list[i] << '"';
+            if (i < list.size() - 1) s << ',';
         }
-        s << "]";
+        s << ']';
         return s.str();
-        };
+    };
 
-    ss << list_to_json("direct_ip", g_config.direct_ip_list) << ",";
-    ss << list_to_json("direct_domain", g_config.direct_domain_list) << ",";
-    ss << list_to_json("block_ip", g_config.block_ip_list) << ",";
-    ss << list_to_json("block_domain", g_config.block_domain_list) << ",";
-    ss << list_to_json("proxy_ip", g_config.proxy_ip_list) << ",";
+    ss << list_to_json("direct_ip", g_config.direct_ip_list) << ',';
+    ss << list_to_json("direct_domain", g_config.direct_domain_list) << ',';
+    ss << list_to_json("block_ip", g_config.block_ip_list) << ',';
+    ss << list_to_json("block_domain", g_config.block_domain_list) << ',';
+    ss << list_to_json("proxy_ip", g_config.proxy_ip_list) << ',';
     ss << list_to_json("proxy_domain", g_config.proxy_domain_list);
 
-    ss << "}";
+    ss << '}';
     return ss.str();
 }
 
 std::vector<std::string> SimpleHttpServer::json_parse_list(const std::string& json, const std::string& key) {
     std::vector<std::string> res;
     // Match "key"
-    std::string pattern = \"" + key + \""";
+    std::string pattern = "\"" + key + "\"";
     size_t key_pos = json.find(pattern);
     if (key_pos == std::string::npos) return res;
 
@@ -334,27 +334,26 @@ std::string SimpleHttpServer::handle_logs_get() {
     m_last_log_pos = current_size;
 
     std::stringstream ss;
-    ss << "[";
+    ss << '[';
     std::stringstream content_ss(new_content);
     std::string line;
     bool first = true;
     while (std::getline(content_ss, line)) {
         if (line.empty()) continue;
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (!first) ss << ",";
+        if (!first) ss << ',';
 
         std::string escaped;
         for (char c : line) {
-            // Escape quote and backslash
             if (c == '"') escaped += "\\\"";
-            else if (c == '\\') escaped += "\\\\";
+            else if (c == '\\') escaped += "\\";// Corrected: escaped += "\\\\";
             else escaped += c;
         }
 
-        ss << "\"" << escaped << "\"";
+        ss << '"' << escaped << '"';
         first = false;
     }
-    ss << "]";
+    ss << ']';
 
     return ss.str();
 }
