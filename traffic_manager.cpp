@@ -56,10 +56,10 @@ void TrafficManager::speed_loop() {
 std::string TrafficManager::get_json_stats() {
     std::stringstream ss;
     ss << "{"
-       << "\"tap\":{\"tx\":" << m_tap_tx_total << "\"rx\":" << m_tap_rx_total
-       << "\"tx_speed\":" << m_tap_tx_speed << "\"rx_speed\":" << m_tap_rx_speed << "},"
-       << "\"proxy\":{\"tx\":" << m_proxy_tx_total << "\"rx\":" << m_proxy_rx_total
-       << "\"tx_speed\":" << m_proxy_tx_speed << "\"rx_speed\":" << m_proxy_rx_speed << "}"
+       << "\"tap\":{\"tx\":" << m_tap_tx_total << ",\"rx\":" << m_tap_rx_total
+       << ",\"tx_speed\":" << m_tap_tx_speed << ",\"rx_speed\":" << m_tap_rx_speed << "},"
+       << "\"proxy\":{\"tx\":" << m_proxy_tx_total << ",\"rx\":" << m_proxy_rx_total
+       << ",\"tx_speed\":" << m_proxy_tx_speed << ",\"rx_speed\":" << m_proxy_rx_speed << "}"
        << "}";
     return ss.str();
 }
