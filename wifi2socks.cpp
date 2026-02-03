@@ -29,6 +29,13 @@ LogLevel g_log_level = LOG_LEVEL_INFO;
 
 // Main Entry Point
 int main() {
+    // 0. Initialize Winsock first!
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        printf("WSAStartup failed.\n");
+        return 1;
+    }
+
     // -1. Load Config
     load_config("config.ini");
     
@@ -52,11 +59,7 @@ int main() {
         return 1;
     }
 
-    // 2. Initialize Winsock
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
-
-    // 3. Initialize Worker Pool
+    // 2. Initialize Worker Pool
     WorkerPool::instance().init(80);
     LOG_INFO("Worker Pool Initialized.\n");
 
