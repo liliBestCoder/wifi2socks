@@ -38,6 +38,7 @@ private:
     
     // API Pointers
     WINTUN_CREATE_ADAPTER_FUNC pWintunCreateAdapter;
+    WINTUN_OPEN_ADAPTER_FUNC pWintunOpenAdapter;
     WINTUN_CLOSE_ADAPTER_FUNC pWintunCloseAdapter;
     WINTUN_START_SESSION_FUNC pWintunStartSession;
     WINTUN_END_SESSION_FUNC pWintunEndSession;

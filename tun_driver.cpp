@@ -51,6 +51,7 @@ bool TunDriver::load_wintun_library() {
     }
 
     pWintunCreateAdapter = (WINTUN_CREATE_ADAPTER_FUNC)GetProcAddress(m_wintun_dll, "WintunCreateAdapter");
+    pWintunOpenAdapter = (WINTUN_OPEN_ADAPTER_FUNC)GetProcAddress(m_wintun_dll, "WintunOpenAdapter");
     pWintunCloseAdapter = (WINTUN_CLOSE_ADAPTER_FUNC)GetProcAddress(m_wintun_dll, "WintunCloseAdapter");
     pWintunStartSession = (WINTUN_START_SESSION_FUNC)GetProcAddress(m_wintun_dll, "WintunStartSession");
     pWintunEndSession = (WINTUN_END_SESSION_FUNC)GetProcAddress(m_wintun_dll, "WintunEndSession");
@@ -60,7 +61,7 @@ bool TunDriver::load_wintun_library() {
     pWintunReceivePacket = (WINTUN_RECEIVE_PACKET_FUNC)GetProcAddress(m_wintun_dll, "WintunReceivePacket");
     pWintunReleaseReceivePacket = (WINTUN_RELEASE_RECEIVE_PACKET_FUNC)GetProcAddress(m_wintun_dll, "WintunReleaseReceivePacket");
 
-    if (!pWintunCreateAdapter || !pWintunStartSession || !pWintunReceivePacket) {
+    if (!pWintunCreateAdapter || !pWintunOpenAdapter || !pWintunStartSession || !pWintunReceivePacket) {
         printf("Failed to resolve Wintun functions.\n");
         return false;
     }
@@ -82,12 +83,19 @@ bool TunDriver::init(const char* device_guid) {
 
     GUID guid = parse_guid(device_guid);
     
-    // Create Adapter
-    // Note: WintunCreateAdapter checks if it exists or creates a new one.
-    // We name it "wifi2socks"
-    m_adapter = pWintunCreateAdapter(L"wifi2socks", L"Tunnel", &guid);
+    // 1. Try to OPEN existing adapter
+    m_adapter = pWintunOpenAdapter(L"wifi2socks");
+    
+    // 2. If not found, CREATE it
     if (!m_adapter) {
-        printf("WintunCreateAdapter failed. LastError: %d\n", GetLastError());
+        printf("Wintun adapter not found, creating...\n");
+        m_adapter = pWintunCreateAdapter(L"wifi2socks", L"Tunnel", &guid);
+    } else {
+        printf("Wintun adapter found, using existing.\n");
+    }
+
+    if (!m_adapter) {
+        printf("Wintun Open/Create adapter failed. LastError: %d\n", GetLastError());
         return false;
     }
 
