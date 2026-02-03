@@ -198,7 +198,7 @@ std::string SimpleHttpServer::handle_rules_get() {
 
 std::vector<std::string> SimpleHttpServer::json_parse_list(const std::string& json, const std::string& key) {
     std::vector<std::string> res;
-    std::string pattern = \"" + key + \""";
+    std::string pattern = \"" + key + "\";
     size_t key_pos = json.find(pattern);
     if (key_pos == std::string::npos) return res;
     
@@ -329,8 +329,8 @@ std::string SimpleHttpServer::handle_logs_get() {
 
         std::string escaped;
         for (char c : line) {
-            if (c == '\"') escaped += "\\\"";
-            else if (c == '\\') escaped += "\\\\";
+            if (c == '"') escaped += "\\\"";
+            else if (c == '\\') escaped += "\\");
             else escaped += c;
         }
 
