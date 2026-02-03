@@ -9,14 +9,6 @@
 
 AppConfig g_config;
 
-// C-linkage globals for LwIP
-extern "C" {
-    uint32_t g_cfg_tcp_wnd = 512 * 1024;
-    uint32_t g_cfg_tcp_snd_buf = 4096 * 1024;
-    uint32_t g_cfg_tcp_mss = 1460;
-    uint32_t g_cfg_tcp_snd_lowat = 32 * 1024;
-}
-
 static std::string trim(const std::string& str) {
     size_t first = str.find_first_not_of(" \t\r\n");
     if (std::string::npos == first) return "";
@@ -41,11 +33,6 @@ bool load_config(const char* filepath) {
     std::ifstream file(filepath);
     if (!file.is_open()) {
         std::cerr << "Config file " << filepath << " not found. Using defaults.\n";
-        // Ensure globals sync with default constructor
-        g_cfg_tcp_wnd = g_config.tcp_wnd;
-        g_cfg_tcp_snd_buf = g_config.tcp_snd_buf;
-        g_cfg_tcp_mss = g_config.tcp_mss;
-        g_cfg_tcp_snd_lowat = g_config.tcp_snd_lowat;
         return false;
     }
 
@@ -70,10 +57,6 @@ bool load_config(const char* filepath) {
             else if (key == "lwip_listen_port") g_config.lwip_listen_port = (uint16_t)std::stoi(value);
             else if (key == "max_sni_len") g_config.max_sni_len = (uint32_t)std::stoul(value);
             else if (key == "http_api_port") g_config.http_api_port = (uint16_t)std::stoi(value);
-            else if (key == "tcp_wnd") g_config.tcp_wnd = (uint32_t)std::stoul(value);
-            else if (key == "tcp_snd_buf") g_config.tcp_snd_buf = (uint32_t)std::stoul(value);
-            else if (key == "tcp_mss") g_config.tcp_mss = (uint32_t)std::stoul(value);
-            else if (key == "tcp_snd_lowat") g_config.tcp_snd_lowat = (uint32_t)std::stoul(value);
             else if (key == "direct_ip_list") g_config.direct_ip_list = split(value, ',');
             else if (key == "direct_domain_list") g_config.direct_domain_list = split(value, ',');
             else if (key == "block_ip_list") g_config.block_ip_list = split(value, ',');
@@ -84,12 +67,6 @@ bool load_config(const char* filepath) {
             std::cerr << "Error parsing config key: " << key << "\n";
         }
     }
-
-    // Update C globals
-    g_cfg_tcp_wnd = g_config.tcp_wnd;
-    g_cfg_tcp_snd_buf = g_config.tcp_snd_buf;
-    g_cfg_tcp_mss = g_config.tcp_mss;
-    g_cfg_tcp_snd_lowat = g_config.tcp_snd_lowat;
 
     return true;
 }
@@ -121,12 +98,6 @@ bool save_config(const char* filepath) {
     file << "lwip_listen_port = " << g_config.lwip_listen_port << "\n";
     file << "max_sni_len = " << g_config.max_sni_len << "\n";
     file << "http_api_port = " << g_config.http_api_port << "\n\n";
-
-    file << "[LwIP]\n";
-    file << "tcp_wnd = " << g_config.tcp_wnd << "\n";
-    file << "tcp_snd_buf = " << g_config.tcp_snd_buf << "\n";
-    file << "tcp_mss = " << g_config.tcp_mss << "\n";
-    file << "tcp_snd_lowat = " << g_config.tcp_snd_lowat << "\n\n";
 
     file << "[Rules]\n";
     file << "direct_ip_list = " << join(g_config.direct_ip_list, ',') << "\n";

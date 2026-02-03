@@ -17,12 +17,6 @@ struct AppConfig {
     uint16_t lwip_listen_port;
     uint32_t max_sni_len;
     uint16_t http_api_port;
-    
-    // LwIP Tuning
-    uint32_t tcp_wnd;
-    uint32_t tcp_snd_buf;
-    uint32_t tcp_mss;
-    uint32_t tcp_snd_lowat;
 
     // Rules (Persisted)
     std::vector<std::string> direct_ip_list;
@@ -45,23 +39,10 @@ struct AppConfig {
         lwip_listen_port = 7000;
         max_sni_len = 4096;
         http_api_port = 8080;
-        
-        tcp_wnd = 512 * 1024;
-        tcp_snd_buf = 4096 * 1024;
-        tcp_mss = 1460;
-        tcp_snd_lowat = 32 * 1024;
     }
 };
 
 extern AppConfig g_config;
-
-// Expose variables for LwIP (C linkage)
-extern "C" {
-    extern uint32_t g_cfg_tcp_wnd;
-    extern uint32_t g_cfg_tcp_snd_buf;
-    extern uint32_t g_cfg_tcp_mss;
-    extern uint32_t g_cfg_tcp_snd_lowat;
-}
 
 // Keep some defines for backward compatibility if needed, or point them to g_config
 // But best to replace usages.
