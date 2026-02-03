@@ -1,7 +1,6 @@
 #include "ics_manager.h"
 #include <iostream>
 #include <vector>
-// #include <hnetcfg.h> // Removed to avoid missing file error
 
 using namespace Microsoft::WRL;
 
@@ -57,8 +56,6 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
         std::wstring name = pProps->pszwName;
         std::wstring desc = pProps->pszwDeviceName; 
 
-        // std::wcout << L"Scanning: " << name << L" (" << desc << L") Status:" << pProps->Status << std::endl;
-
         if (name == publicAdapterName) {
             pPublicConn = pConnection;
         }
@@ -84,9 +81,6 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
         return false;
     }
 
-    // Disable sharing first to reset? Or just enable.
-    // If we enable public on one, we might need to be careful.
-    
     // Enable Shared-Public on Public Connection
     if (!SetConnectionSharing(pNSM.Get(), pPublicConn.Get(), ICSSHARINGTYPE_PUBLIC)) {
         std::wcerr << L"Failed to enable Public Sharing on " << publicAdapterName << std::endl;
@@ -110,18 +104,10 @@ bool IcsManager::SetConnectionSharing(INetSharingManager* pNSM, INetConnection* 
     hr = pNSM->get_INetSharingConfigurationForINetConnection(pConnection, &pConfig);
     if (FAILED(hr)) return false;
 
-    // Check if already enabled
-    // SHARING_CONNECTION_TYPE currentType;
-    // VARIANT_BOOL enabled;
-    // pConfig->get_SharingEnabled(&enabled);
-    // pConfig->get_SharingConnectionType(&currentType);
-    
     // Force enable
     hr = pConfig->EnableSharing((SHARING_CONNECTION_TYPE)type);
     if (FAILED(hr)) {
-        // It might return S_FALSE if already enabled, but usually returns error if something conflicts
-        // If hr == 0x80070032 (Not supported), etc.
-        // std::wcerr << L"EnableSharing type " << type << L" failed: " << std::hex << hr << std::endl;
+        // It might return S_FALSE if already enabled
         return false;
     }
     return true;
