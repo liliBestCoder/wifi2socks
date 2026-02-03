@@ -17,6 +17,12 @@ typedef __FITypedEventHandler_2_Windows__CDevices__CWiFiDirect__CWiFiDirectDevic
 typedef __FIAsyncOperationCompletedHandler_1_Windows__CDevices__CWiFiDirect__CWiFiDirectDevice FromIdAsyncHandler;
 typedef __FIVectorView_1_Windows__CNetworking__CEndpointPair EndpointPairCollection;
 
+WiFiAPManager& WiFiAPManager::instance()
+{
+    static WiFiAPManager inst;
+    return inst;
+}
+
 WiFiAPManager::WiFiAPManager()
     : _ssidProvided(false),
       _passphraseProvided(false),

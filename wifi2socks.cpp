@@ -49,26 +49,24 @@ int main() {
 
     // -1. Load Config
     load_config("config.ini");
+
+    // 0. Initialize WiFi AP (Don't start yet, let HTTP API control it)
+    static Wifi2SocksWiFiListener wifi_listener; // Static to keep it alive
+    try {
+        std::wstring ssid(g_config.wifi_ssid.begin(), g_config.wifi_ssid.end());
+        std::wstring pass(g_config.wifi_password.begin(), g_config.wifi_password.end());
+
+        WiFiAPManager::instance().SetSSID(ssid);
+        WiFiAPManager::instance().SetPassphrase(pass);
+        WiFiAPManager::instance().RegisterListener(&wifi_listener);
+        LOG_INFO("WiFi AP Initialized (SSID: %s). Wait for START command.\n", g_config.wifi_ssid.c_str());
+    } catch (const std::exception& e) {
+        LOG_INFO("WiFi AP Initialization failed: %s\n", e.what());
+    }
     
     // -0.5 Start Traffic Manager & HTTP API
     TrafficManager::instance().start();
     SimpleHttpServer::instance().start(g_config.http_api_port);
-
-    // 0. Start WiFi AP
-    WiFiAPManager wifi_manager;
-    Wifi2SocksWiFiListener wifi_listener;
-    try {
-        std::wstring ssid(g_config.wifi_ssid.begin(), g_config.wifi_ssid.end());
-        std::wstring pass(g_config.wifi_password.begin(), g_config.wifi_password.end());
-        
-        wifi_manager.SetSSID(ssid);
-        wifi_manager.SetPassphrase(pass);
-        wifi_manager.RegisterListener(&wifi_listener);
-        wifi_manager.Start();
-        LOG_INFO("WiFi AP Starting (SSID: %s)...\n", g_config.wifi_ssid.c_str());
-    } catch (const WiFiAPException& e) {
-        LOG_INFO("WiFi AP Error: %s (HRESULT: 0x%08X)\n", e.what(), e.GetErrorCode());
-    }
 
     // 0.5 Pre-load GeoIP/GeoSite
     try {

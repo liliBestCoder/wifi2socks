@@ -49,8 +49,7 @@ public:
 class WiFiAPManager
 {
 public:
-    WiFiAPManager();
-    ~WiFiAPManager();
+    static WiFiAPManager& instance();
 
     void SetSSID(const std::wstring& ssid);
     std::wstring GetSSID() const { return _ssid; }
@@ -64,6 +63,8 @@ public:
     void Stop();
 
 private:
+    WiFiAPManager();
+    ~WiFiAPManager();
     void StartListener();
     void Reset();
 

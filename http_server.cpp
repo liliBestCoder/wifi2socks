@@ -2,6 +2,7 @@
 #include "app_config.h"
 #include "traffic_manager.h"
 #include "rule_manager.h"
+#include "wifi_ap.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iostream>
@@ -173,9 +174,9 @@ std::string SimpleHttpServer::handle_rules_get() {
     
     auto list_to_json = [](const std::string& name, const std::vector<std::string>& list) {
         std::stringstream s;
-        s << "\"" << name << "\":[";
+        s << \"" << name << "\":[";
         for(size_t i=0; i<list.size(); ++i) {
-            s << "\"" << list[i] << "\"";
+            s << \"" << list[i] << \""";
             if (i < list.size() - 1) s << ",";
         }
         s << "]";
@@ -238,8 +239,8 @@ std::string SimpleHttpServer::handle_proxy_check() {
     SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
     if (s == INVALID_SOCKET) return "{\"state\":\"down\",\"error\":\"socket_failed\"}";
 
-    // 1. ÉèÖÃÑÏ¸ñ³¬Ê±
-    DWORD timeout = 4000; // ÊÊµ±·Å¿íÖÁ 4s£¬¸øËíµÀ½¨Á¢ÁôÊ±¼ä
+    // 1. Ï¸Ê±
+    DWORD timeout = 4000; // ÊµÅ¿ 4sÊ±
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
 
@@ -251,14 +252,14 @@ std::string SimpleHttpServer::handle_proxy_check() {
 
     auto start = std::chrono::steady_clock::now();
 
-    // 2. Á¬½Ó´úÀí·şÎñÆ÷
+    // 2. Ó´
     if (connect(s, (sockaddr*)&addr, sizeof(addr)) != 0) {
         closesocket(s);
         return "{\"state\":\"down\",\"error\":\"proxy_unreachable\"}";
     }
 
-    // 3. ·¢ËÍ HTTP CONNECT ÇëÇó
-    // ×¢Òâ£º¼´Ê¹ÄãµÄ´úÀíÊÇ SOCKS5£¬ºÜ¶à´úÀíÒ²Ö§³ÖÍ¨¹ı HTTP Ğ­Òé·¢ËÍ CONNECT
+    // 3.  HTTP CONNECT 
+    // ×¢â£ºÊ¹Ä´ SOCKS5Ü¶Ò²Ö§Í¨ HTTP Ğ­é·¢ CONNECT
     std::string connect_req = "CONNECT www.google.com:80 HTTP/1.1\r\nProxy-Connection: Keep-Alive\r\n\r\n";
     if (send(s, connect_req.c_str(), (int)connect_req.size(), 0) <= 0) {
         closesocket(s);
@@ -269,13 +270,13 @@ std::string SimpleHttpServer::handle_proxy_check() {
     memset(buf, 0, sizeof(buf));
     int r = recv(s, buf, sizeof(buf) - 1, 0);
 
-    // 4. Ğ£ÑéËíµÀÊÇ·ñ½¨Á¢³É¹¦
+    // 4. Ğ£Ç·É¹
     if (r <= 0 || !strstr(buf, "200 Connection established") && !strstr(buf, "200 OK")) {
         closesocket(s);
         return "{\"state\":\"down\",\"error\":\"tunnel_failed\"}";
     }
 
-    // 5. ËíµÀÍ¨ÁË£¡ÏÖÔÚ·¢ËÍÕæÕıµÄÌ½²âÇëÇó
+    // 5. Í¨Ë£Ú·Ì½
     std::string probe_req = "HEAD /generate_204 HTTP/1.1\r\nHost: www.google.com\r\nConnection: close\r\n\r\n";
     send(s, probe_req.c_str(), (int)probe_req.size(), 0);
 
@@ -286,98 +287,7 @@ std::string SimpleHttpServer::handle_proxy_check() {
 
     if (r > 0) {
         buf[r] = 0;
-        // Ö»ÓĞ¿´µ½ gstatic µÄµäĞÍÏìÓ¦²ÅËã true up
+        // Ö»Ğ¿ gstatic ÄµÓ¦ true up
         if (strstr(buf, "HTTP/1.1 204") || strstr(buf, "HTTP/1.1 200")) {
             long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-            return "{\"state\":\"up\",\"delay\":" + std::to_string(ms) + "}";
-        }
-    }
-
-    // ËùÓĞ²»·ûºÏÔ¤ÆÚµÄÇé¿öÈ«²¿ÅĞÎª down
-    return "{\"state\":\"down\",\"error\":\"target_no_response\"}";
-}
-
-std::string SimpleHttpServer::handle_logs_get() {
-    // 1. ÒÔ¶ş½øÖÆÄ£Ê½´ò¿ªÈÕÖ¾ÎÄ¼ş
-    std::ifstream file("wifi2socks.log", std::ios::binary);
-    if (!file) return "[]";
-
-    // 2. »ñÈ¡ÎÄ¼şµ±Ç°×Ü´óĞ¡
-    file.seekg(0, std::ios::end);
-    long long current_size = file.tellg();
-
-    // 3. ³õÊ¼Âß¼­£ºÈç¹û´ÓÎ´¶ÁÈ¡¹ı£¬ÇÒÎÄ¼şºÜ´ó£¬Ö»È¡×îºó 5000 ×Ö½Ú·ÀÖ¹Ê×´Î¼ÓÔØ¿¨¶Ù
-    if (m_last_log_pos == 0 && current_size > 5000) {
-        m_last_log_pos = current_size - 5000;
-    }
-
-    // 4. Èç¹ûÃ»ÓĞĞÂÄÚÈİ£¬Ö±½Ó·µ»Ø¿ÕÊı×é
-    if (current_size <= m_last_log_pos) {
-        return "[]";
-    }
-
-    // 5. ¶¨Î»µ½ÉÏ´Î¶ÁÈ¡µÄÎ»ÖÃ
-    file.seekg(m_last_log_pos);
-
-    // 6. ¶ÁÈ¡ËùÓĞĞÂ²úÉúµÄÄÚÈİ
-    std::string new_content;
-    char buffer[4096];
-    while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
-        new_content.append(buffer, (size_t)file.gcount());
-    }
-
-    // ¸üĞÂ×îºó¶ÁÈ¡Î»ÖÃ
-    m_last_log_pos = current_size;
-
-    // 7. ½«ÎÄ±¾°´ĞĞÇĞ¸î²¢·â×°³É JSON Êı×é·µ»Ø
-    std::stringstream ss;
-    ss << "[";
-    std::stringstream content_ss(new_content);
-    std::string line;
-    bool first = true;
-    while (std::getline(content_ss, line)) {
-        if (line.empty()) continue;
-
-        // ÒÆ³ıĞĞÎ²µÄ»Ø³µ·û (\r)
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-
-        if (!first) ss << ",";
-
-        // ¼«¼òµÄ JSON ×ªÒå£¨´¦ÀíË«ÒıºÅºÍ·´Ğ±¸Ü£©
-        std::string escaped;
-        for (char c : line) {
-            if (c == '\"') escaped += "\\\"";
-            else if (c == '\\') escaped += "\\\\";
-            else escaped += c;
-        }
-
-        ss << "\"" << escaped << "\"";
-        first = false;
-    }
-    ss << "]";
-
-    return ss.str();
-}
-
-
-
-extern std::atomic<bool> g_tap_running;
-
-std::string SimpleHttpServer::handle_start() {
-    if (g_tap_running.exchange(true) == false) {
-        // Èç¹ûÖ®Ç°ÊÇ false£¬ÏÖÔÚ±ä³ÉÁË true
-        printf("[HTTP] Command Received: START TAP processing.\n");
-        // ÕâÀï¿ÉÒÔµ÷ÓÃ AsyncLogger ¼ÇÂ¼Ò»ÏÂ
-        // AsyncLogger::instance().log("[SYSTEM] TAP processing resumed via HTTP.\n");
-    }
-    return "{\"status\":\"ok\",\"action\":\"started\"}";
-}
-
-std::string SimpleHttpServer::handle_stop() {
-    if (g_tap_running.exchange(false) == true) {
-        // Èç¹ûÖ®Ç°ÊÇ true£¬ÏÖÔÚ±ä³ÉÁË false
-        printf("[HTTP] Command Received: STOP TAP processing.\n");
-        // AsyncLogger::instance().log("[SYSTEM] TAP processing paused via HTTP.\n");
-    }
-    return "{\"status\":\"ok\",\"action\":\"stopped\"}";
-}
+            return "{\"state\":\"up\",\"delay\":
