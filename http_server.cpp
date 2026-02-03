@@ -7,12 +7,14 @@
 #include "traffic_manager.h"
 #include "rule_manager.h"
 #include "wifi_ap.h"
+#include "ics_manager.h"
 #include <iostream>
 #include <sstream>
 #include <vector>
 #include <chrono>
 #include <algorithm>
 #include <fstream>
+#include <thread>
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -185,11 +187,11 @@ std::string SimpleHttpServer::handle_rules_get() {
 
     auto list_to_json = [](const std::string& name, const std::vector<std::string>& list) {
         std::stringstream s;
-        // ÐÞÕýÕâÀï£ºÈ·±£Êä³ö "name":[
-        s << "\"" << name << "\":[";
+        // ï£ºÈ· "name":[
+        s << \"" << name << \"":[";
         for (size_t i = 0; i < list.size(); ++i) {
-            // ÐÞÕýÕâÀï£ºÈ·±£Êä³ö "item"
-            s << "\"" << list[i] << "\"";
+            // ï£ºÈ· "item"
+            s << \"" << list[i] << \""";
             if (i < list.size() - 1) s << ",";
         }
         s << "]";
@@ -209,8 +211,8 @@ std::string SimpleHttpServer::handle_rules_get() {
 
 std::vector<std::string> SimpleHttpServer::json_parse_list(const std::string& json, const std::string& key) {
     std::vector<std::string> res;
-    // ÐÞÕýÕâÀï£ºÈ·±£Æ¥Åä "key"
-    std::string pattern = "\"" + key + "\"";
+    // ï£ºÈ·Æ¥ "key"
+    std::string pattern = \"" + key + \""";
     size_t key_pos = json.find(pattern);
     if (key_pos == std::string::npos) return res;
 
@@ -343,13 +345,13 @@ std::string SimpleHttpServer::handle_logs_get() {
 
         std::string escaped;
         for (char c : line) {
-            // ÐÞÕýÕâÀï£º´¦ÀíÒýºÅºÍ·´Ð±¸ÜµÄ×ªÒå
+            // ï£ºÅºÍ·Ð±Üµ×ª
             if (c == '"') escaped += "\\\"";
             else if (c == '\\') escaped += "\\\\";
             else escaped += c;
         }
 
-        ss << "\"" << escaped << "\"";
+        ss << \"" << escaped << \""";
         first = false;
     }
     ss << "]";
@@ -360,14 +362,26 @@ std::string SimpleHttpServer::handle_logs_get() {
 extern std::atomic<bool> g_tap_running;
 
 std::string SimpleHttpServer::handle_start() {
-    if (g_tap_running.exchange(true) == false) {
-        printf("[HTTP] Command Received: START TAP and WiFi.\n");
-        try {
-            WiFiAPManager::instance().Start();
+    g_tap_running = true;
+    printf("[HTTP] Command Received: START TAP and WiFi.\n");
+    try {
+        WiFiAPManager::instance().Start();
+        
+        // Wait for adapter to appear
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        
+        if (IcsManager::EnableICS(L"wifi2socks", L"Microsoft Wi-Fi Direct Virtual Adapter")) {
+             printf("[HTTP] ICS Enabled.\n");
+        } else {
+             // Fallback for older Windows or Hosted Network
+             printf("[HTTP] ICS Enable Failed. Trying fallback description...\n");
+             if (IcsManager::EnableICS(L"wifi2socks", L"Microsoft Hosted Network Virtual Adapter")) {
+                 printf("[HTTP] ICS Enabled (Fallback).\n");
+             }
         }
-        catch (const std::exception& e) {
-            printf("WiFi Start Error: %s\n", e.what());
-        }
+    }
+    catch (const std::exception& e) {
+        printf("WiFi Start Error: %s\n", e.what());
     }
     return "{\"status\":\"ok\",\"action\":\"started\"}";
 }

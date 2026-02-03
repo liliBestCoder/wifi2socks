@@ -160,6 +160,7 @@
     <ClCompile Include="wifi_ap.cpp" />
     <ClCompile Include="wifi_ap_listener.cpp" />
     <ClCompile Include="lwip_handler.cpp" />
+    <ClCompile Include="ics_manager.cpp" />
     <ClCompile Include="main_dispatcher.cpp" />
     <ClCompile Include="lwip\src\core\init.c" />
     <ClCompile Include="lwip\src\core\def.c" />
@@ -211,6 +212,7 @@
     <ClInclude Include="wifi_ap.h" />
     <ClInclude Include="wifi_ap_listener.h" />
     <ClInclude Include="lwip_handler.h" />
+    <ClInclude Include="ics_manager.h" />
     <ClInclude Include="lwip_includes.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
