@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <wrl/client.h>
 #include <wrl/wrappers/corewrappers.h>
+#include <wrl/event.h>
 #include <windows.foundation.h>
 #include <windows.devices.wifidirect.h>
 #include <windows.security.credentials.h>

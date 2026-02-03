@@ -1,10 +1,12 @@
+#define _WIN32_WINNT 0x0A00 // Windows 10
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
 #include "http_server.h"
 #include "app_config.h"
 #include "traffic_manager.h"
 #include "rule_manager.h"
 #include "wifi_ap.h"
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <iostream>
 #include <sstream>
 #include <vector>
@@ -196,7 +198,7 @@ std::string SimpleHttpServer::handle_rules_get() {
 
 std::vector<std::string> SimpleHttpServer::json_parse_list(const std::string& json, const std::string& key) {
     std::vector<std::string> res;
-    std::string pattern = "\"" + key + "\"";
+    std::string pattern = \"" + key + \""";
     size_t key_pos = json.find(pattern);
     if (key_pos == std::string::npos) return res;
     
@@ -283,85 +285,4 @@ std::string SimpleHttpServer::handle_proxy_check() {
         buf[r] = 0;
         if (strstr(buf, "HTTP/1.1 204") || strstr(buf, "HTTP/1.1 200")) {
             long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-            return "{\"state\":\"up\",\"delay\":" + std::to_string(ms) + "}";
-        }
-    }
-
-    return "{\"state\":\"down\",\"error\":\"target_no_response\"}";
-}
-
-std::string SimpleHttpServer::handle_logs_get() {
-    std::ifstream file("wifi2socks.log", std::ios::binary);
-    if (!file) return "[]";
-
-    file.seekg(0, std::ios::end);
-    long long current_size = file.tellg();
-
-    if (m_last_log_pos == 0 && current_size > 5000) {
-        m_last_log_pos = current_size - 5000;
-    }
-
-    if (current_size <= m_last_log_pos) {
-        return "[]";
-    }
-
-    file.seekg(m_last_log_pos);
-
-    std::string new_content;
-    char buffer[4096];
-    while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
-        new_content.append(buffer, (size_t)file.gcount());
-    }
-
-    m_last_log_pos = current_size;
-
-    std::stringstream ss;
-    ss << "[";
-    std::stringstream content_ss(new_content);
-    std::string line;
-    bool first = true;
-    while (std::getline(content_ss, line)) {
-        if (line.empty()) continue;
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        if (!first) ss << ",";
-
-        std::string escaped;
-        for (char c : line) {
-            if (c == '\"') escaped += "\\\"";
-            else if (c == '\\') escaped += "\\\\";
-            else escaped += c;
-        }
-
-        ss << "\"" << escaped << "\"";
-        first = false;
-    }
-    ss << "]";
-
-    return ss.str();
-}
-
-extern std::atomic<bool> g_tap_running;
-
-std::string SimpleHttpServer::handle_start() {
-    if (g_tap_running.exchange(true) == false) {
-        printf("[HTTP] Command Received: START TAP and WiFi.\n");
-        try {
-            WiFiAPManager::instance().Start();
-        } catch (const std::exception& e) {
-            printf("WiFi Start Error: %s\n", e.what());
-        }
-    }
-    return "{\"status\":\"ok\",\"action\":\"started\"}";
-}
-
-std::string SimpleHttpServer::handle_stop() {
-    if (g_tap_running.exchange(false) == true) {
-        printf("[HTTP] Command Received: STOP TAP and WiFi.\n");
-        try {
-            WiFiAPManager::instance().Stop();
-        } catch (const std::exception& e) {
-            printf("WiFi Stop Error: %s\n", e.what());
-        }
-    }
-    return "{\"status\":\"ok\",\"action\":\"stopped\"}";
-}
+            return "{\"state\":\"up\",\"delay\":
