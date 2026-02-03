@@ -1,10 +1,11 @@
+#define NOMINMAX
 #include "proxy_udp.h"
 #include "worker.h"
 #include "tap_driver.h"
 #include "app_config.h"
 #include "traffic_manager.h"
 #include "lwip_handler.h"
-#include "main_dispatcher.h"
+#include "nat_table.h"
 #include "geo_checker.h"
 #include "rule_manager.h"
 #include "dns_cache.h"
@@ -58,7 +59,7 @@ struct UdpSession {
 std::string parse_dns_qname(const uint8_t* payload, int len, int* qname_len);
 
 void parse_and_log_dns_response(const uint8_t* payload, int len, const char* mode) {
-    if (len < 12) return;
+    if (len < 12) return; 
     
     uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
     uint16_t an_count = ntohs(*(uint16_t*)(payload + 6));
@@ -81,7 +82,7 @@ void parse_and_log_dns_response(const uint8_t* payload, int len, const char* mod
                     }
                 } else {
                     if (!domain.empty() && qname_len > 0) pos += qname_len;
-                    else {
+                    else { 
                          while(pos < len) {
                             uint8_t n = payload[pos];
                             if(n==0) { pos++; break; }
@@ -156,7 +157,7 @@ void close_udp_session_internal(UdpSession* sess) {
 }
 
 void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* addr) {
-    if (sess->state == UdpSession::CLOSED) return;
+    if (sess->state == UdpSession::CLOSED) return; 
     
     if (len > 0 && data && addr) {
         TrafficManager::instance().report_proxy_rx(len);
@@ -458,7 +459,7 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                     
                     next_packet:
                     sess->tcp_rx_buffer.erase(sess->tcp_rx_buffer.begin(), sess->tcp_rx_buffer.begin() + 2 + pkt_len);
-                } else {
+                } else { 
                     break; 
                 }
             }
@@ -658,42 +659,50 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         return; // Drop immediately
     }
 
-    // 1. UDP 443 (QUIC) Optimization
+    // 1. Rule Check (Highest Priority)
+    RouteAction ip_action = RuleManager::instance().match_ip(ntohl(dst_ip));
+    if (ip_action == RouteAction::BLOCK) return;
+    if (ip_action == RouteAction::DIRECT) {
+        forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);
+        return;
+    }
+
+    // 2. UDP 443 (QUIC) Optimization
     if (dst_port == htons(443)) {
         bool cn = GeoChecker::instance().is_cn_ip(ntohl(dst_ip));
-        // 如果 IP 属于 Google 或者是国外已知服务，可以进一步判定
-        // 这里根据需求：如果是 Google 则 drop
         if (!cn) {
             LOG_INFO("[UDP] Blocked Google QUIC: %d.%d.%d.%d:443\n", 
                 dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF);
             return;
         }
-        // 尝试解析域名（QUIC SNI 探测较为复杂，这里先以 IP 判定为主，后续可扩展）
-        // 如果不属于 Google，则走直连逻辑
         forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);
         return;
     }
 
-    // 2. UDP 53 (DNS) Optimization
+    // 3. UDP 53 (DNS) Optimization
     if (dst_port == htons(53)) {
         int qname_len = 0;
         std::string full_domain = parse_dns_qname(payload, len, &qname_len);
         
         if (!full_domain.empty()) {
-            // Check Query Type (A=1, AAAA=28)
-            // Header(12) + QName(qname_len) + QType(2) + QClass(2)
+            // Rule Check for Domain
+            RouteAction dom_action = RuleManager::instance().match_domain(full_domain);
+            if (dom_action == RouteAction::BLOCK) {
+                uint16_t id = *(uint16_t*)payload;
+                send_dns_empty_response(src_ip, dst_ip, src_port, dst_port, id, payload, len);
+                return;
+            }
+
             if (12 + qname_len + 2 <= len) {
                 uint16_t qtype = ntohs(*(uint16_t*)(payload + 12 + qname_len));
-                if (qtype == 28) { // AAAA (IPv6)
+                if (qtype == 28) { // AAAA (IPv6) 
                     uint16_t id = *(uint16_t*)payload;
-                    // LOG_INFO(\"[DNS] Blocked IPv6 (AAAA) for: %s\\n\", full_domain.c_str());
                     send_dns_empty_response(src_ip, dst_ip, src_port, dst_port, id, payload, len);
                     return; 
                 }
             }
 
             std::string clean_domain = full_domain;
-            // ... (省略后缀处理逻辑，保持原样)
             std::string temp = full_domain;
             std::transform(temp.begin(), temp.end(), temp.begin(), [](unsigned char c){ return std::tolower(c); });
             const char* suffixes[] = { ".mshome.net", ".lan", ".local", ".localdomain" };
@@ -714,26 +723,19 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                 return;
             }
 
-            bool domestic = GeoChecker::instance().is_cn_domain(clean_domain) || 
-                            GeoChecker::instance().is_tencent_domain(clean_domain);
+            bool domestic = (dom_action == RouteAction::DIRECT) || 
+                            (dom_action == RouteAction::PASS && (GeoChecker::instance().is_cn_domain(clean_domain) || GeoChecker::instance().is_tencent_domain(clean_domain)));
             
             if (domestic) {
-                // 国内域名：不走 DNS-over-TCP，直接直连阿里 DNS
-                // LOG_INFO("[DNS] Domestic Domain: %s. Using Direct UDP to 223.5.5.5\n", clean_domain.c_str());
                 uint32_t ali_dns;
                 uint8_t ali_ip[4] = {223, 5, 5, 5};
                 memcpy(&ali_dns, ali_ip, 4);
-                
-                // 修改目标并直连转发
                 forward_udp_packet(src_ip, ali_dns, src_port, dst_port, payload, len);
                 return;
-            } else {
-                // 国外域名：继续走 DNS-over-TCP 代理
+            } else { 
                 uint32_t google_dns;
                 uint8_t google_ip[4] = {8, 8, 8, 8};
                 memcpy(&google_dns, google_ip, 4);
-
-                // LOG_INFO("[DNS] International Domain: %s. Using DNS-over-TCP via Proxy\n", clean_domain.c_str());
 
                 std::vector<uint8_t> query_packet;
                 const uint8_t* p_data = payload;
@@ -750,7 +752,6 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                 std::vector<uint8_t> data(p_data, p_data + p_len);
                 
                 w->queue_task([src_ip, dst_ip, src_port, dst_port, google_dns, data = std::move(data), w, full_domain, clean_domain]() {
-                    // ... (原有的 DNS-over-TCP 逻辑)
                     UdpKey key = { src_ip, dst_ip, src_port, dst_port };
                     UdpSession* sess = nullptr;
                     auto it = t_udp_sessions.find(key);
@@ -770,10 +771,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                         
                         sockaddr_in proxy_addr; memset(&proxy_addr, 0, sizeof(proxy_addr));
                         proxy_addr.sin_family = AF_INET;
-                        unsigned int a,b,c,d;
-                        if (sscanf_s(g_config.proxy_ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
-                            proxy_addr.sin_addr.S_un.S_addr = (a) | (b << 8) | (c << 16) | (d << 24);
-                        } else { proxy_addr.sin_addr.S_un.S_addr = 0x0100007F; }
+                        inet_pton(AF_INET, g_config.proxy_ip.c_str(), &proxy_addr.sin_addr);
                         proxy_addr.sin_port = htons(g_config.proxy_port);
                         
                         sess->worker->connect_async(sess->tcp_sock, proxy_addr, [sess]() {
@@ -801,6 +799,5 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         }
     }
 
-    // Default: Direct UDP Logic
     forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);
 }

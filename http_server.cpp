@@ -33,6 +33,7 @@ void SimpleHttpServer::start(uint16_t port) {
     }
 
     sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(port);
@@ -187,7 +188,7 @@ std::string SimpleHttpServer::handle_rules_get() {
 
 std::vector<std::string> SimpleHttpServer::json_parse_list(const std::string& json, const std::string& key) {
     std::vector<std::string> res;
-    std::string pattern = \"" + key + \""";
+    std::string pattern = \"" + key + \"\";
     size_t key_pos = json.find(pattern);
     if (key_pos == std::string::npos) return res;
     
