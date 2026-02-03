@@ -16,7 +16,7 @@
 
 #pragma comment(lib, "Ws2_32.lib")
 
-SimpleHttpServer& SimpleHttpServer::instance() {
+SimpleHttpServer & SimpleHttpServer::instance() {
     static SimpleHttpServer inst;
     return inst;
 }
@@ -74,7 +74,7 @@ void SimpleHttpServer::worker_loop() {
         sockaddr_in client_addr;
         int len = sizeof(client_addr);
         SOCKET client_sock = accept(m_listen_socket, (sockaddr*)&client_addr, &len);
-        
+
         if (client_sock == INVALID_SOCKET) {
             if (!m_running) break;
             continue;
@@ -82,7 +82,7 @@ void SimpleHttpServer::worker_loop() {
 
         std::thread([this, client_sock]() {
             handle_client(client_sock);
-        }).detach();
+            }).detach();
     }
 }
 
@@ -105,10 +105,10 @@ void SimpleHttpServer::handle_client(uint64_t s) {
 
     std::string raw(buffer);
     HttpRequest req;
-    
+
     size_t line1_end = raw.find("\r\n");
     if (line1_end == std::string::npos) { closesocket(sock); return; }
-    
+
     std::string line1 = raw.substr(0, line1_end);
     std::vector<std::string> parts = split_str(line1, ' ');
     if (parts.size() >= 2) {
@@ -126,23 +126,32 @@ void SimpleHttpServer::handle_client(uint64_t s) {
 
     if (req.path == "/stats") {
         resp = handle_stats();
-    } else if (req.path == "/rules") {
+    }
+    else if (req.path == "/rules") {
         resp = handle_rules_get();
-    } else if (req.path == "/rules/direct") {
+    }
+    else if (req.path == "/rules/direct") {
         resp = handle_rules_update("direct", req.body);
-    } else if (req.path == "/rules/block") {
+    }
+    else if (req.path == "/rules/block") {
         resp = handle_rules_update("block", req.body);
-    } else if (req.path == "/rules/proxy") {
+    }
+    else if (req.path == "/rules/proxy") {
         resp = handle_rules_update("proxy", req.body);
-    } else if (req.path == "/check") {
+    }
+    else if (req.path == "/check") {
         resp = handle_proxy_check();
-    }else if (req.path == "/logs") {
+    }
+    else if (req.path == "/logs") {
         resp = handle_logs_get();
-    }else if (req.path == "/start") {
+    }
+    else if (req.path == "/start") {
         resp = handle_start();
-    }else if (req.path == "/stop") {
+    }
+    else if (req.path == "/stop") {
         resp = handle_stop();
-    }else {
+    }
+    else {
         status = 404;
         resp = "{\"error\": \"Not Found\"}";
     }
@@ -160,7 +169,7 @@ void SimpleHttpServer::send_response(uint64_t s, int status, const std::string& 
     ss << "Connection: close\r\n";
     ss << "Access-Control-Allow-Origin: *\r\n";
     ss << "\r\n";
-    
+
     std::string h = ss.str();
     send(sock, h.c_str(), (int)h.size(), 0);
     send(sock, body.c_str(), (int)body.size(), 0);
@@ -173,46 +182,49 @@ std::string SimpleHttpServer::handle_stats() {
 std::string SimpleHttpServer::handle_rules_get() {
     std::stringstream ss;
     ss << "{";
-    
+
     auto list_to_json = [](const std::string& name, const std::vector<std::string>& list) {
         std::stringstream s;
-        s << \"" << name << "\":[";
-        for(size_t i=0; i<list.size(); ++i) {
-            s << \"" << list[i] << \""";
+        // 修正这里：确保输出 "name":[
+        s << "\"" << name << "\":[";
+        for (size_t i = 0; i < list.size(); ++i) {
+            // 修正这里：确保输出 "item"
+            s << "\"" << list[i] << "\"";
             if (i < list.size() - 1) s << ",";
         }
         s << "]";
         return s.str();
-    };
-    
+        };
+
     ss << list_to_json("direct_ip", g_config.direct_ip_list) << ",";
     ss << list_to_json("direct_domain", g_config.direct_domain_list) << ",";
     ss << list_to_json("block_ip", g_config.block_ip_list) << ",";
     ss << list_to_json("block_domain", g_config.block_domain_list) << ",";
     ss << list_to_json("proxy_ip", g_config.proxy_ip_list) << ",";
     ss << list_to_json("proxy_domain", g_config.proxy_domain_list);
-    
+
     ss << "}";
     return ss.str();
 }
 
 std::vector<std::string> SimpleHttpServer::json_parse_list(const std::string& json, const std::string& key) {
     std::vector<std::string> res;
-    std::string pattern = \"" + key + "\";
+    // 修正这里：确保匹配 "key"
+    std::string pattern = "\"" + key + "\"";
     size_t key_pos = json.find(pattern);
     if (key_pos == std::string::npos) return res;
-    
+
     size_t start_bracket = json.find('[', key_pos);
     if (start_bracket == std::string::npos) return res;
-    
+
     size_t end_bracket = json.find(']', start_bracket);
     if (end_bracket == std::string::npos) return res;
-    
+
     std::string content = json.substr(start_bracket + 1, end_bracket - start_bracket - 1);
-    
+
     std::stringstream ss(content);
     std::string segment;
-    while(std::getline(ss, segment, ',')) {
+    while (std::getline(ss, segment, ',')) {
         size_t first = segment.find('"');
         size_t last = segment.rfind('"');
         if (first != std::string::npos && last != std::string::npos && last > first) {
@@ -225,15 +237,17 @@ std::vector<std::string> SimpleHttpServer::json_parse_list(const std::string& js
 std::string SimpleHttpServer::handle_rules_update(const std::string& type, const std::string& body) {
     std::vector<std::string> ips = json_parse_list(body, "ip");
     std::vector<std::string> domains = json_parse_list(body, "domain");
-    
+
     if (type == "direct") {
         RuleManager::instance().update_direct_list(ips, domains);
-    } else if (type == "block") {
+    }
+    else if (type == "block") {
         RuleManager::instance().update_block_list(ips, domains);
-    } else if (type == "proxy") {
+    }
+    else if (type == "proxy") {
         RuleManager::instance().update_proxy_list(ips, domains);
     }
-    
+
     return "{\"status\":\"ok\"}";
 }
 
@@ -329,8 +343,9 @@ std::string SimpleHttpServer::handle_logs_get() {
 
         std::string escaped;
         for (char c : line) {
+            // 修正这里：处理引号和反斜杠的转义
             if (c == '"') escaped += "\\\"";
-            else if (c == '\\') escaped += "\\");
+            else if (c == '\\') escaped += "\\\\";
             else escaped += c;
         }
 
@@ -349,7 +364,8 @@ std::string SimpleHttpServer::handle_start() {
         printf("[HTTP] Command Received: START TAP and WiFi.\n");
         try {
             WiFiAPManager::instance().Start();
-        } catch (const std::exception& e) {
+        }
+        catch (const std::exception& e) {
             printf("WiFi Start Error: %s\n", e.what());
         }
     }
@@ -361,7 +377,8 @@ std::string SimpleHttpServer::handle_stop() {
         printf("[HTTP] Command Received: STOP TAP and WiFi.\n");
         try {
             WiFiAPManager::instance().Stop();
-        } catch (const std::exception& e) {
+        }
+        catch (const std::exception& e) {
             printf("WiFi Stop Error: %s\n", e.what());
         }
     }

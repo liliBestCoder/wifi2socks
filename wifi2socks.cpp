@@ -85,7 +85,7 @@ int main() {
     }
 
     // 2. Initialize Worker Pool
-    WorkerPool::instance().init(80);
+    WorkerPool::instance().init(20);
     LOG_INFO("Worker Pool Initialized.\n");
 
     // 4. Initialize LwIP
