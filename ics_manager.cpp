@@ -4,20 +4,87 @@
 
 using namespace Microsoft::WRL;
 
-// --- Manual Definitions to avoid header dependency hell ---
+// =============================================================
+// 手动定义缺失的 COM 接口和结构体 (Self-contained definitions)
+// =============================================================
 
-// Define the Enum
+// 1. 枚举定义
 typedef enum tagSHARING_CONNECTION_TYPE {
     ICSSHARINGTYPE_PUBLIC = 0,
     ICSSHARINGTYPE_PRIVATE = 1
 } SHARING_CONNECTION_TYPE;
 
-// Forward declarations of interfaces
+typedef enum tagNETCON_STATUS {
+    NCS_DISCONNECTED = 0,
+    NCS_CONNECTING = 1,
+    NCS_CONNECTED = 2,
+    NCS_DISCONNECTING = 3,
+    NCS_HARDWARE_NOT_PRESENT = 4,
+    NCS_HARDWARE_DISABLED = 5,
+    NCS_HARDWARE_MALFUNCTION = 6,
+    NCS_MEDIA_DISCONNECTED = 7,
+    NCS_AUTHENTICATING = 8,
+    NCS_AUTHENTICATION_SUCCEEDED = 9,
+    NCS_AUTHENTICATION_FAILED = 10,
+    NCS_INVALID_ADDRESS = 11,
+    NCS_CREDENTIALS_REQUIRED = 12,
+    NCS_ACTION_REQUIRED = 13,
+    NCS_ACTION_REQUIRED_RETRY = 14,
+    NCS_CONNECT_FAILED = 15
+} NETCON_STATUS;
+
+typedef enum tagNETCON_MEDIATYPE {
+    NCM_NONE = 0,
+    NCM_DIRECT = 1,
+    NCM_ISDN = 2,
+    NCM_LAN = 3,
+    NCM_PHONE = 4,
+    NCM_TUNNEL = 5,
+    NCM_PPPOE = 6,
+    NCM_BRIDGE = 7,
+    NCM_SHAREDACCESSHOST_LAN = 8,
+    NCM_SHAREDACCESSHOST_RAS = 9
+} NETCON_MEDIATYPE;
+
+// 2. 结构体定义
+typedef struct tagNETCON_PROPERTIES {
+    GUID guidId;
+    LPWSTR pszwName;
+    LPWSTR pszwDeviceName;
+    NETCON_STATUS Status;
+    NETCON_MEDIATYPE MediaType;
+    DWORD dwCharacter;
+    CLSID clsidThisObject;
+    CLSID clsidUiObject;
+} NETCON_PROPERTIES;
+
+// 前置声明
 struct INetSharingPortMappingCollection;
 struct INetSharingPortMapping;
 struct INetConnectionProps;
 
-// Define INetSharingConfiguration Interface
+// 3. 接口定义
+
+// INetConnection
+MIDL_INTERFACE("C08956A1-1CD3-11D1-B1C5-00805FC1270E")
+INetConnection : public IUnknown
+{
+public:
+    virtual HRESULT STDMETHODCALLTYPE Connect(void) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Disconnect(void) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Delete(void) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Duplicate(
+        /* [in] */ LPCWSTR pszwDuplicateName,
+        /* [out] */ INetConnection **ppCon) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetProperties(
+        /* [out] */ NETCON_PROPERTIES **ppProps) = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetUiObjectClassId(
+        /* [out] */ CLSID *pclsid) = 0;
+    virtual HRESULT STDMETHODCALLTYPE Rename(
+        /* [in] */ LPCWSTR pszwNewName) = 0;
+};
+
+// INetSharingConfiguration
 MIDL_INTERFACE("F4217D55-1CD3-11D1-B1C5-00805FC1270E")
 INetSharingConfiguration : public IDispatch
 {
@@ -58,7 +125,7 @@ public:
     virtual HRESULT STDMETHODCALLTYPE EnableInternetFirewall( void) = 0;
 };
 
-// Define INetSharingEveryConnectionCollection Interface
+// INetSharingEveryConnectionCollection
 MIDL_INTERFACE("33C56D62-1CD3-11D1-B1C5-00805FC1270E")
 INetSharingEveryConnectionCollection : public IDispatch
 {
@@ -70,7 +137,7 @@ public:
         /* [retval][out] */ long *pVal) = 0;
 };
 
-// Define INetSharingManager Interface
+// INetSharingManager
 MIDL_INTERFACE("C08956B7-1CD3-11D1-B1C5-00805FC1270E")
 INetSharingManager : public IDispatch
 {
@@ -80,11 +147,11 @@ public:
     
     virtual HRESULT STDMETHODCALLTYPE get_EnumPublicConnections(
         /* [in] */ SHARING_CONNECTION_TYPE Flags,
-        /* [retval][out] */ /*INetSharingPublicConnectionCollection*/ IUnknown **ppColl) = 0;
+        /* [retval][out] */ IUnknown **ppColl) = 0;
     
     virtual HRESULT STDMETHODCALLTYPE get_EnumPrivateConnections(
         /* [in] */ SHARING_CONNECTION_TYPE Flags,
-        /* [retval][out] */ /*INetSharingPrivateConnectionCollection*/ IUnknown **ppColl) = 0;
+        /* [retval][out] */ IUnknown **ppColl) = 0;
     
     virtual HRESULT STDMETHODCALLTYPE get_INetSharingConfigurationForINetConnection(
         /* [in] */ INetConnection *pNetConnection,
@@ -98,16 +165,17 @@ public:
         /* [retval][out] */ INetConnectionProps **ppProps) = 0;
 };
 
+// =============================================================
+// 实现部分
+// =============================================================
+
 // Check if CLSID_NetSharingManager is defined
 const CLSID CLSID_NetSharingManager = { 0x5C63C1AD, 0x3956, 0x4FF8, { 0x84, 0x86, 0x40, 0x03, 0x47, 0x58, 0x31, 0x5B } };
-
-// --- Implementation ---
 
 bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wstring& privateAdapterDesc) {
     HRESULT hr;
     
     // Initialize COM if not already
-    // Since Main uses RoInitialize(RO_INIT_MULTITHREADED), we are in MTA.
     
     ComPtr<INetSharingManager> pNSM;
     hr = CoCreateInstance(CLSID_NetSharingManager, NULL, CLSCTX_ALL, __uuidof(INetSharingManager), &pNSM);
@@ -124,7 +192,6 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
     }
 
     ComPtr<IEnumVARIANT> pEnum;
-    // get__NewEnum returns IUnknown, need to QueryInterface for IEnumVARIANT
     ComPtr<IUnknown> pUnkEnum;
     hr = pEveryConnectionCollection->get__NewEnum(&pUnkEnum);
     if (FAILED(hr)) return false;
@@ -138,7 +205,6 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
     ComPtr<INetConnection> pPublicConn;
     ComPtr<INetConnection> pPrivateConn;
 
-    // Iterate through connections
     while (pEnum->Next(1, &v, NULL) == S_OK) {
         if (v.vt != VT_UNKNOWN && v.vt != VT_DISPATCH) {
             VariantClear(&v);
@@ -156,15 +222,12 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
         if (FAILED(hr)) continue;
 
         std::wstring name = pProps->pszwName;
-        std::wstring desc = pProps->pszwDeviceName; 
+        std::wstring desc = pProps->pszwDeviceName;
 
-        // Check for Public Adapter (TUN)
         if (name == publicAdapterName) {
             pPublicConn = pConnection;
         }
-        // Check for Private Adapter (WiFi)
         else if (desc.find(privateAdapterDesc) != std::wstring::npos) {
-            // Only use if connected (WiFi AP must be started)
             if (pProps->Status == NCS_CONNECTED) {
                 pPrivateConn = pConnection;
             }
@@ -211,16 +274,10 @@ bool IcsManager::SetConnectionSharing(INetSharingManager* pNSM, INetConnection* 
     hr = pNSM->get_INetSharingConfigurationForINetConnection(pConnection, &pConfig);
     if (FAILED(hr)) return false;
 
-    // Check if already enabled
-    // SHARING_CONNECTION_TYPE currentType;
-    // VARIANT_BOOL enabled;
-    // pConfig->get_SharingEnabled(&enabled);
-    // pConfig->get_SharingConnectionType(&currentType);
-    
-    // Force enable
+    // Force enable sharing with the specified type
     hr = pConfig->EnableSharing((SHARING_CONNECTION_TYPE)type);
     if (FAILED(hr)) {
-        std::wcerr << L"EnableSharing failed with hr=" << std::hex << hr << std::endl;
+        // std::wcerr << L"EnableSharing failed: " << std::hex << hr << std::endl;
         return false;
     }
     return true;
