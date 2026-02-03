@@ -70,7 +70,7 @@ int main() {
 
     // 0.5 Pre-load GeoIP/GeoSite
     try {
-        GeoChecker::instance().init_async();
+        GeoChecker::instance().init();
         LOG_INFO("GeoChecker loading in background...\n");
     } catch (const std::exception& e) {
         LOG_INFO("Warning: GeoChecker failed to load: %s. IP/Domain bypass may not work.\n", e.what());

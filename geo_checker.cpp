@@ -34,20 +34,20 @@ GeoChecker::~GeoChecker() {
     // google::protobuf::ShutdownProtobufLibrary();
 }
 
-void GeoChecker::init_async(const std::string& geoip_file, const std::string& geosite_file) {
-    m_load_thread = std::thread(&GeoChecker::load_data, this, geoip_file, geosite_file);
-}
-
 void GeoChecker::load_data(const std::string& geoip_file, const std::string& geosite_file) {
     load_geoip(geoip_file);
     load_geosite(geosite_file);
-    
+
     // Clear caches to free memory
     geoip_code_cache_.clear();
     geosite_code_cache_.clear();
-    
+
     m_ready = true;
     printf("[GeoChecker] Loaded async. Ready.\n");
+}
+
+void GeoChecker::init(const std::string& geoip_file, const std::string& geosite_file) {
+   load_data(geoip_file, geosite_file);
 }
 
 static bool read_file_to_buffer(const std::string& filepath, std::vector<char>& buffer) {

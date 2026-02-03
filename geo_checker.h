@@ -41,7 +41,7 @@ public:
     ~GeoChecker();
 
     // Async Init
-    void init_async(const std::string& geoip_file = "geoip.dat", const std::string& geosite_file = "geosite.dat");
+    void init(const std::string& geoip_file = "geoip.dat", const std::string& geosite_file = "geosite.dat");
     bool is_ready() const { return m_ready; }
 
     // --------- IP 查询 ----------
