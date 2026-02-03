@@ -123,12 +123,12 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
     if (buf.size() > 34) {
         struct ip_hdr* ip = (struct ip_hdr*)(buf.data() + 14);
         if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
-             if (ip->src.addr == ::inet_addr(TAP_GW)) {
+             if (ip->src.addr == ::inet_addr(g_config.tap_gateway.c_str())) {
                  uint8_t* tcp_base = buf.data() + 14 + IPH_HL(ip) * 4;
                  uint16_t src_port = *(uint16_t*)tcp_base;
                  uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
                  
-                 if (src_port == ::htons(LWIP_LISTEN_PORT)) {
+                 if (src_port == ::htons(g_config.lwip_listen_port)) {
                      NatEntry target = NatTable::instance().get(::ntohs(dst_port));
                      
                      if (target.original_dst_ip != 0) {
@@ -204,8 +204,8 @@ void process_tap_frame(uint8_t* buf, int len) {
 
             NatTable::instance().set(::ntohs(src_port), dst_ip, dst_port);
 
-            ip->dest.addr = ::inet_addr(TAP_GW);
-            *(uint16_t*)(tcp_base + 2) = ::htons(LWIP_LISTEN_PORT);
+            ip->dest.addr = ::inet_addr(g_config.tap_gateway.c_str());
+            *(uint16_t*)(tcp_base + 2) = ::htons(g_config.lwip_listen_port);
 
             IPH_CHKSUM_SET(ip, 0);
             IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
@@ -222,7 +222,7 @@ void process_tap_frame(uint8_t* buf, int len) {
             // If the ping is NOT for our Gateway (e.g. phone pings 8.8.8.8),
             // LwIP will drop it because it doesn't know how to route to 8.8.8.8.
             // We must fake a reply to satisfy the OS connectivity check.
-            if (ip->dest.addr != ::inet_addr(TAP_GW)) {
+            if (ip->dest.addr != ::inet_addr(g_config.tap_gateway.c_str())) {
                 uint8_t* icmp_base = buf + 14 + IPH_HL(ip) * 4;
                 // Check if it is Echo Request (Type 8)
                 if (icmp_base[0] == 8) {

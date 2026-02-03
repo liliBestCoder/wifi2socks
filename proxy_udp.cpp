@@ -7,6 +7,7 @@
 #include "main_dispatcher.h"
 #include "geo_checker.h"
 #include "rule_manager.h"
+#include "dns_cache.h"
 #include <map>
 #include <vector>
 #include <deque>

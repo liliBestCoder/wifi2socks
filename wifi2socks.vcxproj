@@ -177,6 +177,7 @@
   <ItemGroup>
     <ClInclude Include="common.pb.h" />
     <ClInclude Include="config_loader.h" />
+    <ClInclude Include="dns_cache.h" />
     <ClInclude Include="traffic_manager.h" />
     <ClInclude Include="rule_manager.h" />
     <ClInclude Include="http_server.h" />
