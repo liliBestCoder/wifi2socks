@@ -239,8 +239,7 @@ std::string SimpleHttpServer::handle_proxy_check() {
     SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
     if (s == INVALID_SOCKET) return "{\"state\":\"down\",\"error\":\"socket_failed\"}";
 
-    // 1. ϸʱ
-    DWORD timeout = 4000; // ʵſ 4sʱ
+    DWORD timeout = 4000;
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
 
@@ -252,14 +251,11 @@ std::string SimpleHttpServer::handle_proxy_check() {
 
     auto start = std::chrono::steady_clock::now();
 
-    // 2. Ӵ
     if (connect(s, (sockaddr*)&addr, sizeof(addr)) != 0) {
         closesocket(s);
         return "{\"state\":\"down\",\"error\":\"proxy_unreachable\"}";
     }
 
-    // 3.  HTTP CONNECT 
-    // ע⣺ʹĴ SOCKS5ܶҲ֧ͨ HTTP Э鷢 CONNECT
     std::string connect_req = "CONNECT www.google.com:80 HTTP/1.1\r\nProxy-Connection: Keep-Alive\r\n\r\n";
     if (send(s, connect_req.c_str(), (int)connect_req.size(), 0) <= 0) {
         closesocket(s);
@@ -270,13 +266,11 @@ std::string SimpleHttpServer::handle_proxy_check() {
     memset(buf, 0, sizeof(buf));
     int r = recv(s, buf, sizeof(buf) - 1, 0);
 
-    // 4. УǷɹ
     if (r <= 0 || !strstr(buf, "200 Connection established") && !strstr(buf, "200 OK")) {
         closesocket(s);
         return "{\"state\":\"down\",\"error\":\"tunnel_failed\"}";
     }
 
-    // 5. ͨˣڷ̽
     std::string probe_req = "HEAD /generate_204 HTTP/1.1\r\nHost: www.google.com\r\nConnection: close\r\n\r\n";
     send(s, probe_req.c_str(), (int)probe_req.size(), 0);
 
@@ -287,7 +281,6 @@ std::string SimpleHttpServer::handle_proxy_check() {
 
     if (r > 0) {
         buf[r] = 0;
-        // ֻп gstatic ĵӦ true up
         if (strstr(buf, "HTTP/1.1 204") || strstr(buf, "HTTP/1.1 200")) {
             long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
             return "{\"state\":\"up\",\"delay\":
