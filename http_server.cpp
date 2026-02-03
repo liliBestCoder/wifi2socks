@@ -166,9 +166,9 @@ std::string SimpleHttpServer::handle_rules_get() {
     
     auto list_to_json = [](const std::string& name, const std::vector<std::string>& list) {
         std::stringstream s;
-        s << \"" << name << "\":[";
+        s << "\"" << name << "\":[";
         for(size_t i=0; i<list.size(); ++i) {
-            s << \"" << list[i] << \""";
+            s << "\"" << list[i] << "\"";
             if (i < list.size() - 1) s << ",";
         }
         s << "]";
@@ -188,7 +188,7 @@ std::string SimpleHttpServer::handle_rules_get() {
 
 std::vector<std::string> SimpleHttpServer::json_parse_list(const std::string& json, const std::string& key) {
     std::vector<std::string> res;
-    std::string pattern = \"" + key + \"\";
+    std::string pattern = "\"" + key + "\"";
     size_t key_pos = json.find(pattern);
     if (key_pos == std::string::npos) return res;
     
@@ -280,4 +280,8 @@ std::string SimpleHttpServer::handle_proxy_check() {
         buf[r] = 0;
         if (strstr(buf, "204 No Content") || strstr(buf, "200 OK")) {
             long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-            return "{\"state\":\"up\",\"delay\":
+            return "{\"state\":\"up\",\"delay\":" + std::to_string(ms) + "}";
+        }
+    }
+    return "{\"state\":\"down\",\"error\":\"invalid_response\"}";
+}

@@ -42,46 +42,4 @@ void NatTable::cleanup(uint64_t timeout_ms) {
     }
 }
 
-// --- DnsCache ---
 
-DnsCache& DnsCache::instance() {
-    static DnsCache inst;
-    return inst;
-}
-
-uint32_t DnsCache::get(const std::string& domain) {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    auto it = m_cache.find(domain);
-    if (it != m_cache.end()) {
-        if (GetTickCount64() < it->second.expire_time) {
-            return it->second.ip;
-        } else {
-            m_cache.erase(it); // Expired
-        }
-    }
-    return 0;
-}
-
-void DnsCache::put(const std::string& domain, uint32_t ip, int ttl_sec) {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    // Min TTL 60s, Max TTL 1 hour to keep it reasonably fresh
-    if (ttl_sec < 60) ttl_sec = 60;
-    if (ttl_sec > 3600) ttl_sec = 3600;
-    
-    DnsCacheEntry entry;
-    entry.ip = ip;
-    entry.expire_time = GetTickCount64() + (ttl_sec * 1000);
-    m_cache[domain] = entry;
-}
-
-void DnsCache::cleanup() {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    uint64_t now = GetTickCount64();
-    for (auto it = m_cache.begin(); it != m_cache.end(); ) {
-        if (now > it->second.expire_time) {
-            it = m_cache.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
