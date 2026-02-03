@@ -9,5 +9,5 @@ public:
     static bool EnableICS(const std::wstring& publicAdapterName, const std::wstring& privateAdapterDesc);
 
 private:
-    static bool SetConnectionSharing(INetSharingManager* pNSM, INetConnection* pConnection, SHARING_CONNECTION_TYPE type);
+    static bool SetConnectionSharing(INetSharingManager* pNSM, INetConnection* pConnection, int type);
 };

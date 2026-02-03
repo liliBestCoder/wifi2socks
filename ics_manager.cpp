@@ -1,7 +1,7 @@
 #include "ics_manager.h"
 #include <iostream>
 #include <vector>
-#include <hnetcfg.h> 
+// #include <hnetcfg.h> // Removed to avoid missing file error
 
 using namespace Microsoft::WRL;
 
@@ -103,7 +103,7 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
     return true;
 }
 
-bool IcsManager::SetConnectionSharing(INetSharingManager* pNSM, INetConnection* pConnection, SHARING_CONNECTION_TYPE type) {
+bool IcsManager::SetConnectionSharing(INetSharingManager* pNSM, INetConnection* pConnection, int type) {
     HRESULT hr;
     
     ComPtr<INetSharingConfiguration> pConfig;
@@ -117,7 +117,7 @@ bool IcsManager::SetConnectionSharing(INetSharingManager* pNSM, INetConnection* 
     // pConfig->get_SharingConnectionType(&currentType);
     
     // Force enable
-    hr = pConfig->EnableSharing(type);
+    hr = pConfig->EnableSharing((SHARING_CONNECTION_TYPE)type);
     if (FAILED(hr)) {
         // It might return S_FALSE if already enabled, but usually returns error if something conflicts
         // If hr == 0x80070032 (Not supported), etc.
