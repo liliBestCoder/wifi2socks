@@ -4,18 +4,23 @@
 
 using namespace Microsoft::WRL;
 
-// --- Manual Definitions for Missing HNetCfg.h ---
+// --- Manual Definitions for Missing HNetCfg.h / NetCon.h definitions ---
 
+// Define the CLSID if not available
+const CLSID CLSID_NetSharingManager = { 0x5C63C1AD, 0x3956, 0x4FF8, { 0x84, 0x86, 0x40, 0x03, 0x47, 0x58, 0x31, 0x5B } };
+
+// Define the Enum
 typedef enum tagSHARING_CONNECTION_TYPE {
     ICSSHARINGTYPE_PUBLIC = 0,
     ICSSHARINGTYPE_PRIVATE = 1
 } SHARING_CONNECTION_TYPE;
 
-// Forward declarations
+// Forward declarations of interfaces
 struct INetSharingPortMappingCollection;
 struct INetSharingPortMapping;
+struct INetConnectionProps;
 
-// Interfaces
+// Define INetSharingConfiguration Interface
 MIDL_INTERFACE("F4217D55-1CD3-11D1-B1C5-00805FC1270E")
 INetSharingConfiguration : public IDispatch
 {
@@ -56,6 +61,7 @@ public:
     virtual HRESULT STDMETHODCALLTYPE EnableInternetFirewall( void) = 0;
 };
 
+// Define INetSharingEveryConnectionCollection Interface
 MIDL_INTERFACE("33C56D62-1CD3-11D1-B1C5-00805FC1270E")
 INetSharingEveryConnectionCollection : public IDispatch
 {
@@ -67,6 +73,7 @@ public:
         /* [retval][out] */ long *pVal) = 0;
 };
 
+// Define INetSharingManager Interface
 MIDL_INTERFACE("C08956B7-1CD3-11D1-B1C5-00805FC1270E")
 INetSharingManager : public IDispatch
 {
@@ -94,15 +101,12 @@ public:
         /* [retval][out] */ INetConnectionProps **ppProps) = 0;
 };
 
-// Check if CLSID_NetSharingManager is defined
-const CLSID CLSID_NetSharingManager = { 0x5C63C1AD, 0x3956, 0x4FF8, { 0x84, 0x86, 0x40, 0x03, 0x47, 0x58, 0x31, 0x5B } };
+// --- Implementation ---
 
 bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wstring& privateAdapterDesc) {
     HRESULT hr;
     
-    // Initialize COM if not already (Caller usually does, but we can check or just call CoCreate)
-    // Since Main uses RoInitialize(RO_INIT_MULTITHREADED), we are in MTA.
-    
+    // Create the NetSharingManager
     ComPtr<INetSharingManager> pNSM;
     hr = CoCreateInstance(CLSID_NetSharingManager, NULL, CLSCTX_ALL, __uuidof(INetSharingManager), &pNSM);
     if (FAILED(hr)) {
@@ -110,6 +114,7 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
         return false;
     }
 
+    // Get the collection of all connections
     ComPtr<INetSharingEveryConnectionCollection> pEveryConnectionCollection;
     hr = pNSM->get_EnumEveryConnection(&pEveryConnectionCollection);
     if (FAILED(hr)) {
@@ -117,11 +122,13 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
         return false;
     }
 
+    // Get the enumerator
     ComPtr<IEnumVARIANT> pEnum;
-    // Note: get__NewEnum returns IUnknown, we need to QI for IEnumVARIANT
+    // get__NewEnum returns IUnknown, need to QueryInterface for IEnumVARIANT
     ComPtr<IUnknown> pUnkEnum;
     hr = pEveryConnectionCollection->get__NewEnum(&pUnkEnum);
     if (FAILED(hr)) return false;
+    
     hr = pUnkEnum.As(&pEnum);
     if (FAILED(hr)) return false;
 
@@ -131,6 +138,7 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
     ComPtr<INetConnection> pPublicConn;
     ComPtr<INetConnection> pPrivateConn;
 
+    // Iterate through connections
     while (pEnum->Next(1, &v, NULL) == S_OK) {
         if (v.vt != VT_UNKNOWN && v.vt != VT_DISPATCH) {
             VariantClear(&v);
@@ -150,12 +158,13 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
         std::wstring name = pProps->pszwName;
         std::wstring desc = pProps->pszwDeviceName; 
 
-        // std::wcout << L"Scanning: " << name << L" (" << desc << L") Status:" << pProps->Status << std::endl;
-
+        // Check for Public Adapter (TUN)
         if (name == publicAdapterName) {
             pPublicConn = pConnection;
         }
+        // Check for Private Adapter (WiFi)
         else if (desc.find(privateAdapterDesc) != std::wstring::npos) {
+            // Only use if connected (WiFi AP must be started)
             if (pProps->Status == NCS_CONNECTED) {
                 pPrivateConn = pConnection;
             }
@@ -178,13 +187,15 @@ bool IcsManager::EnableICS(const std::wstring& publicAdapterName, const std::wst
     }
 
     // Enable Shared-Public on Public Connection
-    if (!SetConnectionSharing(pNSM.Get(), pPublicConn.Get(), ICSSHARINGTYPE_PUBLIC)) {
+    // Pass '0' for ICSSHARINGTYPE_PUBLIC
+    if (!SetConnectionSharing(pNSM.Get(), pPublicConn.Get(), 0)) {
         std::wcerr << L"Failed to enable Public Sharing on " << publicAdapterName << std::endl;
         return false;
     }
 
     // Enable Shared-Private on Private Connection
-    if (!SetConnectionSharing(pNSM.Get(), pPrivateConn.Get(), ICSSHARINGTYPE_PRIVATE)) {
+    // Pass '1' for ICSSHARINGTYPE_PRIVATE
+    if (!SetConnectionSharing(pNSM.Get(), pPrivateConn.Get(), 1)) {
         std::wcerr << L"Failed to enable Private Sharing on WiFi adapter" << std::endl;
         return false;
     }
@@ -200,10 +211,10 @@ bool IcsManager::SetConnectionSharing(INetSharingManager* pNSM, INetConnection* 
     hr = pNSM->get_INetSharingConfigurationForINetConnection(pConnection, &pConfig);
     if (FAILED(hr)) return false;
 
-    // Force enable
+    // Force enable sharing with the specified type
     hr = pConfig->EnableSharing((SHARING_CONNECTION_TYPE)type);
     if (FAILED(hr)) {
-        // std::wcerr << L"EnableSharing type " << type << L" failed: " << std::hex << hr << std::endl;
+        std::wcerr << L"EnableSharing failed with hr=" << std::hex << hr << std::endl;
         return false;
     }
     return true;
