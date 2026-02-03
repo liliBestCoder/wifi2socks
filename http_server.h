@@ -24,6 +24,10 @@ private:
     std::string handle_rules_get();
     std::string handle_rules_update(const std::string& type, const std::string& body);
     std::string handle_proxy_check();
+    std::string handle_logs_get();
+    long long m_last_log_pos = 0;
+    std::string handle_start();
+    std::string handle_stop();
 
     // Helpers
     struct HttpRequest {

@@ -27,6 +27,10 @@ LogLevel g_log_level = LOG_LEVEL_INFO;
 #include "traffic_manager.h"
 #include "http_server.h"
 
+
+
+std::atomic<bool> g_tap_running(true);
+
 // Main Entry Point
 int main() {
     // 0. Initialize Winsock first!
@@ -94,10 +98,20 @@ int main() {
     HANDLE tapHandle = TapDriver::instance().handle();
 
     while (true) {
-        // --- PROCESS PENDING TASKS FROM WORKERS ---
         // This handles the "Downstream" writes to LwIP without locking in Workers
         MainDispatcher::instance().process_pending();
-        // ------------------------------------------
+        // --- 核心：开关控制逻辑 ---
+        if (!g_tap_running) {
+            if (pending) {
+                // 如果当前正挂着一个 ReadFile，必须取消它
+                CancelIo(tapHandle);
+                pending = false;
+                ResetEvent(ol.hEvent);
+                LOG_INFO("TAP Read Canceled for Stop.\n");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue; // 跳过后续读取逻辑
+        }
 
         if (!pending) {
             if (!ReadFile(tapHandle, buffer, sizeof(buffer), &bytesRead, &ol)) {

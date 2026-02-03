@@ -9,6 +9,7 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
+#include <fstream>
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -132,7 +133,13 @@ void SimpleHttpServer::handle_client(uint64_t s) {
         resp = handle_rules_update("proxy", req.body);
     } else if (req.path == "/check") {
         resp = handle_proxy_check();
-    } else {
+    }else if (req.path == "/logs") {
+        resp = handle_logs_get();
+    }else if (req.path == "/start") {
+        resp = handle_start();
+    }else if (req.path == "/stop") {
+        resp = handle_stop();
+    }else {
         status = 404;
         resp = "{\"error\": \"Not Found\"}";
     }
@@ -230,8 +237,9 @@ std::string SimpleHttpServer::handle_rules_update(const std::string& type, const
 std::string SimpleHttpServer::handle_proxy_check() {
     SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
     if (s == INVALID_SOCKET) return "{\"state\":\"down\",\"error\":\"socket_failed\"}";
-    
-    DWORD timeout = 3000;
+
+    // 1. 设置严格超时
+    DWORD timeout = 4000; // 适当放宽至 4s，给隧道建立留时间
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
 
@@ -240,48 +248,136 @@ std::string SimpleHttpServer::handle_proxy_check() {
     addr.sin_family = AF_INET;
     inet_pton(AF_INET, g_config.proxy_ip.c_str(), &addr.sin_addr);
     addr.sin_port = htons(g_config.proxy_port);
-    
+
     auto start = std::chrono::steady_clock::now();
+
+    // 2. 连接代理服务器
     if (connect(s, (sockaddr*)&addr, sizeof(addr)) != 0) {
         closesocket(s);
         return "{\"state\":\"down\",\"error\":\"proxy_unreachable\"}";
     }
 
-    char handshake[] = { 0x05, 0x01, 0x00 };
-    if (send(s, handshake, 3, 0) != 3) { closesocket(s); return "{\"state\":\"down\"}"; }
-    
-    char buf[1024];
-    if (recv(s, buf, 2, 0) != 2 || buf[0] != 0x05 || buf[1] != 0x00) {
+    // 3. 发送 HTTP CONNECT 请求
+    // 注意：即使你的代理是 SOCKS5，很多代理也支持通过 HTTP 协议发送 CONNECT
+    std::string connect_req = "CONNECT www.google.com:80 HTTP/1.1\r\nProxy-Connection: Keep-Alive\r\n\r\n";
+    if (send(s, connect_req.c_str(), (int)connect_req.size(), 0) <= 0) {
         closesocket(s);
-        return "{\"state\":\"down\",\"error\":\"auth_failed\"}";
+        return "{\"state\":\"down\",\"error\":\"send_connect_failed\"}";
     }
 
-    std::string domain = "www.gstatic.com";
-    std::vector<uint8_t> req = { 0x05, 0x01, 0x00, 0x03, (uint8_t)domain.size() };
-    req.insert(req.end(), domain.begin(), domain.end());
-    req.push_back(0x00); req.push_back(80);
-    
-    if (send(s, (char*)req.data(), (int)req.size(), 0) != (int)req.size()) { closesocket(s); return "{\"state\":\"down\"}"; }
-    
-    int r = recv(s, buf, sizeof(buf), 0);
-    if (r < 10 || buf[1] != 0x00) {
+    char buf[2048];
+    memset(buf, 0, sizeof(buf));
+    int r = recv(s, buf, sizeof(buf) - 1, 0);
+
+    // 4. 校验隧道是否建立成功
+    if (r <= 0 || !strstr(buf, "200 Connection established") && !strstr(buf, "200 OK")) {
         closesocket(s);
-        return "{\"state\":\"down\",\"error\":\"target_unreachable\"}";
+        return "{\"state\":\"down\",\"error\":\"tunnel_failed\"}";
     }
 
-    std::string http = "HEAD /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n";
-    send(s, http.c_str(), (int)http.size(), 0);
-    
-    r = recv(s, buf, sizeof(buf)-1, 0);
+    // 5. 隧道通了！现在发送真正的探测请求
+    std::string probe_req = "HEAD /generate_204 HTTP/1.1\r\nHost: www.google.com\r\nConnection: close\r\n\r\n";
+    send(s, probe_req.c_str(), (int)probe_req.size(), 0);
+
+    memset(buf, 0, sizeof(buf));
+    r = recv(s, buf, sizeof(buf) - 1, 0);
     auto end = std::chrono::steady_clock::now();
     closesocket(s);
-    
+
     if (r > 0) {
         buf[r] = 0;
-        if (strstr(buf, "204 No Content") || strstr(buf, "200 OK")) {
+        // 只有看到 gstatic 的典型响应才算 true up
+        if (strstr(buf, "HTTP/1.1 204") || strstr(buf, "HTTP/1.1 200")) {
             long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
             return "{\"state\":\"up\",\"delay\":" + std::to_string(ms) + "}";
         }
     }
-    return "{\"state\":\"down\",\"error\":\"invalid_response\"}";
+
+    // 所有不符合预期的情况全部判为 down
+    return "{\"state\":\"down\",\"error\":\"target_no_response\"}";
+}
+
+std::string SimpleHttpServer::handle_logs_get() {
+    // 1. 以二进制模式打开日志文件
+    std::ifstream file("wifi2socks.log", std::ios::binary);
+    if (!file) return "[]";
+
+    // 2. 获取文件当前总大小
+    file.seekg(0, std::ios::end);
+    long long current_size = file.tellg();
+
+    // 3. 初始逻辑：如果从未读取过，且文件很大，只取最后 5000 字节防止首次加载卡顿
+    if (m_last_log_pos == 0 && current_size > 5000) {
+        m_last_log_pos = current_size - 5000;
+    }
+
+    // 4. 如果没有新内容，直接返回空数组
+    if (current_size <= m_last_log_pos) {
+        return "[]";
+    }
+
+    // 5. 定位到上次读取的位置
+    file.seekg(m_last_log_pos);
+
+    // 6. 读取所有新产生的内容
+    std::string new_content;
+    char buffer[4096];
+    while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
+        new_content.append(buffer, (size_t)file.gcount());
+    }
+
+    // 更新最后读取位置
+    m_last_log_pos = current_size;
+
+    // 7. 将文本按行切割并封装成 JSON 数组返回
+    std::stringstream ss;
+    ss << "[";
+    std::stringstream content_ss(new_content);
+    std::string line;
+    bool first = true;
+    while (std::getline(content_ss, line)) {
+        if (line.empty()) continue;
+
+        // 移除行尾的回车符 (\r)
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+
+        if (!first) ss << ",";
+
+        // 极简的 JSON 转义（处理双引号和反斜杠）
+        std::string escaped;
+        for (char c : line) {
+            if (c == '\"') escaped += "\\\"";
+            else if (c == '\\') escaped += "\\\\";
+            else escaped += c;
+        }
+
+        ss << "\"" << escaped << "\"";
+        first = false;
+    }
+    ss << "]";
+
+    return ss.str();
+}
+
+
+
+extern std::atomic<bool> g_tap_running;
+
+std::string SimpleHttpServer::handle_start() {
+    if (g_tap_running.exchange(true) == false) {
+        // 如果之前是 false，现在变成了 true
+        printf("[HTTP] Command Received: START TAP processing.\n");
+        // 这里可以调用 AsyncLogger 记录一下
+        // AsyncLogger::instance().log("[SYSTEM] TAP processing resumed via HTTP.\n");
+    }
+    return "{\"status\":\"ok\",\"action\":\"started\"}";
+}
+
+std::string SimpleHttpServer::handle_stop() {
+    if (g_tap_running.exchange(false) == true) {
+        // 如果之前是 true，现在变成了 false
+        printf("[HTTP] Command Received: STOP TAP processing.\n");
+        // AsyncLogger::instance().log("[SYSTEM] TAP processing paused via HTTP.\n");
+    }
+    return "{\"status\":\"ok\",\"action\":\"stopped\"}";
 }

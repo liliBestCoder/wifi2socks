@@ -31,4 +31,5 @@ private:
 
     std::atomic<bool> m_running;
     std::thread m_writer_thread;
+    FILE* m_file_ptr;
 };
