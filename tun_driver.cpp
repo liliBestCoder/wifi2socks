@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <string>
 #include <sstream>
+#include <objbase.h>
+#pragma comment(lib, "Ole32.lib")
 
 // Fake MAC for the TUN interface to pretend it's Ethernet
 uint8_t TunDriver::TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C };

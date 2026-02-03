@@ -14,6 +14,7 @@ LogLevel g_log_level = LOG_LEVEL_INFO;
 
 #include "tun_driver.h"
 #include "worker.h"
+#include "lwip/etharp.h"
 #include "lwip_handler.h"
 #include "proxy_tcp.h"
 #include "proxy_udp.h"
@@ -99,6 +100,12 @@ int main() {
     netif_add(&g_netif, &ip, &mask, &gw, NULL, netif_init_cb, ethernet_input);
     netif_set_default(&g_netif);
     netif_set_up(&g_netif);
+
+    // 4.1 Static ARP for Gateway (Required for Wintun/L3)
+    // Since Wintun is L3, it won't answer ARP. We must tell LwIP the Gateway's MAC is our fake one.
+    struct eth_addr gw_eth;
+    gw_eth.addr[0]=0x00; gw_eth.addr[1]=0x00; gw_eth.addr[2]=0x00; gw_eth.addr[3]=0x00; gw_eth.addr[4]=0x00; gw_eth.addr[5]=0x01;
+    etharp_add_static_entry(&gw, &gw_eth);
 
     // 5. Setup TCP Listener (Transparent Proxy)
     struct tcp_pcb* pcb = tcp_new();
