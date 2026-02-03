@@ -8,6 +8,7 @@
 #include <sstream>
 #include <vector>
 #include <chrono>
+#include <algorithm>
 
 #pragma comment(lib, "Ws2_32.lib")
 
@@ -74,15 +75,13 @@ void SimpleHttpServer::worker_loop() {
             continue;
         }
 
-        // Simple single-threaded handling per request for now (or detach)
-        // Detach is better to not block accept
         std::thread([this, client_sock]() {
             handle_client(client_sock);
         }).detach();
     }
 }
 
-static std::vector<std::string> split(const std::string& str, char delimiter) {
+static std::vector<std::string> split_str(const std::string& str, char delimiter) {
     std::vector<std::string> tokens;
     std::string token;
     std::istringstream tokenStream(str);
@@ -94,7 +93,7 @@ static std::vector<std::string> split(const std::string& str, char delimiter) {
 
 void SimpleHttpServer::handle_client(uint64_t s) {
     SOCKET sock = (SOCKET)s;
-    char buffer[4096]; // Limit header size
+    char buffer[4096];
     int r = recv(sock, buffer, sizeof(buffer) - 1, 0);
     if (r <= 0) { closesocket(sock); return; }
     buffer[r] = 0;
@@ -102,23 +101,19 @@ void SimpleHttpServer::handle_client(uint64_t s) {
     std::string raw(buffer);
     HttpRequest req;
     
-    // Very basic parsing
-    // Line 1: GET /path HTTP/1.1
     size_t line1_end = raw.find("\r\n");
     if (line1_end == std::string::npos) { closesocket(sock); return; }
     
     std::string line1 = raw.substr(0, line1_end);
-    std::vector<std::string> parts = split(line1, ' ');
+    std::vector<std::string> parts = split_str(line1, ' ');
     if (parts.size() >= 2) {
         req.method = parts[0];
         req.path = parts[1];
     }
 
-    // Body?
     size_t body_pos = raw.find("\r\n\r\n");
     if (body_pos != std::string::npos) {
         req.body = raw.substr(body_pos + 4);
-        // Check Content-Length if body is truncated? Ignoring for simplicity (assuming small payloads)
     }
 
     std::string resp;
@@ -147,18 +142,18 @@ void SimpleHttpServer::handle_client(uint64_t s) {
 
 void SimpleHttpServer::send_response(uint64_t s, int status, const std::string& content_type, const std::string& body) {
     SOCKET sock = (SOCKET)s;
-    std::string h = "HTTP/1.1 " + std::to_string(status) + " OK\r\n";
-    h += "Content-Type: " + content_type + "\r\n";
-    h += "Content-Length: " + std::to_string(body.size()) + "\r\n";
-    h += "Connection: close\r\n";
-    h += "Access-Control-Allow-Origin: *\r\n"; // CORS
-    h += "\r\n";
+    std::stringstream ss;
+    ss << "HTTP/1.1 " << status << " OK\r\n";
+    ss << "Content-Type: " << content_type << "\r\n";
+    ss << "Content-Length: " << body.size() << "\r\n";
+    ss << "Connection: close\r\n";
+    ss << "Access-Control-Allow-Origin: *\r\n";
+    ss << "\r\n";
     
+    std::string h = ss.str();
     send(sock, h.c_str(), (int)h.size(), 0);
     send(sock, body.c_str(), (int)body.size(), 0);
 }
-
-// --- Logic ---
 
 std::string SimpleHttpServer::handle_stats() {
     return TrafficManager::instance().get_json_stats();
@@ -167,31 +162,33 @@ std::string SimpleHttpServer::handle_stats() {
 std::string SimpleHttpServer::handle_rules_get() {
     std::stringstream ss;
     ss << "{";
-    auto list_to_json = [](const char* name, const std::vector<std::string>& list) {
+    
+    auto list_to_json = [](const std::string& name, const std::vector<std::string>& list) {
         std::stringstream s;
         s << \"" << name << "\":[";
         for(size_t i=0; i<list.size(); ++i) {
-            s << \"" << list[i] << \"" << (i<list.size()-1 ? "," : "");
+            s << \"" << list[i] << \""";
+            if (i < list.size() - 1) s << ",";
         }
         s << "]";
         return s.str();
     };
     
-    // We need to access RuleManager or Config. Config is easier.
     ss << list_to_json("direct_ip", g_config.direct_ip_list) << ",";
     ss << list_to_json("direct_domain", g_config.direct_domain_list) << ",";
     ss << list_to_json("block_ip", g_config.block_ip_list) << ",";
     ss << list_to_json("block_domain", g_config.block_domain_list) << ",";
     ss << list_to_json("proxy_ip", g_config.proxy_ip_list) << ",";
     ss << list_to_json("proxy_domain", g_config.proxy_domain_list);
+    
     ss << "}";
     return ss.str();
 }
 
-// Helper to extract list from JSON like {"ip": ["a", "b"], "domain": ["c"]}
 std::vector<std::string> SimpleHttpServer::json_parse_list(const std::string& json, const std::string& key) {
     std::vector<std::string> res;
-    size_t key_pos = json.find("\"" + key + "\"");
+    std::string pattern = \"" + key + \""";
+    size_t key_pos = json.find(pattern);
     if (key_pos == std::string::npos) return res;
     
     size_t start_bracket = json.find('[', key_pos);
@@ -230,60 +227,50 @@ std::string SimpleHttpServer::handle_rules_update(const std::string& type, const
 }
 
 std::string SimpleHttpServer::handle_proxy_check() {
-    // 1. Create Socket
     SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
     if (s == INVALID_SOCKET) return "{\"state\":\"down\",\"error\":\"socket_failed\"}";
     
-    // Set Timeout
     DWORD timeout = 3000;
     setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
 
-    // 2. Connect to Local Proxy
     sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     inet_pton(AF_INET, g_config.proxy_ip.c_str(), &addr.sin_addr);
     addr.sin_port = htons(g_config.proxy_port);
     
     auto start = std::chrono::steady_clock::now();
-    
     if (connect(s, (sockaddr*)&addr, sizeof(addr)) != 0) {
         closesocket(s);
         return "{\"state\":\"down\",\"error\":\"proxy_unreachable\"}";
     }
 
-    // 3. SOCKS5 Handshake
     char handshake[] = { 0x05, 0x01, 0x00 };
     if (send(s, handshake, 3, 0) != 3) { closesocket(s); return "{\"state\":\"down\"}"; }
     
-    char buf[512];
+    char buf[1024];
     if (recv(s, buf, 2, 0) != 2 || buf[0] != 0x05 || buf[1] != 0x00) {
         closesocket(s);
         return "{\"state\":\"down\",\"error\":\"auth_failed\"}";
     }
 
-    // 4. Connect to www.gstatic.com:80
-    // 05 01 00 03 <len> <domain> <port>
     std::string domain = "www.gstatic.com";
     std::vector<uint8_t> req = { 0x05, 0x01, 0x00, 0x03, (uint8_t)domain.size() };
     req.insert(req.end(), domain.begin(), domain.end());
-    req.push_back(0x00); req.push_back(80); // Port 80
+    req.push_back(0x00); req.push_back(80);
     
     if (send(s, (char*)req.data(), (int)req.size(), 0) != (int)req.size()) { closesocket(s); return "{\"state\":\"down\"}"; }
     
-    // Read connect response (variable length)
-    // Min 10 bytes: 05 00 00 01 <4ip> <2port>
     int r = recv(s, buf, sizeof(buf), 0);
     if (r < 10 || buf[1] != 0x00) {
         closesocket(s);
         return "{\"state\":\"down\",\"error\":\"target_unreachable\"}";
     }
 
-    // 5. Send HTTP HEAD
     std::string http = "HEAD /generate_204 HTTP/1.1\r\nHost: www.gstatic.com\r\nConnection: close\r\n\r\n";
     send(s, http.c_str(), (int)http.size(), 0);
     
-    // 6. Wait for response
     r = recv(s, buf, sizeof(buf)-1, 0);
     auto end = std::chrono::steady_clock::now();
     closesocket(s);
@@ -292,4 +279,9 @@ std::string SimpleHttpServer::handle_proxy_check() {
         buf[r] = 0;
         if (strstr(buf, "204 No Content") || strstr(buf, "200 OK")) {
             long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-            return "{\"state\":\"up\",\"delay\":
+            return "{\"state\":\"up\",\"delay\":" + std::to_string(ms) + "}";
+        }
+    }
+    
+    return "{\"state\":\"down\",\"error\":\"http_failed\"}";
+}

@@ -18,7 +18,7 @@ public:
     void start();
     void stop();
 
-    // API
+    // API - Must be public
     std::string get_json_stats();
 
 private:

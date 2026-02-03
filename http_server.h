@@ -35,6 +35,7 @@ private:
     
     bool parse_request(const std::string& raw, HttpRequest& req);
     void send_response(uint64_t sock, int status, const std::string& content_type, const std::string& body);
+    // Updated signature: takes json and key
     std::vector<std::string> json_parse_list(const std::string& json, const std::string& key);
 
     std::atomic<bool> m_running;
