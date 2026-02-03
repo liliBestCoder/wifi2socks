@@ -161,19 +161,6 @@ void SimpleHttpServer::send_response(uint64_t s, int status, const std::string& 
 // --- Logic ---
 
 std::string SimpleHttpServer::handle_stats() {
-    // Re-use logic from TrafficManager but return string instead of pipe
-    // Need to modify TrafficManager to expose a getter or just read globals if we make them public getters
-    // Or just re-implement the JSON build here. TrafficManager's speed vars are private.
-    // I need to add getters to TrafficManager.
-    // For now, I'll update TrafficManager to public or add getters.
-    // Let's assume I added get_stats() to TrafficManager.
-    // Actually, TrafficManager::instance() has report methods.
-    // I should modify TrafficManager to return the JSON string.
-    
-    // Quick fix: Add get_json() to TrafficManager header.
-    // Wait, I can't modify TrafficManager easily in the same step.
-    // I'll assume I can edit it.
-    
     return TrafficManager::instance().get_json_stats();
 }
 
@@ -184,7 +171,7 @@ std::string SimpleHttpServer::handle_rules_get() {
         std::stringstream s;
         s << \"" << name << "\":[";
         for(size_t i=0; i<list.size(); ++i) {
-            s << \"" << list[i] << "\"" << (i<list.size()-1 ? "," : "");
+            s << \"" << list[i] << \"" << (i<list.size()-1 ? "," : "");
         }
         s << "]";
         return s.str();
@@ -255,7 +242,7 @@ std::string SimpleHttpServer::handle_proxy_check() {
     // 2. Connect to Local Proxy
     sockaddr_in addr;
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr(g_config.proxy_ip.c_str());
+    inet_pton(AF_INET, g_config.proxy_ip.c_str(), &addr.sin_addr);
     addr.sin_port = htons(g_config.proxy_port);
     
     auto start = std::chrono::steady_clock::now();
@@ -311,6 +298,3 @@ std::string SimpleHttpServer::handle_proxy_check() {
     
     return "{\"state\":\"down\",\"error\":\"http_failed\"}";
 }
-
-// Need to update TrafficManager to expose get_json_stats
-// I will just parse this in SimpleHttpServer for now if I can't edit TrafficManager, but I can.

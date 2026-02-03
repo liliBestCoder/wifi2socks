@@ -18,6 +18,9 @@ public:
     void start();
     void stop();
 
+    // API
+    std::string get_json_stats();
+
 private:
     TrafficManager();
     ~TrafficManager();
@@ -39,7 +42,4 @@ private:
     std::atomic<bool> m_running{false};
 
     void speed_loop();
-    
-    // API
-    std::string get_json_stats();
 };
