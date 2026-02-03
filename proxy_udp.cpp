@@ -588,25 +588,22 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
                 return;
             }
 
-                        u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);
+            u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);
 
-                        // Fix: Disable WSAECONNRESET to prevent UDP socket from dying on ICMP errors
+            // Fix: Disable WSAECONNRESET to prevent UDP socket from dying on ICMP errors
+            #ifndef SIO_UDP_CONNRESET
 
-                        #ifndef SIO_UDP_CONNRESET
+            #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
 
-                        #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+            #endif
 
-                        #endif
+            BOOL bNewBehavior = FALSE;
 
-                        BOOL bNewBehavior = FALSE;
+            DWORD dwBytesReturned = 0;
 
-                        DWORD dwBytesReturned = 0;
+            WSAIoctl(sess->udp_sock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
 
-                        WSAIoctl(sess->udp_sock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
-
-            
-
-                        // Optimization 2: Increase UDP Buffer for Video/Streaming (Correct 1MB)
+            // Optimization 2: Increase UDP Buffer for Video/Streaming (Correct 1MB)
             int buf_size = 1024 * 1024; 
             setsockopt(sess->udp_sock, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
             setsockopt(sess->udp_sock, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
@@ -646,9 +643,8 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         dport_h == 5355 ||  // LLMNR
         dport_h == 137 ||   // NetBIOS Name Service
         dport_h == 138 ||   // NetBIOS Datagram Service
-        dport_h == 1900 ||  // SSDP (UPnP)
-        // NTP
-        dport_h == 123 ) {  
+        dport_h == 1900 // SSDP (UPnP)
+    ) {  
         return; // Drop immediately
     }
 
