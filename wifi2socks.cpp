@@ -101,7 +101,7 @@ int main() {
     ip4addr_aton(g_config.tap_netmask.c_str(), &mask);
     ip4addr_aton(g_config.tap_gateway.c_str(), &gw);
 
-    netif_add(&g_netif, &ip, &mask, &gw, NULL, netif_init_cb, ethernet_input);
+    netif_add(&g_netif, &gw, &mask, &ip, NULL, netif_init_cb, ethernet_input);
     netif_set_default(&g_netif);
     netif_set_up(&g_netif);
 
@@ -110,6 +110,8 @@ int main() {
     struct eth_addr gw_eth;
     gw_eth.addr[0]=0x00; gw_eth.addr[1]=0x00; gw_eth.addr[2]=0x00; gw_eth.addr[3]=0x00; gw_eth.addr[4]=0x00; gw_eth.addr[5]=0x01;
     etharp_add_static_entry(&gw, &gw_eth);
+    // Static ARP for Host (Windows) - Critical for replies to reach Wintun
+    etharp_add_static_entry(&ip, &gw_eth);
 
     // 5. Setup TCP Listener (Transparent Proxy)
     struct tcp_pcb* pcb = tcp_new();
