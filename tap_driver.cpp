@@ -1,10 +1,21 @@
 #include "tap_driver.h"
 #include "app_config.h"
+#include "traffic_manager.h"
 #include <cstdio>
 #include <winioctl.h>
 #include <algorithm>
+#include <sstream>
+#include <iomanip>
 
-const uint8_t TapDriver::TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C };
+uint8_t TapDriver::TAP_MAC[6] = { 0x00, 0xFF, 0x92, 0xEA, 0x69, 0x5C };
+
+static void parse_mac(const std::string& str, uint8_t* mac) {
+    unsigned int bytes[6];
+    if (sscanf_s(str.c_str(), "%x:%x:%x:%x:%x:%x", 
+        &bytes[0], &bytes[1], &bytes[2], &bytes[3], &bytes[4], &bytes[5]) == 6) {
+        for (int i=0; i<6; ++i) mac[i] = (uint8_t)bytes[i];
+    }
+}
 
 TapDriver& TapDriver::instance() {
     static TapDriver inst;
@@ -14,6 +25,7 @@ TapDriver& TapDriver::instance() {
 TapDriver::TapDriver() 
     : m_tap(INVALID_HANDLE_VALUE), m_running(true), 
       m_write_idx(0), m_read_idx(0), m_size(TAP_RING_BUFFER_SIZE) {
+    parse_mac(g_config.tap_mac, TAP_MAC);
     m_buffer.resize(m_size);
     m_writer_thread = std::thread(&TapDriver::writer_loop, this);
 }
@@ -45,6 +57,8 @@ bool TapDriver::init(const char* device_guid) {
 void TapDriver::send_async(const uint8_t* buf, int len) {
     if (len <= 0 || len > 2000) return; // Basic sanity check, Ethernet MTU is usually 1500
     
+    TrafficManager::instance().report_tap_rx(len);
+
     {
         std::lock_guard<std::mutex> lock(m_mtx);
         

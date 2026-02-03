@@ -1,6 +1,8 @@
 #ifndef LWIP_LWIPOPTS_H
 #define LWIP_LWIPOPTS_H
 
+#include <stdint.h>
+
 // --- 1. SYSTEM MODE ---
 #define NO_SYS                          1  // Raw API mode
 #define SYS_LIGHTWEIGHT_PROT            0 
@@ -19,11 +21,24 @@
 #define PBUF_POOL_BUFSIZE               2048 // Large enough for MTU + Headers
 
 // --- 4. TCP/IP ---
+// Globals defined in config_loader.cpp
+#ifdef __cplusplus
+extern "C" {
+#endif
+    extern uint32_t g_cfg_tcp_wnd;
+    extern uint32_t g_cfg_tcp_snd_buf;
+    extern uint32_t g_cfg_tcp_mss;
+    extern uint32_t g_cfg_tcp_snd_lowat;
+#ifdef __cplusplus
+}
+#endif
+
 #define LWIP_TCP                        1
-#define TCP_MSS                         1460  // Adjusted for Ethernet MTU
-#define TCP_WND                         (512 * 1024)   // 512KB window for high throughput
-#define TCP_SND_BUF                     (4096 * 1024) // 512KB for HD streaming
-#define TCP_SNDLOWAT                    (32 * 1024)  // Fixed: Prevent u16_t overflow with large SND_BUF
+#define TCP_MSS                         (g_cfg_tcp_mss)
+#define TCP_WND                         (g_cfg_tcp_wnd)
+#define TCP_SND_BUF                     (g_cfg_tcp_snd_buf)
+#define TCP_SNDLOWAT                    (g_cfg_tcp_snd_lowat)
+
 #define LWIP_WND_SCALE                  1
 #define TCP_RCV_SCALE                   4     // Scale 4 (x16) -> 1MB Max Window
 

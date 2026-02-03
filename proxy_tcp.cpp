@@ -3,9 +3,11 @@
 #include "nat_table.h"
 #include "tls_parser.h"
 #include "app_config.h"
+#include "traffic_manager.h"
 #include "lwip_handler.h"
 #include "main_dispatcher.h"
 #include "geo_checker.h"
+#include "rule_manager.h"
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -49,7 +51,7 @@ struct TcpCtx {
 
     TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
                tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0), client_ip(0), client_port(0), is_direct(false) {
-        sni_buffer.reserve(MAX_SNI_LEN);
+        sni_buffer.reserve(g_config.max_sni_len);
         upstream_data.reserve(8192); 
     }
 };
@@ -172,6 +174,7 @@ void handle_proxy_read(TcpCtx* ctx) {
     int r = recv(ctx->proxy_socket, (char*)read_buf.data(), (int)read_buf.size(), 0);
     
     if (r > 0) {
+        TrafficManager::instance().report_proxy_rx(r);
         LOG_DEBUG("[TCP] Recv %d bytes: %d.%d.%d.%d:%d <- %d.%d.%d.%d:%d\n", r,
             ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ntohs(ctx->client_port),
             ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
@@ -199,6 +202,7 @@ void handle_handshake_read(TcpCtx* ctx) {
     int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
     
     if (r > 0) {
+        TrafficManager::instance().report_proxy_rx(r);
         std::string s(buf, r);
         size_t header_end = s.find("\r\n\r\n");
         
@@ -229,6 +233,7 @@ void handle_handshake_read(TcpCtx* ctx) {
                                  close_tcp_ctx(ctx);
                                  return;
                              }
+                             TrafficManager::instance().report_proxy_tx(sent);
                              ptr += sent;
                              remaining -= sent;
                          }
@@ -293,7 +298,8 @@ void handle_proxy_connect(TcpCtx* ctx) {
         {
             std::lock_guard<std::mutex> lock(ctx->data_mtx);
             if (!ctx->upstream_data.empty()) {
-                 send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
+                 int sent = send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
+                 if (sent > 0) TrafficManager::instance().report_proxy_tx(sent);
                  ctx->upstream_data.clear();
             }
             ctx->connected = true;
@@ -335,6 +341,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
          close_tcp_ctx(ctx); 
          return;
     }
+    TrafficManager::instance().report_proxy_tx(sent);
 
     ctx->state = TcpCtx::HANDSHAKE;
 
@@ -372,10 +379,10 @@ void connect_to_proxy_async(TcpCtx* ctx) {
             addr.sin_addr.S_addr = ctx->target.original_dst_ip;
             addr.sin_port = ctx->target.original_dst_port;
         } else {
-            if (sscanf_s(PROXY_IP, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+            if (sscanf_s(g_config.proxy_ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
                 addr.sin_addr.S_addr = (a) | (b << 8) | (c << 16) | (d << 24);
             } else { addr.sin_addr.S_addr = 0x0100007F; }
-            addr.sin_port = htons(PROXY_PORT);
+            addr.sin_port = htons(g_config.proxy_port);
         }
 
         ctx->worker->connect_async(
@@ -409,7 +416,8 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         ctx->worker->queue_task([ctx, d = std::move(data)]() {
             if (ctx->closed) return;
             if (ctx->proxy_socket != INVALID_SOCKET) {
-                send(ctx->proxy_socket, (const char*)d.data(), (int)d.size(), 0);
+                int sent = send(ctx->proxy_socket, (const char*)d.data(), (int)d.size(), 0);
+                if (sent > 0) TrafficManager::instance().report_proxy_tx(sent);
             }
         });
     } else {
@@ -419,8 +427,8 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
             ctx->upstream_data.insert(ctx->upstream_data.end(), d, d + q->len);
             
             if (ctx->state == TcpCtx::PRE_CONNECT) {
-                if (ctx->sni_buffer.size() < MAX_SNI_LEN) {
-                    size_t to_copy = (std::min)((size_t)q->len, (size_t)(MAX_SNI_LEN - ctx->sni_buffer.size()));
+                if (ctx->sni_buffer.size() < g_config.max_sni_len) {
+                    size_t to_copy = (std::min)((size_t)q->len, (size_t)(g_config.max_sni_len - ctx->sni_buffer.size()));
                     ctx->sni_buffer.insert(ctx->sni_buffer.end(), d, d + to_copy);
                 }
             }
@@ -458,37 +466,61 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
                 if (!sni.empty()) {
                     ctx->detected_domain = sni;
                     
-                    // 域名判定具有最高优先级
-                    if (GeoChecker::instance().is_cn_domain(sni) || 
-                        GeoChecker::instance().is_tencent_domain(sni)) {
+                    // 0. Custom Rules (Highest Priority)
+                    RouteAction action = RuleManager::instance().match_domain(sni);
+                    if (action == RouteAction::DIRECT) {
                         ctx->is_direct = true;
-                        std::string tag = GeoChecker::instance().query_domain(sni);
-                        LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Direct.\n", sni.c_str(), tag.c_str());
+                        LOG_INFO("[TCP] Domain Rule: %s -> Direct.\n", sni.c_str());
+                    } else if (action == RouteAction::PROXY) {
+                        ctx->is_direct = false;
+                        LOG_INFO("[TCP] Domain Rule: %s -> Proxy.\n", sni.c_str());
+                    } else if (action == RouteAction::BLOCK) {
+                        LOG_INFO("[TCP] Domain Rule: %s -> Block.\n", sni.c_str());
+                        close_tcp_ctx(ctx);
+                        return ERR_ABRT;
                     } else {
-                        // 特殊处理：如果域名以 .cn 结尾，强制走直连
-                        // 这解决了 googleapis.cn 被归类为 GOOGLE (Proxy) 但实际应该直连的问题
-                        bool is_cn_suffix = false;
-                        if (sni.length() >= 3) {
-                            std::string suffix = sni.substr(sni.length() - 3);
-                            std::transform(suffix.begin(), suffix.end(), suffix.begin(), 
-                                [](unsigned char c){ return std::tolower(c); });
-                            if (suffix == ".cn") is_cn_suffix = true;
-                        }
-
-                        if (is_cn_suffix) {
+                        // 1. GeoIP/GeoSite Checks (Fallback)
+                        if (GeoChecker::instance().is_cn_domain(sni) || 
+                            GeoChecker::instance().is_tencent_domain(sni)) {
                             ctx->is_direct = true;
                             std::string tag = GeoChecker::instance().query_domain(sni);
-                            LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Direct (.cn suffix).\n", sni.c_str(), tag.c_str());
+                            LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Direct.\n", sni.c_str(), tag.c_str());
                         } else {
-                            if (!ctx->is_direct) {
-                                ctx->is_direct = false;
+                            // 特殊处理：如果域名以 .cn 结尾，强制走直连
+                            bool is_cn_suffix = false;
+                            if (sni.length() >= 3) {
+                                std::string suffix = sni.substr(sni.length() - 3);
+                                std::transform(suffix.begin(), suffix.end(), suffix.begin(), 
+                                    [](unsigned char c){ return std::tolower(c); });
+                                if (suffix == ".cn") is_cn_suffix = true;
+                            }
+
+                            if (is_cn_suffix) {
+                                ctx->is_direct = true;
                                 std::string tag = GeoChecker::instance().query_domain(sni);
-                                LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Proxy.\n", sni.c_str(), tag.c_str());
+                                LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Direct (.cn suffix).\n", sni.c_str(), tag.c_str());
+                            } else {
+                                if (!ctx->is_direct) {
+                                    ctx->is_direct = false;
+                                    std::string tag = GeoChecker::instance().query_domain(sni);
+                                    LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Proxy.\n", sni.c_str(), tag.c_str());
+                                }
                             }
                         }
                     }
                 } else {
                     uint32_t ip = ctx->target.original_dst_ip;
+                    
+                    // IP Rules
+                    RouteAction action = RuleManager::instance().match_ip(ntohl(ip));
+                    if (action == RouteAction::DIRECT) ctx->is_direct = true;
+                    else if (action == RouteAction::PROXY) ctx->is_direct = false;
+                    else if (action == RouteAction::BLOCK) {
+                        close_tcp_ctx(ctx);
+                        return ERR_ABRT;
+                    }
+                    // Else use existing default (usually GeoChecker is_cn_ip checked at accept)
+                    
                     std::string ip_str = std::to_string(ip & 0xFF) + "." +
                         std::to_string((ip >> 8) & 0xFF) + "." +
                         std::to_string((ip >> 16) & 0xFF) + "." +
@@ -514,12 +546,32 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     ctx->client_ip = newpcb->remote_ip.addr;
     ctx->client_port = newpcb->remote_port;
 
-    // IP Bypass Check
-    if (GeoChecker::instance().is_cn_ip(ntohl(target.original_dst_ip))) {
-        ctx->is_direct = true;
-        LOG_INFO("[TCP] IP Detected: %d.%d.%d.%d. Direct.\n",
+    // IP Check (RuleManager Priority)
+    uint32_t dst_ip_h = ntohl(target.original_dst_ip);
+    RouteAction ip_action = RuleManager::instance().match_ip(dst_ip_h);
+    
+    if (ip_action == RouteAction::BLOCK) {
+        LOG_INFO("[TCP] IP Rule: Block %d.%d.%d.%d\n", 
             target.original_dst_ip & 0xFF, (target.original_dst_ip >> 8) & 0xFF, 
             (target.original_dst_ip >> 16) & 0xFF, (target.original_dst_ip >> 24) & 0xFF);
+        delete ctx;
+        return ERR_ABRT;
+    } else if (ip_action == RouteAction::DIRECT) {
+        ctx->is_direct = true;
+        LOG_INFO("[TCP] IP Rule: Direct %d.%d.%d.%d\n", 
+            target.original_dst_ip & 0xFF, (target.original_dst_ip >> 8) & 0xFF, 
+            (target.original_dst_ip >> 16) & 0xFF, (target.original_dst_ip >> 24) & 0xFF);
+    } else if (ip_action == RouteAction::PROXY) {
+        ctx->is_direct = false;
+        // Proceed
+    } else {
+        // Fallback to GeoIP
+        if (GeoChecker::instance().is_cn_ip(dst_ip_h)) {
+            ctx->is_direct = true;
+            LOG_INFO("[TCP] IP Detected: %d.%d.%d.%d. Direct.\n",
+                target.original_dst_ip & 0xFF, (target.original_dst_ip >> 8) & 0xFF, 
+                (target.original_dst_ip >> 16) & 0xFF, (target.original_dst_ip >> 24) & 0xFF);
+        }
     }
 
     tcp_arg(newpcb, ctx);

@@ -24,108 +24,61 @@ GeoChecker& GeoChecker::instance() {
     return inst;
 }
 
-GeoChecker::GeoChecker(const std::string& geoip_file, const std::string& geosite_file) {
+GeoChecker::GeoChecker() : m_ready(false) {
     GOOGLE_PROTOBUF_VERIFY_VERSION;
-    load_geoip(geoip_file);
-    load_geosite(geosite_file);
 }
 
 GeoChecker::~GeoChecker() {
+    if (m_load_thread.joinable()) m_load_thread.join();
     // google::protobuf::ShutdownProtobufLibrary();
 }
 
-uint16_t GeoChecker::get_or_create_geoip_code(const std::string& code) {
-    std::string upper_code = to_upper(code);
-    auto it = geoip_code_cache_.find(upper_code);
-    if (it != geoip_code_cache_.end()) return it->second;
-
-    uint16_t idx = (uint16_t)geoip_codes_.size();
-    geoip_codes_.push_back(upper_code);
-    geoip_code_cache_[upper_code] = idx;
-    
-    if (upper_code == "CN") {
-        cn_ip_idx_ = idx;
-    }
-    return idx;
+void GeoChecker::init_async(const std::string& geoip_file, const std::string& geosite_file) {
+    m_load_thread = std::thread(&GeoChecker::load_data, this, geoip_file, geosite_file);
 }
 
-uint16_t GeoChecker::get_or_create_geosite_code(const std::string& code) {
-    std::string upper_code = to_upper(code);
-    auto it = geosite_code_cache_.find(upper_code);
-    if (it != geosite_code_cache_.end()) return it->second;
-
-    uint16_t idx = (uint16_t)geosite_codes_.size();
-    geosite_codes_.push_back(upper_code);
-    geosite_code_cache_[upper_code] = idx;
-
-    // --- 1. 定义已知国内 Tag 列表 (白名单) ---
-    // 使用 static set 避免重复构造，且查找快
-    static const std::unordered_set<std::string> CN_TAGS = {
-        // 核心互联网巨头
-        "TENCENT", "QQ", "WECHAT", 
-        "ALIBABA", "TAOBAO", "ALIYUN", "TMALL", "DINGTALK",
-        "BAIDU", "NETEASE", "163", "JD", "360", "SINA", "SOHU",
-        "BILIBILI", "DOUYIN", "UNKNOWN",
-        "IQOO", 
-        
-        // 手机/硬件厂商 (用于云服务直连)
-        "HUAWEI", "XIAOMI", "OPPO", "VIVO", "ONEPLUS", "ALLAWN", "MEIZU", "ZTE", "DJI",
-        
-        // 其他常见国内服务
-        "CTRIP", "MEITUAN", "PINDUODUO", "KUAISHOU", "XHS", // 小红书
-        "ELEVOC", "KINGSOFT", "IFLYTEK"
-    };
-
-    // --- 2. 判定是否为 CN ---
-    bool is_cn = false;
+void GeoChecker::load_data(const std::string& geoip_file, const std::string& geosite_file) {
+    load_geoip(geoip_file);
+    load_geosite(geosite_file);
     
-    // 规则 A: 包含 "CN" 子串 (如 "CATEGORY-CN", "GEOLOCATION-CN")
-    // 修正: 排除 "!CN" (如 "GEOLOCATION-!CN")
-    if (upper_code.find("CN") != std::string::npos && upper_code.find("!CN") == std::string::npos) {
-        is_cn = true;
-    }
-    // 规则 C: 命中白名单 (精确查找或子串包含)
-    else {
-        // 优先精确查找
-        if (CN_TAGS.count(upper_code)) {
-            is_cn = true;
-        } else {
-            // 遍历白名单检查是否包含 (例如 "CATEGORY-HUAWEI" 包含 "HUAWEI")
-            // 虽然是 O(N)，但 N 较小且仅在加载时执行一次
-            for (const auto& tag : CN_TAGS) {
-                if (upper_code.find(tag) != std::string::npos) {
-                    is_cn = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    if (is_cn) cn_site_idxs_.insert(idx);
-
-    // --- 3. 判定特定大厂 (用于更细粒度的逻辑) ---
-    if (upper_code.find("GOOGLE") != std::string::npos) google_site_idxs_.insert(idx);
+    // Clear caches to free memory
+    geoip_code_cache_.clear();
+    geosite_code_cache_.clear();
     
-    bool is_tencent = false;
-    if (upper_code.find("TENCENT") != std::string::npos) is_tencent = true;
-    else if (upper_code.find("QQ") != std::string::npos) is_tencent = true;
-    else if (upper_code.find("WECHAT") != std::string::npos) is_tencent = true;
-    if (is_tencent) tencent_site_idxs_.insert(idx);
+    m_ready = true;
+    printf("[GeoChecker] Loaded async. Ready.\n");
+}
 
-    return idx;
+static bool read_file_to_buffer(const std::string& filepath, std::vector<char>& buffer) {
+    std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) return false;
+    std::streamsize size = file.tellg();
+    if (size <= 0) return false;
+    file.seekg(0, std::ios::beg);
+    buffer.resize(size);
+    if (file.read(buffer.data(), size)) return true;
+    return false;
 }
 
 void GeoChecker::load_geoip(const std::string& filepath) {
     v2ray::core::app::router::routercommon::GeoIPList list;
-    std::ifstream fin(filepath, std::ios::binary);
-    // 如果文件不存在，仅打印错误不抛出，以免 crash
-    if (!fin.is_open()) {
+    
+    // Optimization: Read entire file into memory buffer first
+    std::vector<char> buffer;
+    if (!read_file_to_buffer(filepath, buffer)) {
         std::cerr << "[GeoChecker] Failed to open " << filepath << std::endl;
         return;
     }
-    if (!list.ParseFromIstream(&fin)) {
+    
+    if (!list.ParseFromArray(buffer.data(), (int)buffer.size())) {
         std::cerr << "[GeoChecker] Failed to parse " << filepath << std::endl;
         return;
+    }
+
+    // Reserve vector memory to avoid reallocations
+    if (list.entry_size() > 0) {
+        // Estimate: 200 countries, 5000 ranges avg?
+        ip_ranges_.reserve(list.entry_size() * 100); 
     }
 
     for (int i = 0; i < list.entry_size(); ++i) {
@@ -157,12 +110,13 @@ void GeoChecker::load_geoip(const std::string& filepath) {
 
 void GeoChecker::load_geosite(const std::string& filepath) {
     v2ray::core::app::router::routercommon::GeoSiteList list;
-    std::ifstream fin(filepath, std::ios::binary);
-    if (!fin.is_open()) {
+    
+    std::vector<char> buffer;
+    if (!read_file_to_buffer(filepath, buffer)) {
         std::cerr << "[GeoChecker] Failed to open " << filepath << std::endl;
         return;
     }
-    if (!list.ParseFromIstream(&fin)) {
+    if (!list.ParseFromArray(buffer.data(), (int)buffer.size())) {
         std::cerr << "[GeoChecker] Failed to parse " << filepath << std::endl;
         return;
     }
@@ -248,6 +202,7 @@ void GeoChecker::load_geosite(const std::string& filepath) {
 }
 
 std::string GeoChecker::query_ip(const std::string& ip_bytes) {
+    if (!m_ready) return "UNKNOWN";
     if (ip_bytes.size() != 4) return "UNKNOWN";
     uint32_t ip_num = ntohl(*reinterpret_cast<const uint32_t*>(ip_bytes.data()));
 
@@ -278,6 +233,7 @@ bool is_common_cn_range(uint32_t ip) {
 }
 
 bool GeoChecker::is_cn_ip(uint32_t ip_host) {
+    if (!m_ready) return false;
     if (cn_ip_idx_ == UINT16_MAX) return false;
 
     auto it = std::lower_bound(
@@ -305,6 +261,7 @@ bool GeoChecker::is_cn_ip(uint32_t ip_host) {
 
 
 std::string GeoChecker::query_domain(const std::string& domain) {
+    if (!m_ready) return "UNKNOWN";
     std::string d = to_lower(domain);
     if (!d.empty() && d.back() == '.') d.pop_back(); // 去除结尾的点
 
@@ -350,8 +307,11 @@ bool is_in_set(const std::string& domain,
               const std::unordered_map<std::string, uint16_t>& suffix,
               const std::vector<std::pair<std::string, uint16_t>>& keyword,
               const std::vector<std::pair<std::regex, uint16_t>>& regex_rules,
-              const std::set<uint16_t>& target_idxs) {
+              const std::set<uint16_t>& target_idxs,
+              bool ready) {
     
+    if (!ready) return false;
+
     std::string d = to_lower(domain);
     if (!d.empty() && d.back() == '.') d.pop_back();
 
@@ -392,13 +352,13 @@ bool is_in_set(const std::string& domain,
 }
 
 bool GeoChecker::is_cn_domain(const std::string& domain) {
-    return is_in_set(domain, domain_exact_, domain_suffix_, domain_keyword_, domain_regex_, cn_site_idxs_);
+    return is_in_set(domain, domain_exact_, domain_suffix_, domain_keyword_, domain_regex_, cn_site_idxs_, m_ready);
 }
 
 bool GeoChecker::is_google_domain(const std::string& domain) {
-    return is_in_set(domain, domain_exact_, domain_suffix_, domain_keyword_, domain_regex_, google_site_idxs_);
+    return is_in_set(domain, domain_exact_, domain_suffix_, domain_keyword_, domain_regex_, google_site_idxs_, m_ready);
 }
 
 bool GeoChecker::is_tencent_domain(const std::string& domain) {
-    return is_in_set(domain, domain_exact_, domain_suffix_, domain_keyword_, domain_regex_, tencent_site_idxs_);
+    return is_in_set(domain, domain_exact_, domain_suffix_, domain_keyword_, domain_regex_, tencent_site_idxs_, m_ready);
 }

@@ -2,9 +2,11 @@
 #include "worker.h"
 #include "tap_driver.h"
 #include "app_config.h"
+#include "traffic_manager.h"
 #include "lwip_handler.h"
-#include "nat_table.h"
+#include "main_dispatcher.h"
 #include "geo_checker.h"
+#include "rule_manager.h"
 #include <map>
 #include <vector>
 #include <deque>
@@ -156,6 +158,7 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
     if (sess->state == UdpSession::CLOSED) return;
     
     if (len > 0 && data && addr) {
+        TrafficManager::instance().report_proxy_rx(len);
         // Log incoming packet (Debug)
         uint32_t src_ip_net = addr->sin_addr.S_un.S_addr;
         LOG_DEBUG("[UDP] Recv %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
@@ -338,6 +341,8 @@ void send_dns_over_tcp(UdpSession* sess, const std::vector<uint8_t>& payload) {
     if (sent == SOCKET_ERROR) {
         LOG_INFO("[DNS-TCP] send failed: %d\n", WSAGetLastError());
         close_udp_session_internal(sess);
+    } else {
+        TrafficManager::instance().report_proxy_tx(sent);
     }
 }
 
@@ -348,6 +353,7 @@ void handle_socks5_tcp_read(UdpSession* sess) {
     int r = recv(sess->tcp_sock, buf, sizeof(buf), 0);
     
     if (r > 0) {
+        TrafficManager::instance().report_proxy_rx(r);
         if (sess->state == UdpSession::HANDSHAKE_AUTH) {
             if (r >= 2 && buf[0] == 0x05 && buf[1] == 0x00) {
                 // Auth OK. Connect to Target (DNS Server).
@@ -361,7 +367,9 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                 uint16_t port = sess->proxy_target_port;
                 req.push_back(port & 0xFF); req.push_back((port >> 8) & 0xFF);
                 
-                send(sess->tcp_sock, (const char*)req.data(), (int)req.size(), 0);
+                int sent = send(sess->tcp_sock, (const char*)req.data(), (int)req.size(), 0);
+                if (sent > 0) TrafficManager::instance().report_proxy_tx(sent);
+                
                 sess->state = UdpSession::HANDSHAKE_CONNECT;
             } else {
                 close_udp_session_internal(sess);
@@ -630,7 +638,8 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
             dest_addr.sin_addr.S_un.S_addr = dst_ip;
             dest_addr.sin_port = dst_port; 
             
-            sendto(sess->udp_sock, (const char*)data.data(), (int)data.size(), 0, (sockaddr*)&dest_addr, sizeof(dest_addr));
+            int sent = sendto(sess->udp_sock, (const char*)data.data(), (int)data.size(), 0, (sockaddr*)&dest_addr, sizeof(dest_addr));
+            if (sent > 0) TrafficManager::instance().report_proxy_tx(sent);
         }
     });
 }
@@ -761,15 +770,16 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                         sockaddr_in proxy_addr; memset(&proxy_addr, 0, sizeof(proxy_addr));
                         proxy_addr.sin_family = AF_INET;
                         unsigned int a,b,c,d;
-                        if (sscanf_s(PROXY_IP, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+                        if (sscanf_s(g_config.proxy_ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
                             proxy_addr.sin_addr.S_un.S_addr = (a) | (b << 8) | (c << 16) | (d << 24);
                         } else { proxy_addr.sin_addr.S_un.S_addr = 0x0100007F; }
-                        proxy_addr.sin_port = htons(PROXY_PORT);
+                        proxy_addr.sin_port = htons(g_config.proxy_port);
                         
                         sess->worker->connect_async(sess->tcp_sock, proxy_addr, [sess]() {
                             if (sess->state == UdpSession::CLOSED) return;
                             uint8_t req[] = { 0x05, 0x01, 0x00 };
-                            send(sess->tcp_sock, (const char*)req, sizeof(req), 0);
+                            int sent = send(sess->tcp_sock, (const char*)req, sizeof(req), 0);
+                            if (sent > 0) TrafficManager::instance().report_proxy_tx(sent);
                             sess->state = UdpSession::HANDSHAKE_AUTH;
                             sess->worker->add_socket(sess->tcp_sock, 
                             [sess](char*, int, sockaddr_in*) { handle_socks5_tcp_read(sess); }, 

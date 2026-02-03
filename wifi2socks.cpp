@@ -20,15 +20,26 @@ LogLevel g_log_level = LOG_LEVEL_INFO;
 #include "main_dispatcher.h"
 #include "nat_table.h"
 #include "geo_checker.h"
+#include "config_loader.h"
 #include <iostream>
 #include <thread>
 
+#include "traffic_manager.h"
+#include "http_server.h"
+
 // Main Entry Point
 int main() {
+    // -1. Load Config
+    load_config("config.ini");
+    
+    // -0.5 Start Traffic Manager & HTTP API
+    TrafficManager::instance().start();
+    SimpleHttpServer::instance().start(g_config.http_api_port);
+
     // 0. Pre-load GeoIP/GeoSite
     try {
-        GeoChecker::instance();
-        LOG_INFO("GeoChecker loaded successfully.\n");
+        GeoChecker::instance().init_async();
+        LOG_INFO("GeoChecker loading in background...\n");
     } catch (const std::exception& e) {
         LOG_INFO("Warning: GeoChecker failed to load: %s. IP/Domain bypass may not work.\n", e.what());
     }
@@ -53,9 +64,9 @@ int main() {
     lwip_init();
 
     ip4_addr_t ip, mask, gw;
-    ip4addr_aton(TAP_IP, &ip);
-    ip4addr_aton(TAP_NETMASK, &mask);
-    ip4addr_aton(TAP_GW, &gw);
+    ip4addr_aton(g_config.tap_ip.c_str(), &ip);
+    ip4addr_aton(g_config.tap_netmask.c_str(), &mask);
+    ip4addr_aton(g_config.tap_gateway.c_str(), &gw);
 
     netif_add(&g_netif, &ip, &mask, &gw, NULL, netif_init_cb, ethernet_input);
     netif_set_default(&g_netif);
@@ -63,11 +74,11 @@ int main() {
 
     // 5. Setup TCP Listener (Transparent Proxy)
     struct tcp_pcb* pcb = tcp_new();
-    tcp_bind(pcb, IP_ADDR_ANY, LWIP_LISTEN_PORT);
+    tcp_bind(pcb, IP_ADDR_ANY, g_config.lwip_listen_port);
     pcb = tcp_listen(pcb);
     tcp_accept(pcb, tcp_proxy_accept);
 
-    LOG_INFO("LwIP Tun2Socks Running.\nProxy: %s:%d\nTAP IP: %s\n", PROXY_IP, PROXY_PORT, TAP_IP);
+    LOG_INFO("LwIP Tun2Socks Running.\nProxy: %s:%d\nTAP IP: %s\n", g_config.proxy_ip.c_str(), g_config.proxy_port, g_config.tap_ip.c_str());
 
     // 6. Main Loop (Read from TAP -> LwIP)
     uint8_t buffer[65536];
@@ -95,6 +106,7 @@ int main() {
             } else {
                 {
                     std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
+                    TrafficManager::instance().report_tap_tx(bytesRead);
                     process_tap_frame(buffer, bytesRead);
                 }
                 pending = false; 
@@ -107,6 +119,7 @@ int main() {
             if (waitRes == WAIT_OBJECT_0) {
                 if (GetOverlappedResult(tapHandle, &ol, &bytesRead, FALSE)) {
                     std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
+                    TrafficManager::instance().report_tap_tx(bytesRead);
                     process_tap_frame(buffer, bytesRead);
                 }
                 pending = false;

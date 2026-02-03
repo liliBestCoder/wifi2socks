@@ -22,7 +22,7 @@ public:
     HANDLE handle() const { return m_tap; }
     
     // Config
-    static const uint8_t TAP_MAC[6];
+    static uint8_t TAP_MAC[6];
     
 private:
     TapDriver();

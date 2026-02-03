@@ -132,6 +132,10 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="wifi2socks.cpp" />
+    <ClCompile Include="config_loader.cpp" />
+    <ClCompile Include="traffic_manager.cpp" />
+    <ClCompile Include="rule_manager.cpp" />
+    <ClCompile Include="http_server.cpp" />
     <ClCompile Include="logger.cpp" />
     <ClCompile Include="common.pb.cc" />
     <ClCompile Include="worker.cpp" />
@@ -172,6 +176,10 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="common.pb.h" />
+    <ClInclude Include="config_loader.h" />
+    <ClInclude Include="traffic_manager.h" />
+    <ClInclude Include="rule_manager.h" />
+    <ClInclude Include="http_server.h" />
     <ClInclude Include="geo_checker.h" />
     <ClInclude Include="lwipopts.h" />
     <ClInclude Include="packet.h" />

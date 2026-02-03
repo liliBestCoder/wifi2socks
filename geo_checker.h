@@ -9,6 +9,9 @@
 #include <cstdint>
 #include <regex>
 #include <set>
+#include <atomic>
+#include <thread>
+#include <mutex>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -34,8 +37,12 @@ struct GeoIPRange {
 class GeoChecker {
 public:
     static GeoChecker& instance();
-    GeoChecker(const std::string& geoip_file = "geoip.dat", const std::string& geosite_file = "geosite.dat");
+    GeoChecker(); // Default constructor, does not load
     ~GeoChecker();
+
+    // Async Init
+    void init_async(const std::string& geoip_file = "geoip.dat", const std::string& geosite_file = "geosite.dat");
+    bool is_ready() const { return m_ready; }
 
     // --------- IP 查询 ----------
     // ip_bytes 应当为 4 字节的二进制字符串（网络字节序）
@@ -51,11 +58,16 @@ public:
     bool is_tencent_domain(const std::string& domain);
 
 private:
+    void load_data(const std::string& geoip_file, const std::string& geosite_file);
     void load_geoip(const std::string& filepath);
     void load_geosite(const std::string& filepath);
     
     uint16_t get_or_create_geoip_code(const std::string& code);
     uint16_t get_or_create_geosite_code(const std::string& code);
+
+    // Sync
+    std::atomic<bool> m_ready;
+    std::thread m_load_thread;
 
     // 数据存储 - 分离 GeoIP 和 GeoSite
     std::vector<std::string> geoip_codes_;

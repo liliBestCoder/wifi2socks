@@ -1,18 +1,74 @@
 #pragma once
 
-// --- Configuration ---
-#define TAP_IP          "10.0.0.1"
-#define TAP_NETMASK     "255.255.255.0"
-#define TAP_GW          "10.0.0.1" 
-#define PROXY_IP        "127.0.0.1"
-#define PROXY_PORT      2080
-#define LWIP_LISTEN_PORT 7000
-#define MAX_SNI_LEN     4096
+#include <string>
+#include <vector>
+#include <cstdint>
 
-#define TAP_CONTROL_CODE(request, method) CTL_CODE(FILE_DEVICE_UNKNOWN, request, method, FILE_ANY_ACCESS)
-#define TAP_IOCTL_SET_MEDIA_STATUS TAP_CONTROL_CODE(6, METHOD_BUFFERED)
+// --- Configuration Struct ---
+struct AppConfig {
+    std::string tap_ip;
+    std::string tap_netmask;
+    std::string tap_gateway;
+    std::string tap_mac; // e.g. "00:FF:..."
+    
+    std::string proxy_ip;
+    uint16_t proxy_port;
+    
+    uint16_t lwip_listen_port;
+    uint32_t max_sni_len;
+    uint16_t http_api_port;
+    
+    // LwIP Tuning
+    uint32_t tcp_wnd;
+    uint32_t tcp_snd_buf;
+    uint32_t tcp_mss;
+    uint32_t tcp_snd_lowat;
+
+    // Rules (Persisted)
+    std::vector<std::string> direct_ip_list;
+    std::vector<std::string> direct_domain_list;
+    std::vector<std::string> block_ip_list;
+    std::vector<std::string> block_domain_list;
+    std::vector<std::string> proxy_ip_list;
+    std::vector<std::string> proxy_domain_list;
+
+    // Defaults
+    AppConfig() {
+        tap_ip = "10.0.0.1";
+        tap_netmask = "255.255.255.0";
+        tap_gateway = "10.0.0.1";
+        tap_mac = "00:FF:92:EA:69:5C";
+        
+        proxy_ip = "127.0.0.1";
+        proxy_port = 2080;
+        
+        lwip_listen_port = 7000;
+        max_sni_len = 4096;
+        http_api_port = 8080;
+        
+        tcp_wnd = 512 * 1024;
+        tcp_snd_buf = 4096 * 1024;
+        tcp_mss = 1460;
+        tcp_snd_lowat = 32 * 1024;
+    }
+};
+
+extern AppConfig g_config;
+
+// Expose variables for LwIP (C linkage)
+extern "C" {
+    extern uint32_t g_cfg_tcp_wnd;
+    extern uint32_t g_cfg_tcp_snd_buf;
+    extern uint32_t g_cfg_tcp_mss;
+    extern uint32_t g_cfg_tcp_snd_lowat;
+}
+
+// Keep some defines for backward compatibility if needed, or point them to g_config
+// But best to replace usages.
 
 #define TAP_WIN_PATH "\\\\.\\%s.tap"
+#define TAP_CONTROL_CODE(request, method) CTL_CODE(FILE_DEVICE_UNKNOWN, request, method, FILE_ANY_ACCESS)
+#define TAP_IOCTL_SET_MEDIA_STATUS TAP_CONTROL_CODE(6, METHOD_BUFFERED)
 
 #include <stdio.h>
 #include "logger.h"
@@ -34,4 +90,3 @@ extern LogLevel g_log_level;
 
 #define LOG_DEBUG(fmt, ...) LOG_PRINT(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
 #define LOG_INFO(fmt, ...)  LOG_PRINT(LOG_LEVEL_INFO, fmt, ##__VA_ARGS__)
-
