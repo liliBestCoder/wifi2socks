@@ -27,31 +27,7 @@ LogLevel g_log_level = LOG_LEVEL_INFO;
 #include "traffic_manager.h"
 #include "http_server.h"
 #include "wifi_ap.h"
-
-class MyWiFiListener : public IWiFiAPListener {
-public:
-    virtual void OnDeviceConnected(std::wstring remoteHostName) override {
-        LOG_INFO("WiFi: Device Connected: %ls\n", remoteHostName.c_str());
-    }
-    virtual void OnDeviceDisconnected(std::wstring deviceId) override {
-        LOG_INFO("WiFi: Device Disconnected: %ls\n", deviceId.c_str());
-    }
-    virtual void OnAdvertisementStarted() override {
-        LOG_INFO("WiFi: Advertisement Started.\n");
-    }
-    virtual void OnAdvertisementStopped(std::wstring message) override {
-        LOG_INFO("WiFi: Advertisement Stopped: %ls\n", message.c_str());
-    }
-    virtual void OnAdvertisementAborted(std::wstring message) override {
-        LOG_INFO("WiFi: Advertisement Aborted: %ls\n", message.c_str());
-    }
-    virtual void OnAsyncException(std::wstring message) override {
-        LOG_INFO("WiFi Error: %ls\n", message.c_str());
-    }
-    virtual void LogMessage(std::wstring message) override {
-        LOG_INFO("WiFi Log: %ls\n", message.c_str());
-    }
-};
+#include "wifi_ap_listener.h"
 
 std::atomic<bool> g_tap_running(true);
 
@@ -80,7 +56,7 @@ int main() {
 
     // 0. Start WiFi AP
     WiFiAPManager wifi_manager;
-    MyWiFiListener wifi_listener;
+    Wifi2SocksWiFiListener wifi_listener;
     try {
         std::wstring ssid(g_config.wifi_ssid.begin(), g_config.wifi_ssid.end());
         std::wstring pass(g_config.wifi_password.begin(), g_config.wifi_password.end());

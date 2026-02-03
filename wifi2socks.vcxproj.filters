@@ -60,6 +60,12 @@
     <ClCompile Include="wifi2socks.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="wifi_ap.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="wifi_ap_listener.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="common.pb.cc">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -90,6 +96,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="common.pb.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="wifi_ap.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="wifi_ap_listener.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="geo_checker.h">

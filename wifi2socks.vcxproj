@@ -146,6 +146,7 @@
     <ClCompile Include="proxy_tcp.cpp" />
     <ClCompile Include="proxy_udp.cpp" />
     <ClCompile Include="wifi_ap.cpp" />
+    <ClCompile Include="wifi_ap_listener.cpp" />
     <ClCompile Include="lwip_handler.cpp" />
     <ClCompile Include="main_dispatcher.cpp" />
     <ClCompile Include="lwip\src\core\init.c" />
@@ -195,6 +196,7 @@
     <ClInclude Include="proxy_tcp.h" />
     <ClInclude Include="proxy_udp.h" />
     <ClInclude Include="wifi_ap.h" />
+    <ClInclude Include="wifi_ap_listener.h" />
     <ClInclude Include="lwip_handler.h" />
     <ClInclude Include="lwip_includes.h" />
   </ItemGroup>
