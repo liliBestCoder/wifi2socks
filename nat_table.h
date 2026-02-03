@@ -27,25 +27,3 @@ private:
     std::map<uint16_t, NatEntry> m_table;
     std::mutex m_mtx;
 };
-
-// Simple DNS Cache (Domain -> IP)
-struct DnsCacheEntry {
-    uint32_t ip; // Network Order
-    uint64_t expire_time;
-};
-
-class DnsCache {
-public:
-    static DnsCache& instance();
-    
-    // Returns 0 if not found or expired
-    uint32_t get(const std::string& domain);
-    
-    void put(const std::string& domain, uint32_t ip, int ttl_sec);
-    
-    void cleanup();
-
-private:
-    std::map<std::string, DnsCacheEntry> m_cache;
-    std::mutex m_mtx;
-};
