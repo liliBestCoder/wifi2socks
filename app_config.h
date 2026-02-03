@@ -18,6 +18,10 @@ struct AppConfig {
     uint32_t max_sni_len;
     uint16_t http_api_port;
 
+    // WiFi settings
+    std::string wifi_ssid;
+    std::string wifi_password;
+
     // Rules (Persisted)
     std::vector<std::string> direct_ip_list;
     std::vector<std::string> direct_domain_list;
@@ -39,6 +43,9 @@ struct AppConfig {
         lwip_listen_port = 7000;
         max_sni_len = 4096;
         http_api_port = 8080;
+
+        wifi_ssid = "wifi2socks_ap";
+        wifi_password = "password123";
     }
 };
 

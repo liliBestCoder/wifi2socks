@@ -26,17 +26,48 @@ LogLevel g_log_level = LOG_LEVEL_INFO;
 
 #include "traffic_manager.h"
 #include "http_server.h"
+#include "wifi_ap.h"
 
-
+class MyWiFiListener : public IWiFiAPListener {
+public:
+    virtual void OnDeviceConnected(std::wstring remoteHostName) override {
+        LOG_INFO("WiFi: Device Connected: %ls\n", remoteHostName.c_str());
+    }
+    virtual void OnDeviceDisconnected(std::wstring deviceId) override {
+        LOG_INFO("WiFi: Device Disconnected: %ls\n", deviceId.c_str());
+    }
+    virtual void OnAdvertisementStarted() override {
+        LOG_INFO("WiFi: Advertisement Started.\n");
+    }
+    virtual void OnAdvertisementStopped(std::wstring message) override {
+        LOG_INFO("WiFi: Advertisement Stopped: %ls\n", message.c_str());
+    }
+    virtual void OnAdvertisementAborted(std::wstring message) override {
+        LOG_INFO("WiFi: Advertisement Aborted: %ls\n", message.c_str());
+    }
+    virtual void OnAsyncException(std::wstring message) override {
+        LOG_INFO("WiFi Error: %ls\n", message.c_str());
+    }
+    virtual void LogMessage(std::wstring message) override {
+        LOG_INFO("WiFi Log: %ls\n", message.c_str());
+    }
+};
 
 std::atomic<bool> g_tap_running(true);
 
 // Main Entry Point
 int main() {
-    // 0. Initialize Winsock first!
+    // 0. Initialize Winsock and WinRT
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         printf("WSAStartup failed.\n");
+        return 1;
+    }
+
+    // Initialize WinRT for WiFi
+    Microsoft::WRL::Wrappers::RoInitializeWrapper initialize(RO_INIT_MULTITHREADED);
+    if (FAILED(initialize)) {
+        printf("Failed to initialize Windows Runtime\n");
         return 1;
     }
 
@@ -47,7 +78,23 @@ int main() {
     TrafficManager::instance().start();
     SimpleHttpServer::instance().start(g_config.http_api_port);
 
-    // 0. Pre-load GeoIP/GeoSite
+    // 0. Start WiFi AP
+    WiFiAPManager wifi_manager;
+    MyWiFiListener wifi_listener;
+    try {
+        std::wstring ssid(g_config.wifi_ssid.begin(), g_config.wifi_ssid.end());
+        std::wstring pass(g_config.wifi_password.begin(), g_config.wifi_password.end());
+        
+        wifi_manager.SetSSID(ssid);
+        wifi_manager.SetPassphrase(pass);
+        wifi_manager.RegisterListener(&wifi_listener);
+        wifi_manager.Start();
+        LOG_INFO("WiFi AP Starting (SSID: %s)...\n", g_config.wifi_ssid.c_str());
+    } catch (const WiFiAPException& e) {
+        LOG_INFO("WiFi AP Error: %s (HRESULT: 0x%08X)\n", e.what(), e.GetErrorCode());
+    }
+
+    // 0.5 Pre-load GeoIP/GeoSite
     try {
         GeoChecker::instance().init_async();
         LOG_INFO("GeoChecker loading in background...\n");
@@ -100,17 +147,17 @@ int main() {
     while (true) {
         // This handles the "Downstream" writes to LwIP without locking in Workers
         MainDispatcher::instance().process_pending();
-        // --- ºËÐÄ£º¿ª¹Ø¿ØÖÆÂß¼­ ---
+        // --- ï¿½ï¿½ï¿½Ä£ï¿½ï¿½ï¿½ï¿½Ø¿ï¿½ï¿½ï¿½ï¿½ß¼ï¿½ ---
         if (!g_tap_running) {
             if (pending) {
-                // Èç¹ûµ±Ç°Õý¹Ò×ÅÒ»¸ö ReadFile£¬±ØÐëÈ¡ÏûËü
+                // ï¿½ï¿½ï¿½ï¿½ï¿½Ç°ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ ReadFileï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½
                 CancelIo(tapHandle);
                 pending = false;
                 ResetEvent(ol.hEvent);
                 LOG_INFO("TAP Read Canceled for Stop.\n");
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue; // Ìø¹ýºóÐø¶ÁÈ¡Âß¼­
+            continue; // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½È¡ï¿½ß¼ï¿½
         }
 
         if (!pending) {
