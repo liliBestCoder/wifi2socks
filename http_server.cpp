@@ -292,9 +292,4 @@ std::string SimpleHttpServer::handle_proxy_check() {
         buf[r] = 0;
         if (strstr(buf, "204 No Content") || strstr(buf, "200 OK")) {
             long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-            return "{\"state\":\"up\",\"delay\":" + std::to_string(ms) + "}";
-        }
-    }
-    
-    return "{\"state\":\"down\",\"error\":\"http_failed\"}";
-}
+            return "{\"state\":\"up\",\"delay\":
