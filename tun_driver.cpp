@@ -5,7 +5,12 @@
 #include <string>
 #include <sstream>
 #include <objbase.h>
-#include <netioapi.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+// Fix for netioapi.h compilation error regarding NTSTATUS
+#ifndef NTSTATUS
+typedef LONG NTSTATUS;
+#endif
 #include <iphlpapi.h>
 #pragma comment(lib, "Ole32.lib")
 #pragma comment(lib, "Iphlpapi.lib")
