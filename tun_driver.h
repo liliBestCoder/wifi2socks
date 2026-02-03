@@ -13,6 +13,9 @@ public:
     
     bool init(const char* device_guid);
     
+    // Set IP, Mask, Gateway for the Wintun Interface using Windows IP Helper API
+    bool set_ip(const char* ip, const char* mask, const char* gateway);
+
     // Sends an Ethernet frame (strips header, sends IP packet to Wintun)
     void send_async(const uint8_t* buf, int len);
     
@@ -40,6 +43,8 @@ private:
     WINTUN_CREATE_ADAPTER_FUNC pWintunCreateAdapter;
     WINTUN_OPEN_ADAPTER_FUNC pWintunOpenAdapter;
     WINTUN_CLOSE_ADAPTER_FUNC pWintunCloseAdapter;
+    WINTUN_DELETE_DRIVER_FUNC pWintunDeleteDriver; // Added for completeness, though unused
+    WINTUN_GET_ADAPTER_LUID_FUNC pWintunGetAdapterLUID;
     WINTUN_START_SESSION_FUNC pWintunStartSession;
     WINTUN_END_SESSION_FUNC pWintunEndSession;
     WINTUN_GET_READ_WAIT_EVENT_FUNC pWintunGetReadWaitEvent;

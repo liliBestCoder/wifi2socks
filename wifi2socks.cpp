@@ -85,6 +85,10 @@ int main() {
         return 1;
     }
 
+    if (!TunDriver::instance().set_ip(g_config.tap_ip.c_str(), g_config.tap_netmask.c_str(), g_config.tap_gateway.c_str())) {
+        printf("Failed to configure Wintun IP settings. Ensure you are running as Administrator.\n");
+    }
+
     // 2. Initialize Worker Pool
     WorkerPool::instance().init(20);
     LOG_INFO("Worker Pool Initialized.\n");

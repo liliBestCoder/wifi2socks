@@ -21,6 +21,11 @@ typedef void(*WINTUN_LOGGER_CALLBACK)(
     _In_z_ LPCWSTR Message
 );
 
+typedef void(WINAPI* WINTUN_GET_ADAPTER_LUID_FUNC)(
+    _In_ WINTUN_ADAPTER_HANDLE Adapter,
+    _Out_ LUID* Luid
+);
+
 typedef WINTUN_ADAPTER_HANDLE(WINAPI* WINTUN_CREATE_ADAPTER_FUNC)(
     _In_ LPCWSTR Name,
     _In_ LPCWSTR TunnelType,
