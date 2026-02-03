@@ -142,7 +142,7 @@
     <ClCompile Include="nat_table.cpp" />
     <ClCompile Include="geo_checker.cpp" />
     <ClCompile Include="tls_parser.cpp" />
-    <ClCompile Include="tap_driver.cpp" />
+    <ClCompile Include="tun_driver.cpp" />
     <ClCompile Include="proxy_tcp.cpp" />
     <ClCompile Include="proxy_udp.cpp" />
     <ClCompile Include="wifi_ap.cpp" />
@@ -192,7 +192,8 @@
     <ClInclude Include="logger.h" />
     <ClInclude Include="nat_table.h" />
     <ClInclude Include="tls_parser.h" />
-    <ClInclude Include="tap_driver.h" />
+    <ClInclude Include="tun_driver.h" />
+    <ClInclude Include="wintun.h" />
     <ClInclude Include="proxy_tcp.h" />
     <ClInclude Include="proxy_udp.h" />
     <ClInclude Include="wifi_ap.h" />

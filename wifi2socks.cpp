@@ -12,7 +12,7 @@
 // Global Log Level
 LogLevel g_log_level = LOG_LEVEL_INFO;
 
-#include "tap_driver.h"
+#include "tun_driver.h"
 #include "worker.h"
 #include "lwip_handler.h"
 #include "proxy_tcp.h"
@@ -76,11 +76,11 @@ int main() {
         LOG_INFO("Warning: GeoChecker failed to load: %s. IP/Domain bypass may not work.\n", e.what());
     }
 
-    // 1. Initialize TAP Device
+    // 1. Initialize TUN Device (Wintun)
     const char* tap_guid = "{92EA695C-EDAD-44C4-9950-3F306CBE9A7D}";
-    printf("Opening TAP device...\n");
-    if (!TapDriver::instance().init(tap_guid)) {
-        printf("Error opening TAP device. Check GUID and Driver.\n");
+    printf("Opening TUN device...\n");
+    if (!TunDriver::instance().init(tap_guid)) {
+        printf("Error opening TUN device. Check GUID and Driver.\n");
         return 1;
     }
 
@@ -108,62 +108,32 @@ int main() {
 
     LOG_INFO("LwIP Tun2Socks Running.\nProxy: %s:%d\nTAP IP: %s\n", g_config.proxy_ip.c_str(), g_config.proxy_port, g_config.tap_ip.c_str());
 
-    // 6. Main Loop (Read from TAP -> LwIP)
+    // 6. Main Loop (Read from TUN -> LwIP)
     uint8_t buffer[65536];
-    OVERLAPPED ol = {0};
-    ol.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-    DWORD bytesRead = 0;
-    bool pending = false;
     uint32_t last_cleanup = get_now_ms();
 
-    HANDLE tapHandle = TapDriver::instance().handle();
+    HANDLE waitEvent = TunDriver::instance().get_read_wait_event();
 
     while (true) {
         // This handles the "Downstream" writes to LwIP without locking in Workers
         MainDispatcher::instance().process_pending();
-        // --- ���ģ����ؿ����߼� ---
+        
         if (!g_tap_running) {
-            if (pending) {
-                // �����ǰ������һ�� ReadFile������ȡ����
-                CancelIo(tapHandle);
-                pending = false;
-                ResetEvent(ol.hEvent);
-                LOG_INFO("TAP Read Canceled for Stop.\n");
-            }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue; // ����������ȡ�߼�
+            continue; 
         }
 
-        if (!pending) {
-            if (!ReadFile(tapHandle, buffer, sizeof(buffer), &bytesRead, &ol)) {
-                if (GetLastError() != ERROR_IO_PENDING) {
-                    printf("TAP Read Error: %lu\n", GetLastError());
-                    break;
-                }
-                pending = true;
-            } else {
-                {
-                    std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
-                    TrafficManager::instance().report_tap_tx(bytesRead);
-                    process_tap_frame(buffer, bytesRead);
-                }
-                pending = false; 
-                ol.Offset = 0; ol.OffsetHigh = 0; 
-            }
-        }
-
-        if (pending) {
-            DWORD waitRes = WaitForSingleObject(ol.hEvent, 2); 
-            if (waitRes == WAIT_OBJECT_0) {
-                if (GetOverlappedResult(tapHandle, &ol, &bytesRead, FALSE)) {
-                    std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
-                    TrafficManager::instance().report_tap_tx(bytesRead);
-                    process_tap_frame(buffer, bytesRead);
-                }
-                pending = false;
-                ResetEvent(ol.hEvent);
-                ol.Offset = 0; ol.OffsetHigh = 0;
-            }
+        // Wait for packet (or timeout to process pending/timeouts)
+        DWORD waitRes = WaitForSingleObject(waitEvent, 2); 
+        
+        if (waitRes == WAIT_OBJECT_0) {
+             // Read all available packets (Wintun is fast)
+             uint32_t len = 0;
+             while ((len = TunDriver::instance().read(buffer, sizeof(buffer))) > 0) {
+                 std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
+                 TrafficManager::instance().report_tap_tx(len);
+                 process_tap_frame(buffer, len);
+             }
         }
 
         {

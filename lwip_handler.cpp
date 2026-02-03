@@ -1,6 +1,6 @@
 #include "lwip_handler.h"
 #include "app_config.h"
-#include "tap_driver.h"
+#include "tun_driver.h"
 #include "nat_table.h"
 #include "proxy_udp.h"
 #include <vector>
@@ -92,7 +92,7 @@ void send_icmp_port_unreachable(uint8_t* req_buf, int req_len) {
     *(uint16_t*)(icmp_base + 2) = ip_chksum_simple(icmp_base, 8 + icmp_payload_len);
 
     // 6. Send back to TAP
-    TapDriver::instance().send_async(resp.data(), (int)resp.size());
+    TunDriver::instance().send_async(resp.data(), (int)resp.size());
 }
 
 void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len) {
@@ -147,7 +147,7 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
         }
     }
 
-    TapDriver::instance().send_async(buf.data(), (int)buf.size());
+    TunDriver::instance().send_async(buf.data(), (int)buf.size());
     return ERR_OK;
 }
 
@@ -157,7 +157,7 @@ err_t netif_init_cb(struct netif* netif) {
     netif->mtu = 1500;
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_LINK_UP | NETIF_FLAG_UP;
     netif->hwaddr_len = 6;
-    memcpy(netif->hwaddr, TapDriver::TAP_MAC, 6);
+    memcpy(netif->hwaddr, TunDriver::TAP_MAC, 6);
     return ERR_OK;
 }
 
@@ -255,7 +255,7 @@ void process_tap_frame(uint8_t* buf, int len) {
                     *(uint16_t*)(icmp_base + 2) = ip_chksum_simple(icmp_base, icmp_len);
 
                     // 5. Send back
-                    TapDriver::instance().send_async(buf, len);
+                    TunDriver::instance().send_async(buf, len);
                     return; // Don't let LwIP see this, it would just drop it.
                 }
             }
