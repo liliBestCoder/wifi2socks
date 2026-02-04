@@ -25,7 +25,7 @@
 #define TCP_SND_BUF                     (4096 * 1024) 
 #define TCP_SNDLOWAT                    (64 * 1024)   // Adjusted for larger window
 #define LWIP_WND_SCALE                  1
-#define TCP_RCV_SCALE                   4     // Scale 4 (x16) -> 1MB Max Window
+#define TCP_RCV_SCALE                   5     // Increased to 5 to allow 1MB window (1MB >> 5 < 65535)
 
 #define LWIP_ARP                        1
 #define LWIP_ETHERNET                   1
