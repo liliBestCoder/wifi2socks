@@ -62,6 +62,7 @@ public:
 
     void Start();
     void Stop();
+    void CheckKeepAlive();
 
 private:
     WiFiAPManager();

@@ -151,11 +151,12 @@ int main() {
             sys_check_timeouts();
         }
         
-        // Clean UDP sessions
+        // Clean UDP sessions and check WiFi keep-alive
         if (get_now_ms() - last_cleanup > 5000) {
             last_cleanup = get_now_ms();
             udp_check_timeouts();
             NatTable::instance().cleanup(60000); // 1 Minute timeout for NAT entries
+            WiFiAPManager::instance().CheckKeepAlive(); // Keep WiFi Direct devices alive
         }
     }
     return 0;

@@ -88,17 +88,22 @@ void WiFiAPManager::Start()
                     hr = args->get_Error(&error);
                     if (FAILED(hr)) throw WiFiAPException("Get Error failed", hr);
 
-                    if (_listener)
+                    std::wstring message;
+                    switch (error)
                     {
-                        std::wstring message;
-                        switch (error)
-                        {
-                        case WiFiDirectError_RadioNotAvailable: message = L"Advertisement aborted, Wi-Fi radio is turned off"; break;
-                        case WiFiDirectError_ResourceInUse: message = L"Advertisement aborted, Resource In Use"; break;
-                        default: message = L"Advertisement aborted, unknown reason"; break;
-                        }
-                        _listener->OnAdvertisementAborted(message);
+                    case WiFiDirectError_RadioNotAvailable: message = L"Advertisement aborted, Wi-Fi radio is turned off"; break;
+                    case WiFiDirectError_ResourceInUse: message = L"Advertisement aborted, Resource In Use"; break;
+                    default: message = L"Advertisement aborted, unknown reason"; break;
                     }
+
+                    if (_listener) _listener->OnAdvertisementAborted(message);
+
+                    // Auto-Restart logic for Aborted state
+                    // Use a small delay to avoid tight loop in case of persistent hardware error
+                    std::thread([this]() {
+                        Sleep(2000);
+                        try { this->Start(); } catch(...) {}
+                    }).detach();
                     break;
                 }
                 case WiFiDirectAdvertisementPublisherStatus_Stopped:
@@ -180,6 +185,42 @@ void WiFiAPManager::Stop()
     {
         hr = _publisher->Stop();
         if (FAILED(hr)) throw WiFiAPException("Stop failed", hr);
+    }
+}
+
+void WiFiAPManager::CheckKeepAlive()
+{
+    // Periodically probe connected devices to prevent Windows from reclaiming the COM objects
+    // or dropping the connection due to perceived inactivity.
+    std::vector<std::wstring> to_remove;
+    for (auto& pair : _connectedDevices)
+    {
+        ComPtr<EndpointPairCollection> endpointPairs;
+        HRESULT hr = pair.second->GetConnectionEndpointPairs(endpointPairs.GetAddressOf());
+        if (FAILED(hr))
+        {
+            // If probing fails with a serious error, the device might be gone
+            if (hr == HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED) || hr == RPC_E_DISCONNECTED)
+            {
+                to_remove.push_back(pair.first);
+            }
+        }
+    }
+
+    for (const auto& id : to_remove)
+    {
+        auto itDevice = _connectedDevices.find(id);
+        auto itToken = _connectedDeviceStatusChangedTokens.find(id);
+        if (itToken != _connectedDeviceStatusChangedTokens.end())
+        {
+            if (itDevice != _connectedDevices.end())
+                itDevice->second->remove_ConnectionStatusChanged(itToken->second);
+            _connectedDeviceStatusChangedTokens.erase(itToken);
+        }
+        if (itDevice != _connectedDevices.end())
+            _connectedDevices.erase(itDevice);
+        
+        if (_listener) _listener->OnDeviceDisconnected(id);
     }
 }
 
@@ -372,10 +413,21 @@ void WiFiAPManager::Reset()
         _publisher->remove_StatusChanged(_statusChangedToken);
     }
 
+    // Explicitly unregister handlers from connected devices before clearing
+    for (auto& pair : _connectedDevices)
+    {
+        auto itToken = _connectedDeviceStatusChangedTokens.find(pair.first);
+        if (itToken != _connectedDeviceStatusChangedTokens.end())
+        {
+            pair.second->remove_ConnectionStatusChanged(itToken->second);
+        }
+    }
+
     _legacySettings.Reset();
     _advertisement.Reset();
     _publisher.Reset();
     _connectionListener.Reset();
 
     _connectedDevices.clear();
+    _connectedDeviceStatusChangedTokens.clear();
 }
