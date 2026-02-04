@@ -160,7 +160,7 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
     if (sess->state == UdpSession::CLOSED) return; 
     
     if (len > 0 && data && addr) {
-        TrafficManager::instance().report_proxy_rx(len);
+        TrafficManager::instance().report_proxy_rx(len, true); // Direct
         // Log incoming packet (Debug)
         uint32_t src_ip_net = addr->sin_addr.S_un.S_addr;
         LOG_DEBUG("[UDP] Recv %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
@@ -344,7 +344,7 @@ void send_dns_over_tcp(UdpSession* sess, const std::vector<uint8_t>& payload) {
         LOG_INFO("[DNS-TCP] send failed: %d\n", WSAGetLastError());
         close_udp_session_internal(sess);
     } else {
-        TrafficManager::instance().report_proxy_tx(sent);
+        TrafficManager::instance().report_proxy_tx(sent, false); // Proxy
     }
 }
 
@@ -355,7 +355,7 @@ void handle_socks5_tcp_read(UdpSession* sess) {
     int r = recv(sess->tcp_sock, buf, sizeof(buf), 0);
     
     if (r > 0) {
-        TrafficManager::instance().report_proxy_rx(r);
+        TrafficManager::instance().report_proxy_rx(r, false); // Proxy
         if (sess->state == UdpSession::HANDSHAKE_AUTH) {
             if (r >= 2 && buf[0] == 0x05 && buf[1] == 0x00) {
                 // Auth OK. Connect to Target (DNS Server).
@@ -370,7 +370,7 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                 req.push_back(port & 0xFF); req.push_back((port >> 8) & 0xFF);
                 
                 int sent = send(sess->tcp_sock, (const char*)req.data(), (int)req.size(), 0);
-                if (sent > 0) TrafficManager::instance().report_proxy_tx(sent);
+                if (sent > 0) TrafficManager::instance().report_proxy_tx(sent, false); // Proxy
                 
                 sess->state = UdpSession::HANDSHAKE_CONNECT;
             } else {
@@ -641,7 +641,7 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
             dest_addr.sin_port = dst_port; 
             
             int sent = sendto(sess->udp_sock, (const char*)data.data(), (int)data.size(), 0, (sockaddr*)&dest_addr, sizeof(dest_addr));
-            if (sent > 0) TrafficManager::instance().report_proxy_tx(sent);
+            if (sent > 0) TrafficManager::instance().report_proxy_tx(sent, true); // Direct
         }
     });
 }
@@ -778,7 +778,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                             if (sess->state == UdpSession::CLOSED) return;
                             uint8_t req[] = { 0x05, 0x01, 0x00 };
                             int sent = send(sess->tcp_sock, (const char*)req, sizeof(req), 0);
-                            if (sent > 0) TrafficManager::instance().report_proxy_tx(sent);
+                            if (sent > 0) TrafficManager::instance().report_proxy_tx(sent, false); // Proxy
                             sess->state = UdpSession::HANDSHAKE_AUTH;
                             sess->worker->add_socket(sess->tcp_sock, 
                             [sess](char*, int, sockaddr_in*) { handle_socks5_tcp_read(sess); }, 

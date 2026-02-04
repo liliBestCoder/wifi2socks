@@ -174,7 +174,7 @@ void handle_proxy_read(TcpCtx* ctx) {
     int r = recv(ctx->proxy_socket, (char*)read_buf.data(), (int)read_buf.size(), 0);
     
     if (r > 0) {
-        TrafficManager::instance().report_proxy_rx(r);
+        TrafficManager::instance().report_proxy_rx(r, ctx->is_direct);
         LOG_DEBUG("[TCP] Recv %d bytes: %d.%d.%d.%d:%d <- %d.%d.%d.%d:%d\n", r,
             ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ntohs(ctx->client_port),
             ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
@@ -202,7 +202,7 @@ void handle_handshake_read(TcpCtx* ctx) {
     int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
     
     if (r > 0) {
-        TrafficManager::instance().report_proxy_rx(r);
+        TrafficManager::instance().report_proxy_rx(r, false); // Handshake is always proxy
         std::string s(buf, r);
         size_t header_end = s.find("\r\n\r\n");
         
@@ -233,7 +233,7 @@ void handle_handshake_read(TcpCtx* ctx) {
                                  close_tcp_ctx(ctx);
                                  return;
                              }
-                             TrafficManager::instance().report_proxy_tx(sent);
+                             TrafficManager::instance().report_proxy_tx(sent, false); // Handshake is always proxy
                              ptr += sent;
                              remaining -= sent;
                          }
@@ -299,7 +299,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
             std::lock_guard<std::mutex> lock(ctx->data_mtx);
             if (!ctx->upstream_data.empty()) {
                  int sent = send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
-                 if (sent > 0) TrafficManager::instance().report_proxy_tx(sent);
+                 if (sent > 0) TrafficManager::instance().report_proxy_tx(sent, true); // Direct
                  ctx->upstream_data.clear();
             }
             ctx->connected = true;
@@ -341,7 +341,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
          close_tcp_ctx(ctx); 
          return;
     }
-    TrafficManager::instance().report_proxy_tx(sent);
+    TrafficManager::instance().report_proxy_tx(sent, false); // Proxy (CONNECT cmd)
 
     ctx->state = TcpCtx::HANDSHAKE;
 
@@ -417,7 +417,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
             if (ctx->closed) return;
             if (ctx->proxy_socket != INVALID_SOCKET) {
                 int sent = send(ctx->proxy_socket, (const char*)d.data(), (int)d.size(), 0);
-                if (sent > 0) TrafficManager::instance().report_proxy_tx(sent);
+                if (sent > 0) TrafficManager::instance().report_proxy_tx(sent, ctx->is_direct);
             }
         });
     } else {
