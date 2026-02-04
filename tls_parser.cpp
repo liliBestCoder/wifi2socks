@@ -125,8 +125,13 @@ std::string parse_http_host(const uint8_t* data, size_t len) {
         size_t colon = s.find(':', pos);
         if (colon != std::string::npos && colon < line_end) {
             std::string key = s.substr(pos, colon - pos);
-            // Trim whitespace from key? Usually headers are strictly "Key:".
             
+            // Trim trailing whitespace from key (e.g. "Host :")
+            size_t key_last = key.find_last_not_of(" \t");
+            if (key_last != std::string::npos) {
+                key = key.substr(0, key_last + 1);
+            }
+
             if (key.length() == 4 && (key[0] == 'H' || key[0] == 'h') && 
                                      (key[1] == 'o' || key[1] == 'O') &&
                                      (key[2] == 's' || key[2] == 'S') && 

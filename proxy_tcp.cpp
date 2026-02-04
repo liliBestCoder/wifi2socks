@@ -450,6 +450,13 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
                     ready = true; 
                 } else if (ctx->sni_buffer.size() > 1024) {
                     ready = true; 
+                } else {
+                    // Check for header end (\r\n\r\n) to avoid waiting forever on small packets without Host found
+                    const uint8_t seq[] = {'\r', '\n', '\r', '\n'};
+                    auto it = std::search(ctx->sni_buffer.begin(), ctx->sni_buffer.end(), std::begin(seq), std::end(seq));
+                    if (it != ctx->sni_buffer.end()) {
+                        ready = true;
+                    }
                 }
             }
             // 3. Unknown Check
