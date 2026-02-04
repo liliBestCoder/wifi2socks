@@ -493,25 +493,10 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
                             std::string tag = GeoChecker::instance().query_domain(sni);
                             LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Direct.\n", sni.c_str(), tag.c_str());
                         } else {
-                            // 特殊处理：如果域名以 .cn 结尾，强制走直连
-                            bool is_cn_suffix = false;
-                            if (sni.length() >= 3) {
-                                std::string suffix = sni.substr(sni.length() - 3);
-                                std::transform(suffix.begin(), suffix.end(), suffix.begin(), 
-                                    [](unsigned char c){ return std::tolower(c); });
-                                if (suffix == ".cn") is_cn_suffix = true;
-                            }
-
-                            if (is_cn_suffix) {
-                                ctx->is_direct = true;
+                            if (!ctx->is_direct) {
+                                ctx->is_direct = false;
                                 std::string tag = GeoChecker::instance().query_domain(sni);
-                                LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Direct (.cn suffix).\n", sni.c_str(), tag.c_str());
-                            } else {
-                                if (!ctx->is_direct) {
-                                    ctx->is_direct = false;
-                                    std::string tag = GeoChecker::instance().query_domain(sni);
-                                    LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Proxy.\n", sni.c_str(), tag.c_str());
-                                }
+                                LOG_INFO("[TCP] Domain Detected: %s (Tag: %s). Proxy.\n", sni.c_str(), tag.c_str());
                             }
                         }
                     }
