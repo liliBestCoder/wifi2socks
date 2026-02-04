@@ -300,8 +300,23 @@ void handle_proxy_connect(TcpCtx* ctx) {
         {
             std::lock_guard<std::mutex> lock(ctx->data_mtx);
             if (!ctx->upstream_data.empty()) {
-                 int sent = send(ctx->proxy_socket, (const char*)ctx->upstream_data.data(), (int)ctx->upstream_data.size(), 0);
-                 if (sent > 0) TrafficManager::instance().report_proxy_tx(sent, true); // Direct
+                 const char* ptr = (const char*)ctx->upstream_data.data();
+                 int remaining = (int)ctx->upstream_data.size();
+
+                 while (remaining > 0) {
+                     int sent = send(ctx->proxy_socket, ptr, remaining, 0);
+                     if (sent == SOCKET_ERROR) {
+                         int err = WSAGetLastError();
+                         if (err != WSAEWOULDBLOCK) {
+                             LOG_INFO("[TCP] Direct flush failed: %d\n", err);
+                         }
+                         close_tcp_ctx(ctx);
+                         return;
+                     }
+                     TrafficManager::instance().report_proxy_tx(sent, true); // Direct
+                     ptr += sent;
+                     remaining -= sent;
+                 }
                  ctx->upstream_data.clear();
             }
             ctx->connected = true;
