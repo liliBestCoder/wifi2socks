@@ -15,15 +15,15 @@
 #define MEM_LIBC_MALLOC                 1
 #define MEMP_MEM_MALLOC                 1
 #define MEM_ALIGNMENT                   4
-#define PBUF_POOL_SIZE                  512  // Increased for streaming
+#define PBUF_POOL_SIZE                  1024 // Double the pool for high concurrency
 #define PBUF_POOL_BUFSIZE               2048 // Large enough for MTU + Headers
 
 // --- 4. TCP/IP ---
 #define LWIP_TCP                        1
 #define TCP_MSS                         1460  // Adjusted for Ethernet MTU
-#define TCP_WND                         (512 * 1024)   // 512KB window for high throughput
-#define TCP_SND_BUF                     (4096 * 1024) // 512KB for HD streaming
-#define TCP_SNDLOWAT                    (32 * 1024)  // Fixed: Prevent u16_t overflow with large SND_BUF
+#define TCP_WND                         (1024 * 1024)  // Increase window to 1MB
+#define TCP_SND_BUF                     (4096 * 1024) 
+#define TCP_SNDLOWAT                    (64 * 1024)   // Adjusted for larger window
 #define LWIP_WND_SCALE                  1
 #define TCP_RCV_SCALE                   4     // Scale 4 (x16) -> 1MB Max Window
 
