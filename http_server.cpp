@@ -362,21 +362,12 @@ extern std::atomic<bool> g_tap_running;
 
 std::string SimpleHttpServer::handle_start() {
     g_tap_running = true;
-    printf("[HTTP] Command Received: START TAP and WiFi.\n");
     try {
-        WiFiAPManager::instance().Start();
-        
-        // Wait for adapter to appear
-        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-        
         if (IcsManager::EnableICS(L"wifi2socks", L"Microsoft Wi-Fi Direct Virtual Adapter")) {
              printf("[HTTP] ICS Enabled.\n");
-        } else {
-             // Fallback for older Windows or Hosted Network
-             printf("[HTTP] ICS Enable Failed. Trying fallback description...\n");
-             if (IcsManager::EnableICS(L"wifi2socks", L"Microsoft Hosted Network Virtual Adapter")) {
-                 printf("[HTTP] ICS Enabled (Fallback).\n");
-             }
+        }
+        else {
+            printf("[HTTP] ICS Enable Failed.\n");
         }
     }
     catch (const std::exception& e) {
@@ -387,9 +378,13 @@ std::string SimpleHttpServer::handle_start() {
 
 std::string SimpleHttpServer::handle_stop() {
     if (g_tap_running.exchange(false) == true) {
-        printf("[HTTP] Command Received: STOP TAP and WiFi.\n");
         try {
-            WiFiAPManager::instance().Stop();
+            if (IcsManager::DisableICS(L"wifi2socks", L"Microsoft Wi-Fi Direct Virtual Adapter")) {
+                printf("[HTTP] ICS Disabled.\n");
+            }
+            else {
+                printf("[HTTP] ICS Disable Failed.\n");
+            }
         }
         catch (const std::exception& e) {
             printf("WiFi Stop Error: %s\n", e.what());

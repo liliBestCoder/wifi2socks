@@ -24,6 +24,7 @@ LogLevel g_log_level = LOG_LEVEL_INFO;
 #include "config_loader.h"
 #include <iostream>
 #include <thread>
+#include <shellapi.h>
 
 #include "traffic_manager.h"
 #include "http_server.h"
@@ -60,6 +61,7 @@ int main() {
         WiFiAPManager::instance().SetSSID(ssid);
         WiFiAPManager::instance().SetPassphrase(pass);
         WiFiAPManager::instance().RegisterListener(&wifi_listener);
+        WiFiAPManager::instance().Start();
         LOG_INFO("WiFi AP Initialized (SSID: %s). Wait for START command.\n", g_config.wifi_ssid.c_str());
     } catch (const std::exception& e) {
         LOG_INFO("WiFi AP Initialization failed: %s\n", e.what());
@@ -67,7 +69,6 @@ int main() {
     
     // -0.5 Start Traffic Manager & HTTP API
     TrafficManager::instance().start();
-    SimpleHttpServer::instance().start(g_config.http_api_port);
 
     // 0.5 Pre-load GeoIP/GeoSite
     try {
@@ -87,6 +88,7 @@ int main() {
 
     if (!TunDriver::instance().set_ip(g_config.tap_ip.c_str(), g_config.tap_netmask.c_str(), g_config.tap_gateway.c_str())) {
         printf("Failed to configure Wintun IP settings. Ensure you are running as Administrator.\n");
+        return 1;
     }
 
     // 2. Initialize Worker Pool
@@ -120,6 +122,8 @@ int main() {
     tcp_accept(pcb, tcp_proxy_accept);
 
     LOG_INFO("LwIP Tun2Socks Running.\nProxy: %s:%d\nTAP IP: %s\n", g_config.proxy_ip.c_str(), g_config.proxy_port, g_config.tap_ip.c_str());
+
+    SimpleHttpServer::instance().start(g_config.http_api_port);
 
     // 6. Main Loop (Read from TUN -> LwIP)
     uint8_t buffer[65536];

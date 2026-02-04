@@ -11,7 +11,5 @@ class IcsManager {
 public:
     // Enables ICS. 
     static bool EnableICS(const std::wstring& publicAdapterName, const std::wstring& privateAdapterDesc);
-
-private:
-    static bool SetConnectionSharing(INetSharingManager* pNSM, INetConnection* pConnection, int type);
+    static bool DisableICS(const std::wstring& publicAdapterName, const std::wstring& privateAdapterDesc);
 };
