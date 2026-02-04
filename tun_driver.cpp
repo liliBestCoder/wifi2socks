@@ -192,20 +192,12 @@ bool TunDriver::set_ip(const char* ip, const char* mask, const char* gateway) {
 void TunDriver::send_async(const uint8_t* buf, int len) {
     if (!m_session) return; 
     
-    if (len <= 14) return; 
+    if (len < 20) return; // Minimum IP packet size
 
-    // Basic Ethernet Header Parsing
-    uint16_t eth_type = (buf[12] << 8) | buf[13];
-    
-    if (eth_type != 0x0800) {
-        // Drop non-IPv4
-        return;
-    }
-    
-    int ip_len = len - 14;
-    BYTE* packet = pWintunAllocateSendPacket(m_session, ip_len);
+    // Directly allocate and send IP packet
+    BYTE* packet = pWintunAllocateSendPacket(m_session, len);
     if (packet) {
-        memcpy(packet, buf + 14, ip_len);
+        memcpy(packet, buf, len);
         pWintunSendPacket(m_session, packet);
         TrafficManager::instance().report_tap_rx(len); 
     }
@@ -223,25 +215,18 @@ uint32_t TunDriver::read(uint8_t* buf, uint32_t max_len) {
     BYTE* packet = pWintunReceivePacket(m_session, &packetSize);
     
     if (packet) {
-        uint32_t total_len = 14 + packetSize;
-        if (total_len > max_len) {
+        if (packetSize > max_len) {
              pWintunReleaseReceivePacket(m_session, packet);
              return 0;
         }
         
-        // 1. Write Fake Ethernet Header
-        memcpy(buf, TAP_MAC, 6);
-        uint8_t gw_mac[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
-        memcpy(buf + 6, gw_mac, 6);
-        buf[12] = 0x08; buf[13] = 0x00; // Type: IPv4
+        // Directly copy IP Packet without adding fake Ethernet Header
+        memcpy(buf, packet, packetSize);
         
-        // 2. Copy IP Packet
-        memcpy(buf + 14, packet, packetSize);
-        
-        // 3. Release Wintun Packet
+        // Release Wintun Packet
         pWintunReleaseReceivePacket(m_session, packet);
         
-        return total_len;
+        return packetSize;
     }
     
     return 0;

@@ -111,7 +111,7 @@ void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len)
 
 err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
     // Optimization: Use static buffer to avoid heap allocation per packet.
-    // LwIP core is protected by g_lwip_mtx, so this is thread-safe.
+    // In TUN mode, p->payload points directly to the IP header.
     static std::vector<uint8_t> buf;
     buf.clear();
     buf.reserve(p->tot_len);
@@ -120,11 +120,11 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
         buf.insert(buf.end(), (uint8_t*)q->payload, (uint8_t*)q->payload + q->len);
     }
 
-    if (buf.size() > 34) {
-        struct ip_hdr* ip = (struct ip_hdr*)(buf.data() + 14);
+    if (buf.size() >= 20) {
+        struct ip_hdr* ip = (struct ip_hdr*)buf.data();
         if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
              if (ip->src.addr == ::inet_addr(g_config.tap_gateway.c_str())) {
-                 uint8_t* tcp_base = buf.data() + 14 + IPH_HL(ip) * 4;
+                 uint8_t* tcp_base = buf.data() + IPH_HL(ip) * 4;
                  uint16_t src_port = *(uint16_t*)tcp_base;
                  uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
                  
@@ -138,7 +138,7 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
                          IPH_CHKSUM_SET(ip, 0);
                          IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
                          
-                         uint16_t ip_len = ::ntohs(*(uint16_t*)((uint8_t*)ip + 2));
+                         uint16_t ip_len = ::ntohs(IPH_LEN(ip));
                          int tcp_len = ip_len - IPH_HL(ip) * 4;
                          recalculate_tcp_checksum(ip, tcp_base, tcp_len);
                      }
@@ -153,51 +153,34 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
 
 err_t netif_init_cb(struct netif* netif) {
     netif->linkoutput = tap_linkoutput;
-    netif->output = etharp_output;
+    netif->output = ip4_output; // Use direct IP output instead of etharp_output
     netif->mtu = 1500;
-    netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_LINK_UP | NETIF_FLAG_UP;
-    netif->hwaddr_len = 6;
-    memcpy(netif->hwaddr, TunDriver::TAP_MAC, 6);
+    // Remove NETIF_FLAG_ETHARP
+    netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_LINK_UP | NETIF_FLAG_UP;
+    netif->hwaddr_len = 0; // No MAC address in TUN mode
     return ERR_OK;
 }
 
 void process_tap_frame(uint8_t* buf, int len) {
-    if (len < 14) return;
+    if (len < 20) return; // Minimum IP header size
 
-    if (!g_host_mac_known) {
-        memcpy(HOST_MAC, buf + 6, 6);
-        g_host_mac_known = true;
-    }
-
-    uint16_t eth_type = ::ntohs(*(uint16_t*)(buf + 12));
-    if (eth_type == 0x0806) {
-        struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
-        if (p) {
-            pbuf_take(p, buf, len);
-            g_netif.input(p, &g_netif);
-        }
-        return; 
-    }
-
-    struct ip_hdr* ip = (struct ip_hdr*)(buf + 14);
+    struct ip_hdr* ip = (struct ip_hdr*)buf;
     if (IPH_V(ip) == 4) {
         if (IPH_PROTO(ip) == IP_PROTO_UDP) {
-            uint8_t* udp_ptr = buf + 14 + IPH_HL(ip) * 4;
+            uint8_t* udp_ptr = buf + IPH_HL(ip) * 4;
             uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
             uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
             uint8_t* payload = udp_ptr + 8;
-            int pay_len = len - (14 + IPH_HL(ip) * 4 + 8);
+            int pay_len = len - (IPH_HL(ip) * 4 + 8);
 
-            // All UDP processing logic (including drops/filtering) is now 
-            // delegated to handle_udp_packet in proxy_udp.cpp
             if (pay_len >= 0) {
                 handle_udp_packet(ip->src.addr, ip->dest.addr, src_port, dst_port, payload, pay_len);
             }
-            return; // Done with UDP
+            return;
         }
 
         if (IPH_PROTO(ip) == IP_PROTO_TCP) {
-            uint8_t* tcp_base = buf + 14 + IPH_HL(ip) * 4;
+            uint8_t* tcp_base = buf + IPH_HL(ip) * 4;
             uint16_t src_port = *(uint16_t*)(tcp_base); 
             uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
             uint32_t dst_ip = ip->dest.addr;
@@ -210,56 +193,36 @@ void process_tap_frame(uint8_t* buf, int len) {
             IPH_CHKSUM_SET(ip, 0);
             IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
             
-            uint16_t ip_len = ::ntohs(*(uint16_t*)((uint8_t*)ip + 2));
+            uint16_t ip_len = ::ntohs(IPH_LEN(ip));
             int tcp_len = ip_len - IPH_HL(ip) * 4;
             if (tcp_len > 0) {
                 recalculate_tcp_checksum(ip, tcp_base, tcp_len);
             }
         }
 
-        // --- FAKE ICMP REPLY FOR EXTERNAL PINGS ---
         if (IPH_PROTO(ip) == IP_PROTO_ICMP) {
-            // If the ping is NOT for our Gateway (e.g. phone pings 8.8.8.8),
-            // LwIP will drop it because it doesn't know how to route to 8.8.8.8.
-            // We must fake a reply to satisfy the OS connectivity check.
             if (ip->dest.addr != ::inet_addr(g_config.tap_gateway.c_str())) {
-                uint8_t* icmp_base = buf + 14 + IPH_HL(ip) * 4;
-                // Check if it is Echo Request (Type 8)
+                uint8_t* icmp_base = buf + IPH_HL(ip) * 4;
                 if (icmp_base[0] == 8) {
-                    // 1. Swap MAC addresses
-                    uint8_t tmp_mac[6];
-                    memcpy(tmp_mac, buf, 6);      // Save Dst (Gateway MAC)
-                    memcpy(buf, buf + 6, 6);      // Move Src (Phone MAC) to Dst
-                    memcpy(buf + 6, tmp_mac, 6);  // Move Gateway MAC to Src
-
-                    // 2. Swap IP addresses
+                    // Swap IP addresses
                     uint32_t tmp_ip = ip->src.addr;
-                    ip->src.addr = ip->dest.addr; // Src becomes 8.8.8.8 (Fake)
-                    ip->dest.addr = tmp_ip;       // Dst becomes Phone IP
+                    ip->src.addr = ip->dest.addr;
+                    ip->dest.addr = tmp_ip;
 
-                    // 3. Change ICMP Type to Echo Reply (0)
-                    icmp_base[0] = 0; 
+                    icmp_base[0] = 0; // Echo Reply
                     
-                    // 4. Update Checksums
-                    // Update IP Checksum
                     IPH_CHKSUM_SET(ip, 0);
                     IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
 
-                    // Update ICMP Checksum
-                    // ICMP checksum covers the ICMP header and data.
-                    // Since we only changed Type (8->0) and Code (0->0), we could do incremental update,
-                    // but full recalc is safer and simple enough here.
                     int ip_len = ::ntohs(IPH_LEN(ip));
                     int icmp_len = ip_len - IPH_HL(ip) * 4;
-                    *(uint16_t*)(icmp_base + 2) = 0; // Clear old checksum
+                    *(uint16_t*)(icmp_base + 2) = 0;
                     *(uint16_t*)(icmp_base + 2) = ip_chksum_simple(icmp_base, icmp_len);
 
-                    // 5. Send back
                     TunDriver::instance().send_async(buf, len);
-                    return; // Don't let LwIP see this, it would just drop it.
+                    return;
                 }
             }
-            // If dest IS Gateway, fall through to g_netif.input so LwIP answers naturally.
         }
 
         struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
