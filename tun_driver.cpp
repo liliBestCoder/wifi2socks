@@ -167,10 +167,10 @@ bool TunDriver::set_ip(const char* ip, const char* mask, const char* gateway) {
     // 3.1 Force MTU to 1500 to match LwIP and prevent fragmentation issues
     MIB_IPINTERFACE_ROW ifRow;
     InitializeIpInterfaceEntry(&ifRow);
-    ifRow.InterfaceLuid = luid;
+    ifRow.InterfaceLuid.Value = ((ULONG64)luid.HighPart << 32) | luid.LowPart;
     ifRow.Family = AF_INET;
     if (GetIpInterfaceEntry(&ifRow) == NO_ERROR) {
-        ifRow.Mtu = 1500;
+        ifRow.NlMtu = 1500;
         ifRow.SitePrefixLength = 0; // Required for SetIpInterfaceEntry
         SetIpInterfaceEntry(&ifRow);
         printf("Wintun MTU set to 1500\n");
