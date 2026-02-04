@@ -208,6 +208,8 @@ void handle_handshake_read(TcpCtx* ctx) {
         
         if (header_end != std::string::npos) {
             std::string header = s.substr(0, header_end);
+            LOG_DEBUG("[TCP] Proxy Handshake Response: %s\n", header.c_str()); // Add Log
+
             if (header.find("200") != std::string::npos) {
                 LOG_INFO("[TCP] Proxy Tunnel Established: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
                     ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ntohs(ctx->client_port),
@@ -330,8 +332,12 @@ void handle_proxy_connect(TcpCtx* ctx) {
 
     LOG_INFO("[TCP] %s (%d.%d.%d.%d:%d)\n", host_print.c_str(),
         ctx->client_ip & 0xFF, (ctx->client_ip >> 8) & 0xFF, (ctx->client_ip >> 16) & 0xFF, (ctx->client_ip >> 24) & 0xFF, ntohs(ctx->client_port));
-    sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", host.c_str(), port, host.c_str(), port);
     
+    // Compatibility: Some proxies dislike port in Host header for CONNECT
+    sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s\r\n\r\n", host.c_str(), port, host.c_str());
+    
+    LOG_DEBUG("[TCP] Sending Proxy Command: %s", cmd); // Add Log
+
     int sent = send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
     if (sent == SOCKET_ERROR) {
          if (WSAGetLastError() != WSAEWOULDBLOCK) {
