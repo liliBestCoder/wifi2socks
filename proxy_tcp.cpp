@@ -182,7 +182,7 @@ void handle_proxy_read(TcpCtx* ctx) {
         
         MainDispatcher::instance().queue_task([ctx, d = std::move(data)]() mutable {
             std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
-            if (ctx->client_pcb && !ctx->closed) {
+            if (ctx->client_pcb) {
                 ctx->tx_queue.push_back(std::move(d));
                 try_send_downstream(ctx);
             }
@@ -251,7 +251,7 @@ void handle_handshake_read(TcpCtx* ctx) {
                     
                     MainDispatcher::instance().queue_task([ctx, d = std::move(extra_data)]() mutable {
                         std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
-                        if (ctx->client_pcb && !ctx->closed) {
+                        if (ctx->client_pcb) {
                             ctx->tx_queue.push_back(std::move(d));
                             try_send_downstream(ctx);
                         }
