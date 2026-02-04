@@ -170,13 +170,21 @@ void process_tap_frame(uint8_t* buf, int len) {
             uint8_t* udp_ptr = buf + IPH_HL(ip) * 4;
             uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
             uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
-            uint8_t* payload = udp_ptr + 8;
-            int pay_len = len - (IPH_HL(ip) * 4 + 8);
 
-            if (pay_len >= 0) {
-                handle_udp_packet(ip->src.addr, ip->dest.addr, src_port, dst_port, payload, pay_len);
+            // Bypass proxy for DHCP (67/68) or local gateway (192.168.137.1) traffic
+            uint16_t sp_h = ::ntohs(src_port);
+            uint16_t dp_h = ::ntohs(dst_port);
+            bool is_local = (sp_h == 67 || dp_h == 67 || sp_h == 68 || dp_h == 68 || ip->dest.addr == ::inet_addr("192.168.137.1"));
+
+            if (!is_local) {
+                uint8_t* payload = udp_ptr + 8;
+                int pay_len = len - (IPH_HL(ip) * 4 + 8);
+                if (pay_len >= 0) {
+                    handle_udp_packet(ip->src.addr, ip->dest.addr, src_port, dst_port, payload, pay_len);
+                }
+                return; // Proxy handled, stop here
             }
-            return;
+            // If local, do NOT return, let it fall through to g_netif.input
         }
 
         if (IPH_PROTO(ip) == IP_PROTO_TCP) {
