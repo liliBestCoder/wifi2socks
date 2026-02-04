@@ -94,21 +94,23 @@ bool TunDriver::init(const char* device_guid) {
 
     GUID guid = parse_guid(device_guid);
     
-    // 1. Try to OPEN existing adapter
-    m_adapter = pWintunOpenAdapter(L"wifi2socks");
+    // Prioritize CreateAdapter: It will open the existing one if Name and GUID match.
+    m_adapter = pWintunCreateAdapter(L"wifi2socks", L"Tunnel", &guid);
     
-    // 2. If not found, CREATE it
     if (!m_adapter) {
-        printf("Wintun adapter not found, creating...\n");
-        m_adapter = pWintunCreateAdapter(L"wifi2socks", L"Tunnel", &guid);
-    } else {
-        printf("Wintun adapter found, using existing.\n");
+        DWORD err = GetLastError();
+        if (err == ERROR_ALREADY_EXISTS) {
+            // Name exists but GUID might differ or other collision, try direct Open.
+            m_adapter = pWintunOpenAdapter(L"wifi2socks");
+        }
     }
 
     if (!m_adapter) {
         printf("Wintun Open/Create adapter failed. LastError: %d\n", GetLastError());
         return false;
     }
+
+    printf("Wintun adapter is ready.\n");
 
     // Start Session (Ring size default 4MB? 0x400000) 
     m_session = pWintunStartSession(m_adapter, 0x400000); 
