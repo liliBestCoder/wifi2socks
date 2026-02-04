@@ -115,11 +115,13 @@ void try_send_downstream(TcpCtx* ctx) {
             continue;
         }
 
-        u16_t limit = tcp_sndbuf(ctx->client_pcb);
+        size_t limit = tcp_sndbuf(ctx->client_pcb);
         if (limit == 0) break; 
 
         size_t remaining = buf.size() - ctx->tx_written_offset;
-        u16_t chunk = (u16_t)((std::min)((size_t)limit, remaining));
+        size_t chunk_sz = (std::min)(limit, remaining);
+        if (chunk_sz > 0xFFFF) chunk_sz = 0xFFFF;
+        u16_t chunk = (u16_t)chunk_sz;
         if (chunk == 0) break;
 
         err_t err = tcp_write(ctx->client_pcb, 
