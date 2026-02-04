@@ -338,15 +338,23 @@ void handle_proxy_connect(TcpCtx* ctx) {
     
     LOG_DEBUG("[TCP] Sending Proxy Command: %s", cmd); // Add Log
 
-    int sent = send(ctx->proxy_socket, cmd, (int)strlen(cmd), 0);
+    int cmd_len = (int)strlen(cmd);
+    int sent = send(ctx->proxy_socket, cmd, cmd_len, 0);
     if (sent == SOCKET_ERROR) {
-         if (WSAGetLastError() != WSAEWOULDBLOCK) {
-             close_tcp_ctx(ctx);
-             return;
+         int err = WSAGetLastError();
+         if (err != WSAEWOULDBLOCK) {
+             LOG_INFO("[TCP] Proxy connect send failed: %d\n", err);
          }
          close_tcp_ctx(ctx); 
          return;
     }
+    
+    if (sent < cmd_len) {
+        LOG_INFO("[TCP] Proxy connect partial send (%d/%d). Closing.\n", sent, cmd_len);
+        close_tcp_ctx(ctx);
+        return;
+    }
+
     TrafficManager::instance().report_proxy_tx(sent, false); // Proxy (CONNECT cmd)
 
     ctx->state = TcpCtx::HANDSHAKE;
@@ -423,7 +431,16 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
             if (ctx->closed) return;
             if (ctx->proxy_socket != INVALID_SOCKET) {
                 int sent = send(ctx->proxy_socket, (const char*)d.data(), (int)d.size(), 0);
-                if (sent > 0) TrafficManager::instance().report_proxy_tx(sent, ctx->is_direct);
+                if (sent > 0) {
+                    TrafficManager::instance().report_proxy_tx(sent, ctx->is_direct);
+                    if ((size_t)sent < d.size()) {
+                        LOG_INFO("[TCP] Partial send in established state. Closing to prevent corruption.\n");
+                        close_tcp_ctx(ctx);
+                    }
+                } else {
+                    LOG_INFO("[TCP] Send failed in established state (Error: %d). Closing.\n", WSAGetLastError());
+                    close_tcp_ctx(ctx);
+                }
             }
         });
     } else {
