@@ -167,14 +167,10 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
            src_ip_net & 0xFF, (src_ip_net >> 8) & 0xFF, (src_ip_net >> 16) & 0xFF, (src_ip_net >> 24) & 0xFF, ntohs(addr->sin_port),
            sess->src_ip & 0xFF, (sess->src_ip >> 8) & 0xFF, (sess->src_ip >> 16) & 0xFF, (sess->src_ip >> 24) & 0xFF, ntohs(sess->src_port));
 
-        uint8_t frame[4096 + 100];
-        if (14 + 20 + 8 + len > sizeof(frame)) return; 
+        uint8_t packet[4096];
+        if (20 + 8 + len > sizeof(packet)) return; 
 
-        memcpy(frame, HOST_MAC, 6);
-        memcpy(frame + 6, TunDriver::TAP_MAC, 6);
-        *(uint16_t*)(frame + 12) = htons(0x0800);
-
-        uint8_t* ip_hdr = frame + 14;
+        uint8_t* ip_hdr = packet;
         uint8_t* udp_hdr = ip_hdr + 20;
 
         memset(ip_hdr, 0, 20);
@@ -199,7 +195,7 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
         }
 
         sess->last_active = GetTickCount64();
-        TunDriver::instance().send_async(frame, 14 + 20 + 8 + len);
+        TunDriver::instance().send_async(packet, 20 + 8 + len);
     }
 }
 
@@ -250,14 +246,10 @@ void send_dns_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     resp.push_back((ip_addr >> 24) & 0xFF);
     
     // Send
-    uint8_t frame[2048];
-    if (14 + 20 + 8 + resp.size() > 2048) return;
+    uint8_t packet[2048];
+    if (20 + 8 + resp.size() > 2048) return;
 
-    memcpy(frame, HOST_MAC, 6);
-    memcpy(frame + 6, TunDriver::TAP_MAC, 6);
-    *(uint16_t*)(frame + 12) = htons(0x0800);
-
-    uint8_t* ip_hdr = frame + 14;
+    uint8_t* ip_hdr = packet;
     uint8_t* udp_hdr = ip_hdr + 20;
     
     memset(ip_hdr, 0, 20);
@@ -273,7 +265,7 @@ void send_dns_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     *(uint16_t*)(udp_hdr + 6) = 0;
     memcpy(udp_hdr + 8, resp.data(), resp.size());
 
-    TunDriver::instance().send_async(frame, 14 + 20 + 8 + (int)resp.size());
+    TunDriver::instance().send_async(packet, 20 + 8 + (int)resp.size());
 }
 
 // Helper to build an empty DNS Response (e.g. for AAAA blocking)
@@ -300,14 +292,10 @@ void send_dns_empty_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port
     }
 
     // Send
-    uint8_t frame[2048];
-    if (14 + 20 + 8 + resp.size() > 2048) return;
+    uint8_t packet[2048];
+    if (20 + 8 + resp.size() > 2048) return;
 
-    memcpy(frame, HOST_MAC, 6);
-    memcpy(frame + 6, TunDriver::TAP_MAC, 6);
-    *(uint16_t*)(frame + 12) = htons(0x0800);
-
-    uint8_t* ip_hdr = frame + 14;
+    uint8_t* ip_hdr = packet;
     uint8_t* udp_hdr = ip_hdr + 20;
     
     memset(ip_hdr, 0, 20);
@@ -323,7 +311,7 @@ void send_dns_empty_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port
     *(uint16_t*)(udp_hdr + 6) = 0;
     memcpy(udp_hdr + 8, resp.data(), resp.size());
 
-    TunDriver::instance().send_async(frame, 14 + 20 + 8 + (int)resp.size());
+    TunDriver::instance().send_async(packet, 20 + 8 + (int)resp.size());
 }
 
 void send_dns_over_tcp(UdpSession* sess, const std::vector<uint8_t>& payload) {
@@ -686,6 +674,19 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         std::string full_domain = parse_dns_qname(payload, len, &qname_len);
         
         if (!full_domain.empty()) {
+            // NCSI Hijacking to make Windows/Phone happy immediately
+            if (full_domain.find("msftncsi") != std::string::npos || 
+                full_domain.find("msftconnecttest") != std::string::npos ||
+                full_domain.find("connectivitycheck") != std::string::npos) {
+                
+                uint16_t id = *(uint16_t*)payload;
+                // Resolve to a typical MS NCSI IP or any valid IP to satisfy the check
+                uint32_t ncsi_ip = inet_addr("131.107.255.255");
+                send_dns_response(src_ip, dst_ip, src_port, dst_port, id, full_domain, ncsi_ip);
+                LOG_INFO("[DNS] Hijacked NCSI check for: %s\n", full_domain.c_str());
+                return;
+            }
+
             // Rule Check for Domain
             RouteAction dom_action = RuleManager::instance().match_domain(full_domain);
             if (dom_action == RouteAction::BLOCK) {
