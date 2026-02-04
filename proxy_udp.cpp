@@ -648,19 +648,9 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
 
 // Called by Main Thread
 void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
-    // 0. Bypass DHCP traffic (ports 67 and 68)
-    uint16_t sport_h = ntohs(src_port);
     uint16_t dport_h = ntohs(dst_port);
-    if (sport_h == 67 || dport_h == 67 || sport_h == 68 || dport_h == 68) {
-        return; // Let LwIP or OS handle DHCP renewals
-    }
 
-    // 0.1 Bypass traffic to local gateway (ICS)
-    if (dst_ip == inet_addr("192.168.137.1")) {
-        return;
-    }
-
-    // 0.2 Drop Noisy Protocols (mDNS, NetBIOS, SSDP) - Check FIRST
+    // 0. Drop Noisy Protocols (mDNS, NetBIOS, SSDP) - Check FIRST
     if (dport_h == 5353 ||  // mDNS
         dport_h == 5355 ||  // LLMNR
         dport_h == 137 ||   // NetBIOS Name Service
