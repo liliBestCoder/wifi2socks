@@ -151,9 +151,13 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
     return ERR_OK;
 }
 
+err_t tun_netif_output(struct netif* netif, struct pbuf* p, const ip4_addr_t* ipaddr) {
+    return netif->linkoutput(netif, p);
+}
+
 err_t netif_init_cb(struct netif* netif) {
     netif->linkoutput = tap_linkoutput;
-    netif->output = ip4_output; // Use direct IP output instead of etharp_output
+    netif->output = tun_netif_output; // Correctly use the wrapper for TUN mode
     netif->mtu = 1500;
     // Remove NETIF_FLAG_ETHARP
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_LINK_UP | NETIF_FLAG_UP;
