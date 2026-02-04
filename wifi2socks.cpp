@@ -32,8 +32,6 @@ LogLevel g_log_level = LOG_LEVEL_INFO;
 #include "wifi_ap.h"
 #include "wifi_ap_listener.h"
 
-std::atomic<bool> g_tap_running(true);
-
 // Main Entry Point
 int main() {
     // 0. Initialize Winsock and WinRT
@@ -93,7 +91,7 @@ int main() {
     }
 
     // 2. Initialize Worker Pool
-    WorkerPool::instance().init(20);
+    WorkerPool::instance().init(8);
     LOG_INFO("Worker Pool Initialized.\n");
 
     // 4. Initialize LwIP
@@ -127,11 +125,6 @@ int main() {
     while (true) {
         // This handles the "Downstream" writes to LwIP without locking in Workers
         MainDispatcher::instance().process_pending();
-        
-        if (!g_tap_running) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            continue; 
-        }
 
         // Wait for packet (or timeout to process pending/timeouts)
         DWORD waitRes = WaitForSingleObject(waitEvent, 2); 

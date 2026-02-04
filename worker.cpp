@@ -30,11 +30,19 @@ Worker::~Worker() {
     if (m_iocp) CloseHandle(m_iocp);
 }
 
-void Worker::start() {
+void Worker::start(int core_index) {
     if (m_running) return;
     m_running = true;
     m_thread = std::thread(&Worker::loop, this);
     SetThreadPriority(m_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
+
+    // Set CPU Affinity if a valid core_index is provided
+    if (core_index >= 0) {
+        DWORD_PTR mask = (static_cast<DWORD_PTR>(1) << (core_index % (sizeof(DWORD_PTR) * 8)));
+        if (SetThreadAffinityMask(m_thread.native_handle(), mask) == 0) {
+            printf("Warning: Failed to set affinity for worker on core %d (Error: %d)\n", core_index, GetLastError());
+        }
+    }
 }
 
 void Worker::stop() {
@@ -349,7 +357,7 @@ void WorkerPool::init(int count) {
     if (!m_workers.empty()) return;
     for (int i = 0; i < count; ++i) {
         Worker* w = new Worker();
-        w->start();
+        w->start(i);
         m_workers.push_back(w);
     }
     m_next_idx = 0;

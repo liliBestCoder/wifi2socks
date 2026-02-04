@@ -81,7 +81,7 @@ public:
     Worker();
     ~Worker();
     
-    void start();
+    void start(int core_index);
     void stop();
     
     // Thread-safe methods to add/remove sockets.

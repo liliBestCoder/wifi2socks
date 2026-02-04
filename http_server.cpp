@@ -59,19 +59,60 @@ void SimpleHttpServer::start(uint16_t port) {
     }
 
     m_thread = std::thread(&SimpleHttpServer::worker_loop, this);
-    printf("[HTTP] API Server listening on port %d\n", port);
+    LOG_INFO("[HTTP] API Server listening on port %d\n", port);
 }
 
 void SimpleHttpServer::stop() {
     if (!m_running.exchange(false)) return;
+
+    // 关闭监听 socket
     if (m_listen_socket != INVALID_SOCKET) {
         closesocket(m_listen_socket);
         m_listen_socket = INVALID_SOCKET;
     }
+
+    // 通知线程池里的线程退出
+    m_queue_cv.notify_all();
+
+    // 等待 worker_loop 线程退出
     if (m_thread.joinable()) m_thread.join();
+
+    // 确保线程池里的线程退出并 join
+    for (auto& t : m_workers) {
+        if (t.joinable()) t.join();
+    }
+    m_workers.clear();
+
+    // 清空任务队列
+    std::queue<SOCKET> empty;
+    std::swap(m_task_queue, empty);
+}
+
+
+void SimpleHttpServer::worker_thread_loop() {
+    while (m_running) {
+        SOCKET client_sock = INVALID_SOCKET;
+
+        {
+            std::unique_lock<std::mutex> lock(m_queue_mtx);
+            m_queue_cv.wait(lock, [this]() { return !m_task_queue.empty() || !m_running; });
+            if (!m_running && m_task_queue.empty()) return;
+
+            client_sock = m_task_queue.front();
+            m_task_queue.pop();
+        }
+
+        handle_client(client_sock);
+    }
 }
 
 void SimpleHttpServer::worker_loop() {
+    // 1. 创建线程池
+    for (int i = 0; i < m_thread_count; ++i) {
+        m_workers.emplace_back([this]() { this->worker_thread_loop(); });
+    }
+
+    // 2. Accept 循环，只入队，不创建线程
     while (m_running) {
         sockaddr_in client_addr;
         int len = sizeof(client_addr);
@@ -82,11 +123,22 @@ void SimpleHttpServer::worker_loop() {
             continue;
         }
 
-        std::thread([this, client_sock]() {
-            handle_client(client_sock);
-            }).detach();
+        // 将客户端放入任务队列
+        {
+            std::lock_guard<std::mutex> lock(m_queue_mtx);
+            m_task_queue.push(client_sock);
+        }
+        m_queue_cv.notify_one(); // 唤醒一个线程处理
     }
+
+    // 3. 停止时通知线程池退出
+    m_queue_cv.notify_all();
+    for (auto& t : m_workers) {
+        if (t.joinable()) t.join();
+    }
+    m_workers.clear();
 }
+
 
 static std::vector<std::string> split_str(const std::string& str, char delimiter) {
     std::vector<std::string> tokens;
@@ -358,37 +410,41 @@ std::string SimpleHttpServer::handle_logs_get() {
     return ss.str();
 }
 
-extern std::atomic<bool> g_tap_running;
-
 std::string SimpleHttpServer::handle_start() {
-    g_tap_running = true;
+    std::string fail_str = "{\"status\":\"err\",\"action\":\"stopped\"}";
+    std::string success_str = "{\"status\":\"ok\",\"action\":\"started\"}";
     try {
         if (IcsManager::EnableICS(L"wifi2socks", L"Microsoft Wi-Fi Direct Virtual Adapter")) {
-             printf("[HTTP] ICS Enabled.\n");
+            LOG_INFO("[HTTP] ICS Enabled.\n");
+            return success_str;
         }
         else {
-            printf("[HTTP] ICS Enable Failed.\n");
+            LOG_INFO("[HTTP] ICS Enable Failed.\n");
+            return fail_str;
         }
     }
     catch (const std::exception& e) {
-        printf("WiFi Start Error: %s\n", e.what());
+        LOG_ERROR("WiFi Start Error: %s\n", e.what());
+        return fail_str;
     }
-    return "{\"status\":\"ok\",\"action\":\"started\"}";
 }
 
 std::string SimpleHttpServer::handle_stop() {
-    if (g_tap_running.exchange(false) == true) {
-        try {
-            if (IcsManager::DisableICS(L"wifi2socks", L"Microsoft Wi-Fi Direct Virtual Adapter")) {
-                printf("[HTTP] ICS Disabled.\n");
-            }
-            else {
-                printf("[HTTP] ICS Disable Failed.\n");
-            }
+    std::string fail_str = "{\"status\":\"err\",\"action\":\"stopped\"}";
+    std::string success_str = "{\"status\":\"ok\",\"action\":\"stopped\"}";
+
+    try {
+        if (IcsManager::DisableICS(L"wifi2socks", L"Microsoft Wi-Fi Direct Virtual Adapter")) {
+            LOG_INFO("[HTTP] ICS Disabled.\n");
+            return success_str;
         }
-        catch (const std::exception& e) {
-            printf("WiFi Stop Error: %s\n", e.what());
+        else {
+            LOG_INFO("[HTTP] ICS Disable Failed.\n");
+            return fail_str;
         }
     }
-    return "{\"status\":\"ok\",\"action\":\"stopped\"}";
+    catch (const std::exception& e) {
+        LOG_ERROR("WiFi Stop Error: %s\n", e.what());
+        return fail_str;
+    }
 }

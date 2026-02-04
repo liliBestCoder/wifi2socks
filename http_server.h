@@ -3,6 +3,9 @@
 #include <atomic>
 #include <string>
 #include <vector>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
 #include <map>
 
 class SimpleHttpServer {
@@ -11,12 +14,25 @@ public:
     
     void start(uint16_t port);
     void stop();
+   
 
 private:
     SimpleHttpServer();
     ~SimpleHttpServer();
 
+    std::vector<std::thread> m_workers;
+
+    // 客户端任务队列
+    std::queue<SOCKET> m_task_queue;
+    std::mutex m_queue_mtx;
+    std::condition_variable m_queue_cv;
+    long long m_last_log_pos = 0;
+
+    // 线程池大小，可调整
+    int m_thread_count = 8;
+
     void worker_loop();
+    void worker_thread_loop();
     void handle_client(uint64_t client_socket);
     
     // Handlers
@@ -25,7 +41,6 @@ private:
     std::string handle_rules_update(const std::string& type, const std::string& body);
     std::string handle_proxy_check();
     std::string handle_logs_get();
-    long long m_last_log_pos = 0;
     std::string handle_start();
     std::string handle_stop();
 

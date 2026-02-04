@@ -190,7 +190,7 @@ bool TunDriver::set_ip(const char* ip, const char* mask, const char* gateway) {
             return false;
         }
         
-        routeRow.Metric = 60;
+        routeRow.Metric = 350;
         routeRow.Protocol = MIB_IPPROTO_NETMGMT;
         
         err = CreateIpForwardEntry2(&routeRow);
