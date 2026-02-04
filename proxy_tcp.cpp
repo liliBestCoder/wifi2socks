@@ -487,6 +487,21 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
             else if (is_http_start(ctx->sni_buffer.data(), ctx->sni_buffer.size())) {
                 std::string host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
                 if (!host.empty()) {
+                    // Hook: www.google.cn / www.googleapis.cn /generate_204 -> HTTP 204
+                    if (ntohs(ctx->target.original_dst_port) == 80 && 
+                       (host == "www.google.cn" || host == "www.googleapis.cn")) {
+                        std::string raw_req((char*)ctx->sni_buffer.data(), ctx->sni_buffer.size());
+                        if (raw_req.find("GET /generate_204") != std::string::npos) {
+                            LOG_INFO("[TCP] Hook: matched %s/generate_204. Sending HTTP 204.\n", host.c_str());
+                            std::string mock_resp = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+                            std::vector<uint8_t> d(mock_resp.begin(), mock_resp.end());
+                            ctx->tx_queue.push_back(std::move(d));
+                            try_send_downstream(ctx);
+                            close_tcp_ctx(ctx);
+                            pbuf_free(p);
+                            return ERR_OK;
+                        }
+                    }
                     ready = true; 
                 } else if (ctx->sni_buffer.size() > 1024) {
                     ready = true; 
