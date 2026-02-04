@@ -1,6 +1,8 @@
 #include "wifi_ap.h"
 #include <iostream>
 #include <sstream>
+#include <thread>
+#include <vector>
 
 using namespace ABI::Windows::Foundation;
 using namespace ABI::Windows::Foundation::Collections;
