@@ -203,27 +203,25 @@ void process_tap_frame(uint8_t* buf, int len) {
         }
 
         if (IPH_PROTO(ip) == IP_PROTO_ICMP) {
-            if (ip->dest.addr != ::inet_addr(g_config.tap_gateway.c_str())) {
-                uint8_t* icmp_base = buf + IPH_HL(ip) * 4;
-                if (icmp_base[0] == 8) {
-                    // Swap IP addresses
-                    uint32_t tmp_ip = ip->src.addr;
-                    ip->src.addr = ip->dest.addr;
-                    ip->dest.addr = tmp_ip;
+            uint8_t* icmp_base = buf + IPH_HL(ip) * 4;
+            if (icmp_base[0] == 8) { // Echo Request
+                // Swap IP addresses
+                uint32_t tmp_ip = ip->src.addr;
+                ip->src.addr = ip->dest.addr;
+                ip->dest.addr = tmp_ip;
 
-                    icmp_base[0] = 0; // Echo Reply
-                    
-                    IPH_CHKSUM_SET(ip, 0);
-                    IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+                icmp_base[0] = 0; // Echo Reply
+                
+                IPH_CHKSUM_SET(ip, 0);
+                IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
 
-                    int ip_len = ::ntohs(IPH_LEN(ip));
-                    int icmp_len = ip_len - IPH_HL(ip) * 4;
-                    *(uint16_t*)(icmp_base + 2) = 0;
-                    *(uint16_t*)(icmp_base + 2) = ip_chksum_simple(icmp_base, icmp_len);
+                int ip_len = ::ntohs(IPH_LEN(ip));
+                int icmp_len = ip_len - IPH_HL(ip) * 4;
+                *(uint16_t*)(icmp_base + 2) = 0;
+                *(uint16_t*)(icmp_base + 2) = ip_chksum_simple(icmp_base, icmp_len);
 
-                    TunDriver::instance().send_async(buf, len);
-                    return;
-                }
+                TunDriver::instance().send_async(buf, len);
+                return;
             }
         }
 
