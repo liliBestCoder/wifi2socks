@@ -332,3 +332,37 @@ void Worker::loop() {
         }
     }
 }
+
+// WorkerPool Implementation
+
+WorkerPool& WorkerPool::instance() {
+    static WorkerPool pool;
+    return pool;
+}
+
+void WorkerPool::init(int count) {
+    if (!m_workers.empty()) return;
+    for (int i = 0; i < count; ++i) {
+        Worker* w = new Worker();
+        w->start(i);
+        m_workers.push_back(w);
+    }
+    m_next_idx = 0;
+}
+
+Worker* WorkerPool::get_worker(uint32_t hash) {
+    if (m_workers.empty()) return nullptr;
+    return m_workers[hash % m_workers.size()];
+}
+
+Worker* WorkerPool::get_next_worker() {
+    if (m_workers.empty()) return nullptr;
+    return m_workers[m_next_idx++ % m_workers.size()];
+}
+
+void WorkerPool::for_each_worker(std::function<void(Worker*)> callback) {
+    if (m_workers.empty()) return;
+    for (auto* w : m_workers) {
+        callback(w);
+    }
+}
