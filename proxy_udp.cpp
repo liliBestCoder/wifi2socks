@@ -526,7 +526,7 @@ void udp_check_timeouts() {
             uint64_t now = GetTickCount64();
             std::vector<UdpSession*> stale_sessions;
             for (auto& pair : t_udp_sessions) {
-                if (now - pair.second->last_active > 60000) {
+                if (now - pair.second->last_active > 300000) { // 300s (5min) timeout
                     stale_sessions.push_back(pair.second);
                 }
             }

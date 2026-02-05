@@ -394,6 +394,11 @@ void connect_to_proxy_async(TcpCtx* ctx) {
         if (ctx->closed) return;
         ctx->proxy_socket = socket(AF_INET, SOCK_STREAM, 0);
         if (ctx->proxy_socket == INVALID_SOCKET) { close_tcp_ctx(ctx); return; }
+        
+        // Enable TCP Keep-Alive to prevent NAT timeouts
+        BOOL keepAlive = TRUE;
+        setsockopt(ctx->proxy_socket, SOL_SOCKET, SO_KEEPALIVE, (char*)&keepAlive, sizeof(keepAlive));
+
         u_long mode = 1; ioctlsocket(ctx->proxy_socket, FIONBIO, &mode);
 
         struct WinSockAddr {
