@@ -195,7 +195,8 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
         ctx->sock = s;
         if (on_connect) {
             ctx->on_write = [on_connect](int bytes) {
-                if (bytes >= 0) on_connect();
+                // Always callback. Logic in handle_proxy_connect handles validation/errors.
+                on_connect();
             };
         }
         
