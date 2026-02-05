@@ -57,6 +57,7 @@ struct TcpCtx : public std::enable_shared_from_this<TcpCtx> {
     // Upstream Queue (Phone -> Proxy)
     std::deque<std::vector<uint8_t>> upstream_queue;
     size_t upstream_offset;
+    bool upstream_busy; // NEW: Async Write Pending Flag
 
     std::mutex data_mtx;
     Worker* worker;
@@ -65,7 +66,7 @@ struct TcpCtx : public std::enable_shared_from_this<TcpCtx> {
 
     TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
                tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0), 
-               upstream_offset(0), lwip_arg(nullptr), upstream_eof(false),
+               upstream_offset(0), upstream_busy(false), lwip_arg(nullptr), upstream_eof(false),
                client_ip(0), client_port(0), is_direct(false) {
         sni_buffer.reserve(g_config.max_sni_len);
         upstream_data.reserve(8192); 
@@ -74,6 +75,7 @@ struct TcpCtx : public std::enable_shared_from_this<TcpCtx> {
 
 void close_tcp_ctx(TcpCtxPtr ctx);
 void handle_proxy_read(TcpCtxPtr ctx);
+void handle_proxy_write(TcpCtxPtr ctx, int bytes);
 void connect_to_proxy_async(TcpCtxPtr ctx);
 void try_send_upstream(TcpCtxPtr ctx); 
 
@@ -256,61 +258,73 @@ void handle_proxy_read(TcpCtxPtr ctx) {
     }
 }
 
+// --- Upstream Async Write Callback ---
+void handle_proxy_write(TcpCtxPtr ctx, int bytes) {
+    if (ctx->closed) return;
+    
+    // Clear busy flag as the async operation completed
+    ctx->upstream_busy = false;
+
+    if (bytes <= 0) {
+        // Log info but only close if it's a hard error
+        if (bytes < 0) { 
+             LOG_INFO("[TCP] Async write failed: %d. Closing.\n", bytes);
+             close_tcp_ctx(ctx);
+        }
+        return;
+    }
+
+    TrafficManager::instance().report_proxy_tx(bytes, ctx->is_direct);
+    ctx->upstream_offset += bytes;
+
+    // Check if current chunk is done
+    if (!ctx->upstream_queue.empty()) {
+        auto& head = ctx->upstream_queue.front();
+        if (ctx->upstream_offset >= head.size()) {
+            ctx->upstream_queue.pop_front();
+            ctx->upstream_offset = 0;
+        }
+    }
+
+    // Trigger next send
+    try_send_upstream(ctx);
+}
+
 // --- Upstream (Phone -> Proxy) ---
-// Sync Send with Retry + shared_ptr safety
+// ASYNC IOCP SEND
 void try_send_upstream(TcpCtxPtr ctx) {
     if (ctx->closed || ctx->proxy_socket == INVALID_SOCKET) return;
     
     if (ctx->state != TcpCtx::ESTABLISHED && ctx->state != TcpCtx::HANDSHAKE) return;
 
-    while (!ctx->upstream_queue.empty()) {
-        auto& data = ctx->upstream_queue.front();
-        
-        if (ctx->upstream_offset >= data.size()) {
-            ctx->upstream_queue.pop_front();
-            ctx->upstream_offset = 0;
-            continue;
-        }
+    // If we already have a pending write, do nothing.
+    // The completion handler (handle_proxy_write) will call us back.
+    if (ctx->upstream_busy) return;
 
-        const char* ptr = (const char*)data.data() + ctx->upstream_offset;
-        int remaining = (int)(data.size() - ctx->upstream_offset);
+    if (ctx->upstream_queue.empty()) return;
 
-        int sent = send(ctx->proxy_socket, ptr, remaining, 0);
-        
-        if (sent > 0) {
-             TrafficManager::instance().report_proxy_tx(sent, ctx->is_direct);
-             ctx->upstream_offset += sent;
-             if (ctx->upstream_offset >= data.size()) {
-                 ctx->upstream_queue.pop_front();
-                 ctx->upstream_offset = 0;
-             }
-        } else {
-             int err = WSAGetLastError();
-             if (err == WSAEWOULDBLOCK) {
-                 ctx->worker->queue_task([ctx]() { 
-                     SwitchToThread(); 
-                     try_send_upstream(ctx); 
-                 });
-                 return; 
-             } else {
-                 // Graceful handling of Upstream Write Errors (e.g. RST from server)
-                 // Even if we can't send to server, we might still have data in tx_queue 
-                 // (e.g. HTTP 200 OK) that MUST reach the client.
-                 LOG_INFO("[TCP] Upstream send failed: %d. Closing upstream half.\n", err);
-                 
-                 // 1. Stop using this socket
-                 ctx->worker->remove_socket(ctx->proxy_socket, nullptr);
-                 ctx->proxy_socket = INVALID_SOCKET;
-                 
-                 // 2. Mark upstream as done
-                 ctx->upstream_eof = true;
-                 
-                 // 3. Try to flush whatever is left for the client
-                 // If tx_queue is empty, it will close the context inside.
-                 try_send_downstream(ctx);
-                 return;
-             }
-        }
+    auto& data = ctx->upstream_queue.front();
+    
+    if (ctx->upstream_offset >= data.size()) {
+        ctx->upstream_queue.pop_front();
+        ctx->upstream_offset = 0;
+        try_send_upstream(ctx); // Recurse for next packet
+        return;
+    }
+
+    char* ptr = (char*)data.data() + ctx->upstream_offset;
+    int remaining = (int)(data.size() - ctx->upstream_offset);
+
+    // Mark busy BEFORE calling send_async
+    ctx->upstream_busy = true;
+
+    // Use Worker's send_async (IOCP WSASend)
+    bool scheduled = ctx->worker->send_async(ctx->proxy_socket, ptr, remaining);
+    
+    if (!scheduled) {
+        // Socket issue
+        ctx->upstream_busy = false;
+        // Maybe close?
     }
 }
 
@@ -361,7 +375,7 @@ void handle_handshake_read(TcpCtxPtr ctx) {
                 ctx->worker->add_socket(
                     ctx->proxy_socket,
                     [ctx](char*, int, sockaddr_in*) { handle_proxy_read(ctx); },
-                    nullptr,
+                    [ctx](int bytes) { handle_proxy_write(ctx, bytes); }, // <--- ON WRITE CALLBACK
                     [ctx]() { close_tcp_ctx(ctx); }
                 );
             } else {
@@ -411,7 +425,7 @@ void handle_proxy_connect(TcpCtxPtr ctx) {
         ctx->worker->add_socket(
             ctx->proxy_socket,
             [ctx](char*, int, sockaddr_in*) { handle_proxy_read(ctx); },
-            nullptr,
+            [ctx](int bytes) { handle_proxy_write(ctx, bytes); }, // <--- ON WRITE CALLBACK
             [ctx]() { close_tcp_ctx(ctx); }
         );
         return;
@@ -463,11 +477,11 @@ void handle_proxy_connect(TcpCtxPtr ctx) {
     ctx->worker->add_socket(
         ctx->proxy_socket,
         [ctx](char*, int, sockaddr_in*) { handle_handshake_read(ctx); }, 
-        nullptr, 
+        nullptr, // Handshake phase doesn't use async write yet, it uses handle_proxy_connect/send()
         [ctx]() { close_tcp_ctx(ctx); }
     );
 }
-
+// ... rest of file (connect_to_proxy_async, tcp_client_recv, tcp_proxy_accept) same as before ...
 void connect_to_proxy_async(TcpCtxPtr ctx) {
     if (!ctx->worker) {
         ctx->worker = WorkerPool::instance().get_worker(ctx->target.original_dst_port);
