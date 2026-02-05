@@ -356,7 +356,17 @@ void handle_handshake_read(TcpCtxPtr ctx) {
         if (header_end != std::string::npos) {
             std::string header = s.substr(0, header_end);
             if (header.find("200") != std::string::npos) {
-                LOG_INFO("[TCP] Proxy Tunnel Established\n");
+                uint32_t cip = ctx->client_ip;
+                uint32_t dip = ctx->target.original_dst_ip;
+                if (ctx->detected_domain.empty()) {
+                    LOG_INFO("[TCP  ] Proxy  %d.%d.%d.%d:%-5d -> %d.%d.%d.%d:%d\n",
+                        cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ntohs(ctx->client_port),
+                        dip & 0xFF, (dip >> 8) & 0xFF, (dip >> 16) & 0xFF, (dip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
+                } else {
+                    LOG_INFO("[TCP  ] Proxy  %d.%d.%d.%d:%-5d -> %s:%d\n",
+                        cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ntohs(ctx->client_port),
+                        ctx->detected_domain.c_str(), ntohs(ctx->target.original_dst_port));
+                }
                 
                 {
                     std::lock_guard<std::mutex> lock(ctx->data_mtx);
@@ -414,7 +424,17 @@ void handle_proxy_connect(TcpCtxPtr ctx) {
     }
 
     if (ctx->is_direct) {
-        LOG_INFO("[TCP] Direct Tunnel Established\n");
+        uint32_t cip = ctx->client_ip;
+        uint32_t dip = ctx->target.original_dst_ip;
+        if (ctx->detected_domain.empty()) {
+            LOG_INFO("[TCP  ] Direct %d.%d.%d.%d:%-5d -> %d.%d.%d.%d:%d\n",
+                cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ntohs(ctx->client_port),
+                dip & 0xFF, (dip >> 8) & 0xFF, (dip >> 16) & 0xFF, (dip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
+        } else {
+            LOG_INFO("[TCP  ] Direct %d.%d.%d.%d:%-5d -> %s:%d\n",
+                cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ntohs(ctx->client_port),
+                ctx->detected_domain.c_str(), ntohs(ctx->target.original_dst_port));
+        }
         {
             std::lock_guard<std::mutex> lock(ctx->data_mtx);
             ctx->connected = true;

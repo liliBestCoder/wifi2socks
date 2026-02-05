@@ -15,7 +15,7 @@ AsyncLogger::AsyncLogger()
     m_file_ptr = _fsopen("wifi2socks.log", "a", _SH_DENYNO);
 
     if (m_file_ptr == nullptr) {
-        // Èç¹û´ò¿ªÊ§°Ü£¬³¢ÊÔ»ñÈ¡¾ø¶ÔÂ·¾¶´òÓ¡³öÀ´£¬·½±ãÅÅ²éÎ»ÖÃÎÊÌâ
+        // ï¿½ï¿½ï¿½ï¿½ï¿½Ê§ï¿½Ü£ï¿½ï¿½ï¿½ï¿½Ô»ï¿½È¡ï¿½ï¿½ï¿½ï¿½Â·ï¿½ï¿½ï¿½ï¿½Ó¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Å²ï¿½Î»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         char full_path[MAX_PATH];
         _fullpath(full_path, "wifi2socks.log", MAX_PATH);
         printf("[Logger] Error: Cannot open/create log file at: %s\n", full_path);
@@ -33,7 +33,7 @@ AsyncLogger::~AsyncLogger() {
     m_cv.notify_all();
     if (m_writer_thread.joinable()) m_writer_thread.join();
 
-    // 2. Îö¹¹Ê±¹Ø±ÕÎÄ¼þ
+    // 2. ï¿½ï¿½ï¿½ï¿½Ê±ï¿½Ø±ï¿½ï¿½Ä¼ï¿½
     if (m_file_ptr) {
         fclose(m_file_ptr);
         m_file_ptr = nullptr;
@@ -41,13 +41,22 @@ AsyncLogger::~AsyncLogger() {
 }
 
 void AsyncLogger::log(const char* fmt, ...) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char time_str[32];
+    sprintf_s(time_str, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
     char tmp[4096];
+    strcpy_s(tmp, time_str);
+    int time_len = (int)strlen(time_str);
+
     va_list args;
     va_start(args, fmt);
-    int len = vsnprintf(tmp, sizeof(tmp), fmt, args);
+    int len = vsnprintf(tmp + time_len, sizeof(tmp) - time_len, fmt, args);
     va_end(args);
 
     if (len <= 0) return;
+    len += time_len;
 
     {
         std::lock_guard<std::mutex> lock(m_mtx);
@@ -56,10 +65,10 @@ void AsyncLogger::log(const char* fmt, ...) {
         size_t needed = sizeof(int) + len;
 
         if (free_space < needed) {
-            return; // »º³åÇøÂú£¬¶ªÆúÈÕÖ¾
+            return; // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾
         }
 
-        // A. Ð´Èë³¤¶ÈÍ·
+        // A. Ð´ï¿½ë³¤ï¿½ï¿½Í·
         int header_len = len;
         if (m_write_idx + sizeof(int) <= m_size) {
             memcpy(&m_buffer[m_write_idx], &header_len, sizeof(int));
@@ -71,7 +80,7 @@ void AsyncLogger::log(const char* fmt, ...) {
         }
         m_write_idx = (m_write_idx + sizeof(int)) % m_size;
 
-        // B. Ð´Èë×Ö·û´®Êý¾Ý
+        // B. Ð´ï¿½ï¿½ï¿½Ö·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         if (m_write_idx + len <= m_size) {
             memcpy(&m_buffer[m_write_idx], tmp, len);
         }
@@ -101,7 +110,7 @@ void AsyncLogger::writer_loop() {
             if (!m_running && m_read_idx == m_write_idx) break;
 
             if (m_read_idx != m_write_idx) {
-                // A. ¶ÁÈ¡³¤¶ÈÍ·
+                // A. ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½Í·
                 if (m_read_idx + sizeof(int) <= m_size) {
                     memcpy(&len, &m_buffer[m_read_idx], sizeof(int));
                 }
@@ -114,7 +123,7 @@ void AsyncLogger::writer_loop() {
 
                 if (len > sizeof(out_buf) - 1) len = sizeof(out_buf) - 1;
 
-                // B. ¶ÁÈ¡Êý¾Ý
+                // B. ï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½
                 if (len > 0) {
                     if (m_read_idx + len <= m_size) {
                         memcpy(out_buf, &m_buffer[m_read_idx], len);
@@ -131,15 +140,15 @@ void AsyncLogger::writer_loop() {
         }
 
         if (len > 0) {
-            // 3. Í¬Ê±Êä³öµ½ÆÁÄ»ºÍÎÄ¼þ
-            // Êä³öµ½ÆÁÄ» (stdout)
+            // 3. Í¬Ê±ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä»ï¿½ï¿½ï¿½Ä¼ï¿½
+            // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä» (stdout)
             fwrite(out_buf, 1, len, stdout);
             fflush(stdout);
 
-            // Êä³öµ½ÎÄ¼þ
+            // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä¼ï¿½
             if (m_file_ptr) {
                 fwrite(out_buf, 1, len, m_file_ptr);
-                // ¹Ø¼ü£ºfflush È·±£ HTTP ½Ó¿ÚÄÜÍ¨¹ý seekg ¶Áµ½ÊµÊ±¸üÐÂ
+                // ï¿½Ø¼ï¿½ï¿½ï¿½fflush È·ï¿½ï¿½ HTTP ï¿½Ó¿ï¿½ï¿½ï¿½Í¨ï¿½ï¿½ seekg ï¿½ï¿½ï¿½ï¿½ÊµÊ±ï¿½ï¿½ï¿½ï¿½
                 fflush(m_file_ptr);
             }
         }

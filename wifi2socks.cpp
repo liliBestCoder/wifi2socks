@@ -61,9 +61,9 @@ int main() {
         WiFiAPManager::instance().SetPassphrase(pass);
         WiFiAPManager::instance().RegisterListener(&wifi_listener);
         WiFiAPManager::instance().Start();
-        LOG_INFO("WiFi AP Initialized (SSID: %s). Wait for START command.\n", g_config.wifi_ssid.c_str());
+        LOG_INFO("[CORE ] WiFi AP Initialized (SSID: %s). Wait for START command.\n", g_config.wifi_ssid.c_str());
     } catch (const std::exception& e) {
-        LOG_INFO("WiFi AP Initialization failed: %s\n", e.what());
+        LOG_INFO("[CORE ] WiFi AP Initialization failed: %s\n", e.what());
     }
     
     // -0.5 Start Traffic Manager & HTTP API
@@ -72,9 +72,9 @@ int main() {
     // 0.5 Pre-load GeoIP/GeoSite
     try {
         GeoChecker::instance().init();
-        LOG_INFO("GeoChecker loading in background...\n");
+        LOG_INFO("[CORE ] GeoChecker loading in background...\n");
     } catch (const std::exception& e) {
-        LOG_INFO("Warning: GeoChecker failed to load: %s. IP/Domain bypass may not work.\n", e.what());
+        LOG_INFO("[CORE ] Warning: GeoChecker failed to load: %s. IP/Domain bypass may not work.\n", e.what());
     }
 
     // 1. Initialize TUN Device (Wintun)
@@ -92,7 +92,7 @@ int main() {
 
     // 2. Initialize Worker Pool
     WorkerPool::instance().init(8);
-    LOG_INFO("Worker Pool Initialized.\n");
+    LOG_INFO("[CORE ] Worker Pool Initialized.\n");
 
     // 4. Initialize LwIP
     lwip_init();
@@ -112,7 +112,7 @@ int main() {
     pcb = tcp_listen(pcb);
     tcp_accept(pcb, tcp_proxy_accept);
 
-    LOG_INFO("LwIP Tun2Socks Running.\nProxy: %s:%d\nTAP IP: %s\n", g_config.proxy_ip.c_str(), g_config.proxy_port, g_config.tap_ip.c_str());
+    LOG_INFO("[CORE ] LwIP Tun2Socks Running. Proxy: %s:%d, TAP IP: %s\n", g_config.proxy_ip.c_str(), g_config.proxy_port, g_config.tap_ip.c_str());
 
     SimpleHttpServer::instance().start(g_config.http_api_port);
 

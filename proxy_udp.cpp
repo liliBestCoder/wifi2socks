@@ -112,7 +112,7 @@ void parse_and_log_dns_response(const uint8_t* payload, int len, const char* mod
             
             if (type == 1 && rdlen == 4 && pos + 4 <= len) { 
                 uint32_t ip = *(uint32_t*)(payload + pos);
-                LOG_INFO("[DNS] Resolved: %s -> %d.%d.%d.%d (TTL: %d) via %s\n", 
+                LOG_INFO("[DNS  ] %s -> %d.%d.%d.%d (TTL: %d) via %s\n", 
                     domain.empty() ? "(unknown)" : domain.c_str(),
                     ip & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF, ttl, mode);
                 if (!domain.empty()) DnsCache::instance().put(domain, ip, ttl);
@@ -605,7 +605,7 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
         if (it != t_udp_sessions.end()) {
             sess = it->second;
         } else {
-            LOG_INFO("[UDP] Direct Tunnel Established: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n",
+            LOG_INFO("[UDP  ] Direct %d.%d.%d.%d:%-5d -> %d.%d.%d.%d:%d\n",
                 src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
                 dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
 
