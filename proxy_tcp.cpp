@@ -160,7 +160,7 @@ void try_send_downstream(TcpCtxPtr ctx) {
         err_t err = tcp_write(ctx->client_pcb, 
                               buf.data() + ctx->tx_written_offset, 
                               chunk, 
-                              0); 
+                              1); 
                               
         if (err == ERR_OK) {
             ctx->tx_written_offset += chunk;
