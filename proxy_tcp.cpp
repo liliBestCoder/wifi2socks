@@ -14,18 +14,26 @@
 #include <deque>
 #include <string>
 #include <algorithm>
+#include <memory>
 
 const size_t MAX_TX_QUEUE_SIZE = 4 * 1024 * 1024;    // 4MB High Water Mark
 const size_t RESUME_TX_QUEUE_SIZE = 2 * 1024 * 1024; // 2MB Low Water Mark
 
+struct TcpCtx;
+typedef std::shared_ptr<TcpCtx> TcpCtxPtr;
+
 // --- TCP Logic with Worker Pool ---
-struct TcpCtx {
+struct TcpCtx : public std::enable_shared_from_this<TcpCtx> {
     struct tcp_pcb* client_pcb;
     SOCKET proxy_socket;
     std::atomic<bool> closed;
     std::atomic<bool> connected;
     bool read_paused;
     NatEntry target;
+    
+    // Pointer to the heap-allocated shared_ptr held by LwIP
+    // We need this to delete it during cleanup.
+    void* lwip_arg; 
     
     // Client Info for Logging
     uint32_t client_ip;
@@ -55,21 +63,33 @@ struct TcpCtx {
 
     TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
                tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0), 
-               upstream_offset(0),
+               upstream_offset(0), lwip_arg(nullptr),
                client_ip(0), client_port(0), is_direct(false) {
         sni_buffer.reserve(g_config.max_sni_len);
         upstream_data.reserve(8192); 
     }
 };
 
+void close_tcp_ctx(TcpCtxPtr ctx);
+void handle_proxy_read(TcpCtxPtr ctx);
+void connect_to_proxy_async(TcpCtxPtr ctx);
+void try_send_upstream(TcpCtxPtr ctx); 
 
-void close_tcp_ctx(TcpCtx* ctx);
-void handle_proxy_read(TcpCtx* ctx);
-void connect_to_proxy_async(TcpCtx* ctx);
-void try_send_upstream(TcpCtx* ctx); 
-
-void final_cleanup_on_main(TcpCtx* ctx) {
+// Cleanup function running on Main Thread
+void final_cleanup_on_main(void* arg) {
     std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
+    // Recover the shared_ptr from the heap allocation
+    TcpCtxPtr* ptr = (TcpCtxPtr*)arg;
+    if (!ptr) return;
+    
+    // We don't need to dereference it to check content if we are just cleaning up PCB.
+    // But we should check if pcb is still valid.
+    // Since we are deleting the holder, the TcpCtx might be destroyed here if no one else holds it.
+    // So we must extract PCB pointer first if we need to close it.
+    
+    // Actually, 'ptr' holds a strong reference. So *ptr is valid.
+    auto ctx = *ptr;
+    
     if (ctx->client_pcb) {
         tcp_arg(ctx->client_pcb, NULL);
         tcp_recv(ctx->client_pcb, NULL);
@@ -78,40 +98,56 @@ void final_cleanup_on_main(TcpCtx* ctx) {
         tcp_close(ctx->client_pcb);
         ctx->client_pcb = NULL;
     }
-    delete ctx;
+    
+    // Now delete the holder. This releases the LwIP's strong reference.
+    // If Worker has a lambda holding 'ctx', 'ctx' remains alive.
+    delete ptr; 
 }
 
-void internal_close_on_worker(TcpCtx* ctx) {
+void internal_close_on_worker(TcpCtxPtr ctx) {
     if (ctx->proxy_socket != INVALID_SOCKET) {
+        // We pass 'ctx' capture to ensure it lives until socket is removed
         ctx->worker->remove_socket(ctx->proxy_socket, [ctx]() {
             closesocket(ctx->proxy_socket);
-            MainDispatcher::instance().queue_task([ctx]() {
-                final_cleanup_on_main(ctx);
-            });
+            // Now notify main thread to release LwIP resources
+            void* arg = ctx->lwip_arg;
+            if (arg) {
+                MainDispatcher::instance().queue_task([arg]() {
+                    final_cleanup_on_main(arg);
+                });
+            }
         });
     } else {
-        MainDispatcher::instance().queue_task([ctx]() {
-            final_cleanup_on_main(ctx);
-        });
+        void* arg = ctx->lwip_arg;
+        if (arg) {
+            MainDispatcher::instance().queue_task([arg]() {
+                final_cleanup_on_main(arg);
+            });
+        }
     }
 }
 
-void close_tcp_ctx(TcpCtx* ctx) {
+void close_tcp_ctx(TcpCtxPtr ctx) {
     if (!ctx || ctx->closed.exchange(true)) return;
 
     if (ctx->worker) {
+        // Queue to worker. Capture 'ctx' shared_ptr to keep it alive.
         ctx->worker->queue_task([ctx]() {
             internal_close_on_worker(ctx);
         });
     } else {
-        MainDispatcher::instance().queue_task([ctx]() {
-            final_cleanup_on_main(ctx);
-        });
+        // No worker yet? Just cleanup on main.
+        void* arg = ctx->lwip_arg;
+        if (arg) {
+            MainDispatcher::instance().queue_task([arg]() {
+                final_cleanup_on_main(arg);
+            });
+        }
     }
 }
 
 // --- Downstream (Proxy -> Phone) ---
-void try_send_downstream(TcpCtx* ctx) {
+void try_send_downstream(TcpCtxPtr ctx) {
     if (!ctx || ctx->closed || !ctx->client_pcb) return;
 
     while (ctx->tx_written_idx < ctx->tx_queue.size()) {
@@ -154,8 +190,11 @@ void try_send_downstream(TcpCtx* ctx) {
 }
 
 err_t tcp_client_sent(void* arg, struct tcp_pcb* tpcb, u16_t len) {
-    TcpCtx* ctx = (TcpCtx*)arg;
-    if (!ctx || ctx->closed) return ERR_OK;
+    TcpCtxPtr* ptr = (TcpCtxPtr*)arg;
+    if (!ptr) return ERR_OK;
+    auto ctx = *ptr;
+    
+    if (ctx->closed) return ERR_OK;
 
     while (len > 0 && !ctx->tx_queue.empty()) {
         auto& head = ctx->tx_queue.front();
@@ -176,7 +215,7 @@ err_t tcp_client_sent(void* arg, struct tcp_pcb* tpcb, u16_t len) {
     return ERR_OK;
 }
 
-void handle_proxy_read(TcpCtx* ctx) {
+void handle_proxy_read(TcpCtxPtr ctx) {
     if (ctx->closed) return;
     
     thread_local std::vector<uint8_t> read_buf(262144);
@@ -190,6 +229,7 @@ void handle_proxy_read(TcpCtx* ctx) {
             ctx->target.original_dst_ip & 0xFF, (ctx->target.original_dst_ip >> 8) & 0xFF, (ctx->target.original_dst_ip >> 16) & 0xFF, (ctx->target.original_dst_ip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
         std::vector<uint8_t> data(read_buf.begin(), read_buf.begin() + r);
         
+        // Queue to Main Dispatcher. Capture ctx shared_ptr.
         MainDispatcher::instance().queue_task([ctx, d = std::move(data)]() mutable {
             std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
             if (ctx->client_pcb) {
@@ -207,8 +247,8 @@ void handle_proxy_read(TcpCtx* ctx) {
 }
 
 // --- Upstream (Phone -> Proxy) ---
-// Reverted to Sync Send with Safe Retry
-void try_send_upstream(TcpCtx* ctx) {
+// Sync Send with Retry + shared_ptr safety
+void try_send_upstream(TcpCtxPtr ctx) {
     if (ctx->closed || ctx->proxy_socket == INVALID_SOCKET) return;
 
     while (!ctx->upstream_queue.empty()) {
@@ -223,7 +263,6 @@ void try_send_upstream(TcpCtx* ctx) {
         const char* ptr = (const char*)data.data() + ctx->upstream_offset;
         int remaining = (int)(data.size() - ctx->upstream_offset);
 
-        // Standard blocking/non-blocking send
         int sent = send(ctx->proxy_socket, ptr, remaining, 0);
         
         if (sent > 0) {
@@ -236,11 +275,11 @@ void try_send_upstream(TcpCtx* ctx) {
         } else {
              int err = WSAGetLastError();
              if (err == WSAEWOULDBLOCK) {
-                 // Flow control: Socket buffer full. 
-                 // SAFE RETRY: Yield CPU briefly to prevent starvation/crash, then retry.
-                 // This ensures we don't hog the thread but also don't drop data.
+                 // Flow control. Retry later.
+                 // Capture 'ctx' shared_ptr. This ensures ctx stays alive even if close_tcp_ctx is called elsewhere.
+                 // If closed, next call will return immediately.
                  ctx->worker->queue_task([ctx]() { 
-                     Sleep(1); // Critical: Prevent CPU spin loop
+                     Sleep(1); 
                      try_send_upstream(ctx); 
                  });
                  return; 
@@ -253,7 +292,7 @@ void try_send_upstream(TcpCtx* ctx) {
     }
 }
 
-void handle_handshake_read(TcpCtx* ctx) {
+void handle_handshake_read(TcpCtxPtr ctx) {
     if (ctx->closed) return;
     char buf[4096];
     int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
@@ -283,7 +322,6 @@ void handle_handshake_read(TcpCtx* ctx) {
                     }
                 }
                 
-                // Flush pending data
                 try_send_upstream(ctx);
 
                 size_t payload_start = header_end + 4;
@@ -320,7 +358,7 @@ void handle_handshake_read(TcpCtx* ctx) {
     }
 }
 
-void handle_proxy_connect(TcpCtx* ctx) {
+void handle_proxy_connect(TcpCtxPtr ctx) {
     if (ctx->closed) return;
 
     int err = 0; int len = sizeof(err);
@@ -340,14 +378,12 @@ void handle_proxy_connect(TcpCtx* ctx) {
             ctx->connected = true;
             ctx->state = TcpCtx::ESTABLISHED;
 
-            // Move buffered data to upstream queue
             if (!ctx->upstream_data.empty()) {
                 ctx->upstream_queue.push_back(std::move(ctx->upstream_data));
                 ctx->upstream_data.clear();
             }
         }
 
-        // Flush pending data
         try_send_upstream(ctx);
 
         ctx->worker->add_socket(
@@ -359,7 +395,6 @@ void handle_proxy_connect(TcpCtx* ctx) {
         return;
     }
 
-    // --- Proxy Connect Handshake ---
     uint32_t ip = ctx->target.original_dst_ip;
     std::string sni = ctx->detected_domain;
     std::string ip_str = std::to_string(ip & 0xFF) + "." +
@@ -410,7 +445,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
     );
 }
 
-void connect_to_proxy_async(TcpCtx* ctx) {
+void connect_to_proxy_async(TcpCtxPtr ctx) {
     if (!ctx->worker) {
         ctx->worker = WorkerPool::instance().get_worker(ctx->target.original_dst_port);
         if (!ctx->worker) ctx->worker = WorkerPool::instance().get_next_worker();
@@ -421,11 +456,9 @@ void connect_to_proxy_async(TcpCtx* ctx) {
         ctx->proxy_socket = socket(AF_INET, SOCK_STREAM, 0);
         if (ctx->proxy_socket == INVALID_SOCKET) { close_tcp_ctx(ctx); return; }
         
-        // 1. Enable TCP Keep-Alive
         BOOL keepAlive = TRUE;
         setsockopt(ctx->proxy_socket, SOL_SOCKET, SO_KEEPALIVE, (char*)&keepAlive, sizeof(keepAlive));
         
-        // 2. Increase Send/Recv Buffer to 4MB (Absorb bursts like Image Uploads)
         int bufSize = 4 * 1024 * 1024; 
         setsockopt(ctx->proxy_socket, SOL_SOCKET, SO_SNDBUF, (char*)&bufSize, sizeof(bufSize));
         setsockopt(ctx->proxy_socket, SOL_SOCKET, SO_RCVBUF, (char*)&bufSize, sizeof(bufSize));
@@ -443,7 +476,7 @@ void connect_to_proxy_async(TcpCtx* ctx) {
         } else {
             if (sscanf_s(g_config.proxy_ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
                 addr.sin_addr.S_un.S_addr = (a) | (b << 8) | (c << 16) | (d << 24);
-            } else { addr.sin_addr.S_un.S_addr = 0x0100007F; } // Default to 127.0.0.1
+            } else { addr.sin_addr.S_un.S_addr = 0x0100007F; } 
             addr.sin_port = htons(g_config.proxy_port);
         }
 
@@ -455,17 +488,19 @@ void connect_to_proxy_async(TcpCtx* ctx) {
 }
 
 err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err) {
-    TcpCtx* ctx = (TcpCtx*)arg;
+    TcpCtxPtr* ptr = (TcpCtxPtr*)arg;
+    if (!ptr) {
+        if (p) pbuf_free(p);
+        return ERR_OK; 
+    }
+    auto ctx = *ptr;
+
     if (!ctx || ctx->closed) {
         if (p) pbuf_free(p);
         return ERR_OK;
     }
     if (!p) { close_tcp_ctx(ctx); return ERR_OK; }
     tcp_recved(tpcb, p->tot_len);
-
-    if (p->tot_len > 0) {
-        // Log removed for performance on data path
-    }
 
     if (ctx->connected && ctx->worker) {
         std::vector<uint8_t> data;
@@ -596,11 +631,18 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     NatEntry target = NatTable::instance().get(client_port);
     if (target.original_dst_ip == 0) return ERR_ABRT;
     tcp_nagle_disable(newpcb);
-    TcpCtx* ctx = new TcpCtx();
+    
+    // Create shared_ptr
+    auto ctx = std::make_shared<TcpCtx>();
+    
     ctx->client_pcb = newpcb;
     ctx->target = target;
     ctx->client_ip = newpcb->remote_ip.addr;
     ctx->client_port = newpcb->remote_port;
+
+    // Allocate holder on heap for LwIP
+    TcpCtxPtr* ptr = new TcpCtxPtr(ctx);
+    ctx->lwip_arg = ptr;
 
     // IP Check (RuleManager Priority)
     uint32_t dst_ip_h = ntohl(target.original_dst_ip);
@@ -610,7 +652,8 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
         LOG_INFO("[TCP] IP Rule: Block %d.%d.%d.%d\n", 
             target.original_dst_ip & 0xFF, (target.original_dst_ip >> 8) & 0xFF, 
             (target.original_dst_ip >> 16) & 0xFF, (target.original_dst_ip >> 24) & 0xFF);
-        delete ctx;
+        // Clean up immediately
+        delete ptr; 
         return ERR_ABRT;
     } else if (ip_action == RouteAction::DIRECT) {
         ctx->is_direct = true;
@@ -630,13 +673,19 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
         }
     }
 
-    tcp_arg(newpcb, ctx);
+    tcp_arg(newpcb, ptr);
     tcp_recv(newpcb, tcp_client_recv);
     tcp_sent(newpcb, tcp_client_sent);
+    
+    // Error callback also needs to handle the shared_ptr cleanup logic if not closed normally
     tcp_err(newpcb, [](void* arg, err_t err) { 
-        TcpCtx* c = (TcpCtx*)arg;
-        c->client_pcb = NULL; 
-        close_tcp_ctx(c); 
+        TcpCtxPtr* ptr = (TcpCtxPtr*)arg;
+        if (ptr) {
+            auto ctx = *ptr;
+            ctx->client_pcb = NULL; 
+            close_tcp_ctx(ctx); 
+            // Note: ptr is deleted in final_cleanup_on_main, triggered by close_tcp_ctx
+        }
     });
     return ERR_OK;
 }
