@@ -293,8 +293,21 @@ void try_send_upstream(TcpCtxPtr ctx) {
                  });
                  return; 
              } else {
-                 LOG_INFO("[TCP] Upstream send failed: %d\n", err);
-                 close_tcp_ctx(ctx);
+                 // Graceful handling of Upstream Write Errors (e.g. RST from server)
+                 // Even if we can't send to server, we might still have data in tx_queue 
+                 // (e.g. HTTP 200 OK) that MUST reach the client.
+                 LOG_INFO("[TCP] Upstream send failed: %d. Closing upstream half.\n", err);
+                 
+                 // 1. Stop using this socket
+                 ctx->worker->remove_socket(ctx->proxy_socket, nullptr);
+                 ctx->proxy_socket = INVALID_SOCKET;
+                 
+                 // 2. Mark upstream as done
+                 ctx->upstream_eof = true;
+                 
+                 // 3. Try to flush whatever is left for the client
+                 // If tx_queue is empty, it will close the context inside.
+                 try_send_downstream(ctx);
                  return;
              }
         }
