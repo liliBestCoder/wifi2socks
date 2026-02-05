@@ -309,6 +309,8 @@ void send_dns_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     *(uint16_t*)(udp_hdr + 6) = 0;
     memcpy(udp_hdr + 8, resp.data(), resp.size());
 
+    *(uint16_t*)(udp_hdr + 6) = calculate_udp_checksum(dst_ip, src_ip, udp_hdr, 8 + (int)resp.size());
+
     TunDriver::instance().send_async(packet, 20 + 8 + (int)resp.size());
 }
 
@@ -354,6 +356,8 @@ void send_dns_empty_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port
     *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + resp.size()));
     *(uint16_t*)(udp_hdr + 6) = 0;
     memcpy(udp_hdr + 8, resp.data(), resp.size());
+
+    *(uint16_t*)(udp_hdr + 6) = calculate_udp_checksum(dst_ip, src_ip, udp_hdr, 8 + (int)resp.size());
 
     TunDriver::instance().send_async(packet, 20 + 8 + (int)resp.size());
 }
