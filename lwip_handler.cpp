@@ -100,6 +100,37 @@ err_t tun_netif_output(struct netif* netif, struct pbuf* p, const ip4_addr_t* ip
     return netif->linkoutput(netif, p);
 }
 
+// --- Reassembled UDP Handling ---
+static u8_t lwip_udp_raw_recv(void* arg, struct raw_pcb* pcb, struct pbuf* p, const ip_addr_t* addr) {
+    if (p != NULL) {
+        struct ip_hdr* ip = (struct ip_hdr*)p->payload;
+        if (IPH_PROTO(ip) == IP_PROTO_UDP) {
+            uint8_t* buf = (uint8_t*)p->payload;
+            int len = p->tot_len;
+            uint8_t* udp_ptr = buf + IPH_HL(ip) * 4;
+            
+            if (len >= IPH_HL(ip) * 4 + 8) {
+                uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
+                uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
+                
+                // Check if it's local traffic that should be bypassed
+                uint16_t sp_h = ::ntohs(src_port);
+                uint16_t dp_h = ::ntohs(dst_port);
+                bool is_local = (sp_h == 67 || dp_h == 67 || sp_h == 68 || dp_h == 68 || ip->dest.addr == ::inet_addr("192.168.137.1"));
+
+                if (!is_local) {
+                    uint8_t* payload = udp_ptr + 8;
+                    int pay_len = len - (IPH_HL(ip) * 4 + 8);
+                    handle_udp_packet(ip->src.addr, ip->dest.addr, src_port, dst_port, payload, pay_len);
+                }
+            }
+        }
+        pbuf_free(p);
+        return 1; // Consumed
+    }
+    return 0;
+}
+
 err_t netif_init_cb(struct netif* netif) {
     netif->linkoutput = tap_linkoutput;
     netif->output = tun_netif_output; // Correctly use the wrapper for TUN mode
@@ -107,6 +138,14 @@ err_t netif_init_cb(struct netif* netif) {
     // Remove NETIF_FLAG_ETHARP
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_LINK_UP | NETIF_FLAG_UP;
     netif->hwaddr_len = 0; // No MAC address in TUN mode
+
+    // Register a raw PCB to catch reassembled UDP fragments
+    struct raw_pcb* pcb = raw_new(IP_PROTO_UDP);
+    if (pcb) {
+        raw_bind(pcb, IP_ADDR_ANY);
+        raw_recv(pcb, lwip_udp_raw_recv, NULL);
+    }
+
     return ERR_OK;
 }
 
@@ -118,24 +157,30 @@ void process_tap_frame(uint8_t* buf, int len) {
         if (ntohs(IPH_LEN(ip)) > len) return; // Safety: Drop truncated packets
 
         if (IPH_PROTO(ip) == IP_PROTO_UDP) {
-            uint8_t* udp_ptr = buf + IPH_HL(ip) * 4;
-            uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
-            uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
+            // Check for fragmentation: offset != 0 or MF (More Fragments) bit set
+            uint16_t frag_off = ::ntohs(IPH_OFFSET(ip));
+            bool is_fragment = (frag_off & (IP_OFFMASK | IP_MF)) != 0;
 
-            // Bypass proxy for DHCP (67/68) or local gateway (192.168.137.1) traffic
-            uint16_t sp_h = ::ntohs(src_port);
-            uint16_t dp_h = ::ntohs(dst_port);
-            bool is_local = (sp_h == 67 || dp_h == 67 || sp_h == 68 || dp_h == 68 || ip->dest.addr == ::inet_addr("192.168.137.1"));
+            if (!is_fragment) {
+                uint8_t* udp_ptr = buf + IPH_HL(ip) * 4;
+                uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
+                uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
 
-            if (!is_local) {
-                uint8_t* payload = udp_ptr + 8;
-                int pay_len = len - (IPH_HL(ip) * 4 + 8);
-                if (pay_len >= 0) {
-                    handle_udp_packet(ip->src.addr, ip->dest.addr, src_port, dst_port, payload, pay_len);
+                // Bypass proxy for DHCP (67/68) or local gateway (192.168.137.1) traffic
+                uint16_t sp_h = ::ntohs(src_port);
+                uint16_t dp_h = ::ntohs(dst_port);
+                bool is_local = (sp_h == 67 || dp_h == 67 || sp_h == 68 || dp_h == 68 || ip->dest.addr == ::inet_addr("192.168.137.1"));
+
+                if (!is_local) {
+                    uint8_t* payload = udp_ptr + 8;
+                    int pay_len = len - (IPH_HL(ip) * 4 + 8);
+                    if (pay_len >= 0) {
+                        handle_udp_packet(ip->src.addr, ip->dest.addr, src_port, dst_port, payload, pay_len);
+                    }
+                    return; // Proxy handled, stop here
                 }
-                return; // Proxy handled, stop here
             }
-            // If local, do NOT return, let it fall through to g_netif.input
+            // If it's a fragment or local traffic, let it fall through to g_netif.input
         }
 
         if (IPH_PROTO(ip) == IP_PROTO_TCP) {

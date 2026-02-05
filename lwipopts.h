@@ -30,6 +30,7 @@
 #define LWIP_ARP                        1
 #define LWIP_ETHERNET                   1
 #define LWIP_IPV4                       1
+#define LWIP_RAW                        1
 #define IP_FORWARD                      0
 #define ETHARP_SUPPORT_STATIC_ENTRIES   1
 
