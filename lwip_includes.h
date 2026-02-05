@@ -34,6 +34,7 @@ extern "C" {
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
 #include "lwip/ip.h"
+#include "lwip/raw.h"
 #include "lwip/timeouts.h"
 #include "netif/etharp.h"
 #include "lwip/inet_chksum.h"
