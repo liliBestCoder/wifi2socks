@@ -112,8 +112,8 @@ bool TunDriver::init(const char* device_guid) {
 
     printf("Wintun adapter is ready.\n");
 
-    // Start Session (Ring size default 4MB? 0x400000) 
-    m_session = pWintunStartSession(m_adapter, 0x400000); 
+    // Start Session (Ring size 16MB) 
+    m_session = pWintunStartSession(m_adapter, 0x1000000); 
     if (!m_session) {
         printf("WintunStartSession failed. LastError: %d\n", GetLastError());
         return false;

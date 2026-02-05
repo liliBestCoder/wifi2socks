@@ -83,9 +83,9 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
                          IPH_CHKSUM_SET(ip, 0);
                          IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
                          
-                         uint16_t ip_len = ::ntohs(IPH_LEN(ip));
-                         int tcp_len = ip_len - IPH_HL(ip) * 4;
-                         recalculate_tcp_checksum(ip, tcp_base, tcp_len);
+                         // uint16_t ip_len = ::ntohs(IPH_LEN(ip));
+                         // int tcp_len = ip_len - IPH_HL(ip) * 4;
+                         // recalculate_tcp_checksum(ip, tcp_base, tcp_len);
                      }
                  }
              }
@@ -150,11 +150,11 @@ void process_tap_frame(uint8_t* buf, int len) {
             IPH_CHKSUM_SET(ip, 0);
             IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
             
-            uint16_t ip_len = ::ntohs(IPH_LEN(ip));
-            int tcp_len = ip_len - IPH_HL(ip) * 4;
-            if (tcp_len > 0) {
-                recalculate_tcp_checksum(ip, tcp_base, tcp_len);
-            }
+            // uint16_t ip_len = ::ntohs(IPH_LEN(ip));
+            // int tcp_len = ip_len - IPH_HL(ip) * 4;
+            // if (tcp_len > 0) {
+            //    recalculate_tcp_checksum(ip, tcp_base, tcp_len);
+            // }
         }
 
         if (IPH_PROTO(ip) == IP_PROTO_ICMP) {

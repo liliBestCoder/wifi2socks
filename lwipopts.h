@@ -15,7 +15,7 @@
 #define MEM_LIBC_MALLOC                 1
 #define MEMP_MEM_MALLOC                 1
 #define MEM_ALIGNMENT                   4
-#define PBUF_POOL_SIZE                  1024 // Double the pool for high concurrency
+#define PBUF_POOL_SIZE                  4096 // Double the pool for high concurrency
 #define PBUF_POOL_BUFSIZE               2048 // Large enough for MTU + Headers
 
 // --- 4. TCP/IP ---
@@ -37,9 +37,9 @@
 #define CHECKSUM_CHECK_IP               0
 #define CHECKSUM_CHECK_UDP              0
 #define CHECKSUM_CHECK_TCP              0
-#define CHECKSUM_GEN_IP                 1
-#define CHECKSUM_GEN_UDP                1
-#define CHECKSUM_GEN_TCP                1
+#define CHECKSUM_GEN_IP                 0
+#define CHECKSUM_GEN_UDP                0
+#define CHECKSUM_GEN_TCP                0
 
 // --- 6. PLATFORM ---
 // Let LwIP define its own types for its core files
