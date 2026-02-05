@@ -115,6 +115,8 @@ void process_tap_frame(uint8_t* buf, int len) {
 
     struct ip_hdr* ip = (struct ip_hdr*)buf;
     if (IPH_V(ip) == 4) {
+        if (ntohs(IPH_LEN(ip)) > len) return; // Safety: Drop truncated packets
+
         if (IPH_PROTO(ip) == IP_PROTO_UDP) {
             uint8_t* udp_ptr = buf + IPH_HL(ip) * 4;
             uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
@@ -150,11 +152,9 @@ void process_tap_frame(uint8_t* buf, int len) {
             IPH_CHKSUM_SET(ip, 0);
             IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
             
-            uint16_t ip_len = ::ntohs(IPH_LEN(ip));
-            int tcp_len = ip_len - IPH_HL(ip) * 4;
-            if (tcp_len > 0) {
-               recalculate_tcp_checksum(ip, tcp_base, tcp_len);
-            }
+            // Ingress Checksum Recalculation removed for performance and safety.
+            // LwIP is configured to ignore TCP checksums (CHECKSUM_CHECK_TCP 0),
+            // so we don't need to update it after NAT.
         }
 
         if (IPH_PROTO(ip) == IP_PROTO_ICMP) {
