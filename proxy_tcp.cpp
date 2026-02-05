@@ -288,7 +288,7 @@ void try_send_upstream(TcpCtxPtr ctx) {
              int err = WSAGetLastError();
              if (err == WSAEWOULDBLOCK) {
                  ctx->worker->queue_task([ctx]() { 
-                     Sleep(1); 
+                     SwitchToThread(); 
                      try_send_upstream(ctx); 
                  });
                  return; 
