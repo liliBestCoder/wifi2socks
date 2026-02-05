@@ -36,7 +36,7 @@ uint32_t calculate_raw_sum(const void* data, int len) {
     uint32_t sum = 0;
     const uint16_t* ptr = (const uint16_t*)data;
     while (len > 1) { sum += *ptr++; len -= 2; }
-    if (len > 0) { sum += (uint16_t)(*(const uint8_t*)ptr << 8); }
+    if (len > 0) { sum += (uint16_t)(*(const uint8_t*)ptr); }
     return sum;
 }
 

@@ -20,7 +20,7 @@
 
 // --- 4. TCP/IP ---
 #define LWIP_TCP                        1
-#define TCP_MSS                         1460  // Adjusted for Ethernet MTU
+#define TCP_MSS                         1400  // Reduced to 1400 to prevent IP fragmentation (Header+Options overhead)
 #define TCP_WND                         (1024 * 1024)  // Increase window to 1MB
 #define TCP_SND_BUF                     (4096 * 1024) 
 #define TCP_SNDLOWAT                    (32 * 1024)   // Fixed: Must be < 65535 - 4*MSS
