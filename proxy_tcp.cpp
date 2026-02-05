@@ -44,9 +44,10 @@ struct TcpCtx {
     size_t tx_written_idx;    
     size_t tx_written_offset; 
     
-    // Upstream Queue (Phone -> Proxy) - NEW
+    // Upstream Queue (Phone -> Proxy)
     std::deque<std::vector<uint8_t>> upstream_queue;
     size_t upstream_offset;
+    bool write_in_flight; // NEW: Track async write
 
     std::mutex data_mtx;
     Worker* worker;
@@ -55,7 +56,7 @@ struct TcpCtx {
 
     TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
                tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0), 
-               upstream_offset(0),
+               upstream_offset(0), write_in_flight(false),
                client_ip(0), client_port(0), is_direct(false) {
         sni_buffer.reserve(g_config.max_sni_len);
         upstream_data.reserve(8192); 
@@ -66,7 +67,8 @@ struct TcpCtx {
 void close_tcp_ctx(TcpCtx* ctx);
 void handle_proxy_read(TcpCtx* ctx);
 void connect_to_proxy_async(TcpCtx* ctx);
-void try_send_upstream(TcpCtx* ctx); // Forward declaration
+void try_send_upstream(TcpCtx* ctx); 
+void handle_write_complete(TcpCtx* ctx, int bytes);
 
 void final_cleanup_on_main(TcpCtx* ctx) {
     std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
@@ -207,44 +209,60 @@ void handle_proxy_read(TcpCtx* ctx) {
 }
 
 // --- Upstream (Phone -> Proxy) ---
+// NEW: Completely Async using WSASend
 void try_send_upstream(TcpCtx* ctx) {
     if (ctx->closed || ctx->proxy_socket == INVALID_SOCKET) return;
+    if (ctx->write_in_flight) return; // Wait for previous write to complete
+    if (ctx->upstream_queue.empty()) return;
 
-    while (!ctx->upstream_queue.empty()) {
+    auto& data = ctx->upstream_queue.front();
+    
+    // Safety check for offset
+    if (ctx->upstream_offset >= data.size()) {
+        ctx->upstream_queue.pop_front();
+        ctx->upstream_offset = 0;
+        // Recurse to try next chunk
+        try_send_upstream(ctx); 
+        return;
+    }
+
+    char* ptr = (char*)data.data() + ctx->upstream_offset;
+    int remaining = (int)(data.size() - ctx->upstream_offset);
+
+    // This calls Worker::send_async -> PostQueuedStatus -> Worker Loop -> WSASend
+    // It returns immediately.
+    ctx->write_in_flight = true;
+    bool posted = ctx->worker->send_async(ctx->proxy_socket, ptr, remaining);
+    if (!posted) {
+        ctx->write_in_flight = false;
+        close_tcp_ctx(ctx);
+    }
+}
+
+void handle_write_complete(TcpCtx* ctx, int bytes) {
+    if (ctx->closed) return;
+    
+    if (bytes < 0) {
+        LOG_INFO("[TCP] Async Write Failed. Closing.\n");
+        close_tcp_ctx(ctx);
+        return;
+    }
+
+    TrafficManager::instance().report_proxy_tx(bytes, ctx->is_direct);
+    ctx->write_in_flight = false;
+
+    // Update Offset
+    ctx->upstream_offset += bytes;
+    if (!ctx->upstream_queue.empty()) {
         auto& data = ctx->upstream_queue.front();
-        
         if (ctx->upstream_offset >= data.size()) {
             ctx->upstream_queue.pop_front();
             ctx->upstream_offset = 0;
-            continue;
-        }
-
-        const char* ptr = (const char*)data.data() + ctx->upstream_offset;
-        int remaining = (int)(data.size() - ctx->upstream_offset);
-
-        int sent = send(ctx->proxy_socket, ptr, remaining, 0);
-        if (sent > 0) {
-             TrafficManager::instance().report_proxy_tx(sent, ctx->is_direct);
-             ctx->upstream_offset += sent;
-             if (ctx->upstream_offset >= data.size()) {
-                 ctx->upstream_queue.pop_front();
-                 ctx->upstream_offset = 0;
-             }
-        } else {
-             int err = WSAGetLastError();
-             if (err == WSAEWOULDBLOCK) {
-                 // Flow control: Socket buffer full. Retry later.
-                 // We re-queue the task to the back of the worker loop. 
-                 // This effectively creates a "busy-wait with yield" behavior.
-                 ctx->worker->queue_task([ctx]() { try_send_upstream(ctx); });
-                 return; 
-             } else {
-                 LOG_INFO("[TCP] Upstream send failed: %d\n", err);
-                 close_tcp_ctx(ctx);
-                 return;
-             }
         }
     }
+
+    // Continue sending if queue not empty
+    try_send_upstream(ctx);
 }
 
 void handle_handshake_read(TcpCtx* ctx) {
@@ -253,7 +271,7 @@ void handle_handshake_read(TcpCtx* ctx) {
     int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
     
     if (r > 0) {
-        TrafficManager::instance().report_proxy_rx(r, false); // Handshake is always proxy
+        TrafficManager::instance().report_proxy_rx(r, false); 
         std::string s(buf, r);
         size_t header_end = s.find("\r\n\r\n");
         
@@ -271,14 +289,21 @@ void handle_handshake_read(TcpCtx* ctx) {
                     ctx->connected = true;
                     ctx->state = TcpCtx::ESTABLISHED;
                     
-                    // Move buffered data to upstream queue
                     if (!ctx->upstream_data.empty()) {
                         ctx->upstream_queue.push_back(std::move(ctx->upstream_data));
                         ctx->upstream_data.clear();
                     }
                 }
                 
-                // Flush pending data
+                // Register Callbacks with Write Handler
+                ctx->worker->add_socket(
+                    ctx->proxy_socket,
+                    [ctx](char*, int, sockaddr_in*) { handle_proxy_read(ctx); },
+                    [ctx](int bytes) { handle_write_complete(ctx, bytes); },
+                    [ctx]() { close_tcp_ctx(ctx); }
+                );
+
+                // Kickstart Send
                 try_send_upstream(ctx);
 
                 size_t payload_start = header_end + 4;
@@ -292,13 +317,6 @@ void handle_handshake_read(TcpCtx* ctx) {
                         }
                     });
                 }
-                
-                ctx->worker->add_socket(
-                    ctx->proxy_socket,
-                    [ctx](char*, int, sockaddr_in*) { handle_proxy_read(ctx); },
-                    nullptr,
-                    [ctx]() { close_tcp_ctx(ctx); }
-                );
             } else {
                 LOG_INFO("[TCP] Handshake Rejected: %s\n", header.c_str());
                 close_tcp_ctx(ctx);
@@ -335,22 +353,22 @@ void handle_proxy_connect(TcpCtx* ctx) {
             ctx->connected = true;
             ctx->state = TcpCtx::ESTABLISHED;
 
-            // Move buffered data to upstream queue
             if (!ctx->upstream_data.empty()) {
                 ctx->upstream_queue.push_back(std::move(ctx->upstream_data));
                 ctx->upstream_data.clear();
             }
         }
 
-        // Flush pending data
-        try_send_upstream(ctx);
-
+        // Register Callbacks with Write Handler
         ctx->worker->add_socket(
             ctx->proxy_socket,
             [ctx](char*, int, sockaddr_in*) { handle_proxy_read(ctx); },
-            nullptr,
+            [ctx](int bytes) { handle_write_complete(ctx, bytes); },
             [ctx]() { close_tcp_ctx(ctx); }
         );
+
+        // Kickstart Send
+        try_send_upstream(ctx);
         return;
     }
 
@@ -375,8 +393,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
 
     int cmd_len = (int)strlen(cmd);
     
-    // NOTE: We don't use try_send_upstream here yet because it's a raw command, 
-    // and we assume command is small enough to fit in socket buffer (which we increased).
+    // Command is small, send directly. If it fails with EWOULDBLOCK here, it's fine to fail connection.
     int sent = send(ctx->proxy_socket, cmd, cmd_len, 0);
     if (sent == SOCKET_ERROR) {
          int err = WSAGetLastError();
@@ -385,9 +402,9 @@ void handle_proxy_connect(TcpCtx* ctx) {
              close_tcp_ctx(ctx); 
              return;
          }
-         // If WSAEWOULDBLOCK, we are extremely unlucky (buffer full before handshake). 
-         // Just fail fast here.
-         close_tcp_ctx(ctx);
+         // Technically we should handle EWOULDBLOCK here too, but handshake packet is small.
+         // If we are blocked here, the socket is seriously jammed immediately after connect.
+         close_tcp_ctx(ctx); 
          return;
     }
     
@@ -404,7 +421,7 @@ void handle_proxy_connect(TcpCtx* ctx) {
     ctx->worker->add_socket(
         ctx->proxy_socket,
         [ctx](char*, int, sockaddr_in*) { handle_handshake_read(ctx); }, 
-        nullptr, 
+        nullptr, // No write callback needed for Handshake read state yet (until established)
         [ctx]() { close_tcp_ctx(ctx); }
     );
 }
@@ -463,7 +480,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
     tcp_recved(tpcb, p->tot_len);
 
     if (p->tot_len > 0) {
-        // Log removed for performance on data path
+        // Log removed
     }
 
     if (ctx->connected && ctx->worker) {
@@ -479,6 +496,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
             try_send_upstream(ctx);
         });
     } else {
+        // ... (Handshake buffering logic remains the same) ...
         std::lock_guard<std::mutex> lock(ctx->data_mtx);
         for (struct pbuf* q = p; q != NULL; q = q->next) {
             uint8_t* d = (uint8_t*)q->payload;
@@ -494,6 +512,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         
         if (ctx->state == TcpCtx::PRE_CONNECT) {
             bool ready = false;
+            // ... (Sniffing logic remains the same) ...
             // 1. TLS Check
             if (ctx->sni_buffer.size() >= 5 && ctx->sni_buffer[0] == 0x16) {
                 uint16_t tls_len = ((uint16_t)ctx->sni_buffer[3] << 8) | ctx->sni_buffer[4];
@@ -535,6 +554,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
             }
             
             if (ready) {
+                // ... (Routing logic remains the same) ...
                 std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());
                 if (sni.empty()) {
                     sni = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());

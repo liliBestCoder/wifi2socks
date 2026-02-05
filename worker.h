@@ -17,7 +17,7 @@
 // IOCP Operation Types
 enum IO_TYPE {
     IO_READ,    // Zero-byte read completed
-    IO_WRITE,   // Write completed (reserved)
+    IO_WRITE,   // Async Write completed
     IO_CONNECT  // ConnectEx completed
 };
 
@@ -32,33 +32,39 @@ struct SocketContext {
     uint32_t magic;
     SOCKET sock;
     
-    // Updated callback signature: data, len, addr (for UDP)
+    // Callbacks
     std::function<void(char*, int, sockaddr_in*)> on_read;
-    
-    std::function<void()> on_write; // Used for Connect completion
+    std::function<void(int)> on_write; // Changed: takes bytes transferred (or -1/0 for error)
     std::function<void()> on_close; 
     
-    IO_CONTEXT read_io;    // Reuse for reads
-    IO_CONTEXT connect_io; // Reuse for connects
-    bool read_pending;     // Avoid double posting
-    bool paused;           // Flow control
+    IO_CONTEXT read_io;    
+    IO_CONTEXT write_io;   // NEW
+    IO_CONTEXT connect_io; 
+    
+    bool read_pending;     
+    bool write_pending;    // NEW
+    bool paused;           
     
     // UDP Support
     bool is_udp;
     char buffer[4096];
     WSABUF wsaBuf;
+    WSABUF wsaWriteBuf;    // NEW
     sockaddr_in remote_addr;
     int remote_addr_len;
     
-    std::atomic<int> ref_count;         // Reference Counting for lifetime management
+    std::atomic<int> ref_count;         
 
     SocketContext() {
         magic = MAGIC_VAL;
         memset(&read_io, 0, sizeof(read_io));
         read_io.type = IO_READ;
+        memset(&write_io, 0, sizeof(write_io)); // NEW
+        write_io.type = IO_WRITE;               // NEW
         memset(&connect_io, 0, sizeof(connect_io));
         connect_io.type = IO_CONNECT;
         read_pending = false;
+        write_pending = false;                  // NEW
         paused = false;
         sock = INVALID_SOCKET;
         ref_count = 0;
@@ -67,6 +73,7 @@ struct SocketContext {
         memset(buffer, 0, sizeof(buffer));
         wsaBuf.buf = buffer;
         wsaBuf.len = 4096;
+        wsaWriteBuf.buf = NULL; wsaWriteBuf.len = 0; // NEW
         memset(&remote_addr, 0, sizeof(remote_addr));
         remote_addr_len = sizeof(remote_addr);
     }
@@ -84,33 +91,35 @@ public:
     void start(int core_index);
     void stop();
     
-    // Thread-safe methods to add/remove sockets.
-    // Updated: on_read takes data args. is_udp flag added.
-    void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void()> on_write, std::function<void()> on_close, bool is_udp = false);
+    // Thread-safe methods
+    // on_write signature changed to take int status/bytes
+    void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int)> on_write, std::function<void()> on_close, bool is_udp = false);
     void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
     
-    // Flow Control
     void pause_read(SOCKET s);
     void resume_read(SOCKET s);
 
-    // New: Async Connect for IOCP
     void connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect);
+    
+    // NEW: Async Send using IOCP
+    // Returns true if operation posted (or queued), false if socket not found/closed.
+    // The callback on_write passed in add_socket will be called when done.
+    bool send_async(SOCKET s, char* buf, int len);
 
-    // Run arbitrary task in worker thread
     void queue_task(std::function<void()> task);
 
 private:
     void loop();
     void post_read(SocketContext* ctx);
+    void post_write(SocketContext* ctx, char* buf, int len); // NEW
     
-    // Reference counting helpers
     void retain_context(SocketContext* ctx);
     void release_context(SocketContext* ctx);
 
     HANDLE m_iocp;
     std::thread m_thread;
     std::mutex m_mtx;
-    std::map<SOCKET, SocketContext*> m_sockets; // Pointers to ensure address stability for IOCP
+    std::map<SOCKET, SocketContext*> m_sockets; 
     std::vector<std::function<void()>> m_task_queue; 
     std::atomic<bool> m_running;
     

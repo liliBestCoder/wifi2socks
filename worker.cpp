@@ -12,7 +12,6 @@ Worker::Worker() : m_running(false), m_iocp(NULL), m_lpfnConnectEx(NULL) {
         printf("Error creating IOCP: %d\n", GetLastError());
     }
 
-    // Load ConnectEx
     SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
     if (s != INVALID_SOCKET) {
         GUID guid = WSAID_CONNECTEX;
@@ -36,24 +35,19 @@ void Worker::start(int core_index) {
     m_thread = std::thread(&Worker::loop, this);
     SetThreadPriority(m_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
 
-    // Set CPU Affinity if a valid core_index is provided
     if (core_index >= 0) {
         DWORD_PTR mask = (static_cast<DWORD_PTR>(1) << (core_index % (sizeof(DWORD_PTR) * 8)));
-        if (SetThreadAffinityMask(m_thread.native_handle(), mask) == 0) {
-            printf("Warning: Failed to set affinity for worker on core %d (Error: %d)\n", core_index, GetLastError());
-        }
+        SetThreadAffinityMask(m_thread.native_handle(), mask);
     }
 }
 
 void Worker::stop() {
     if (!m_running) return;
     m_running = false;
-    // Wake up loop
     if (m_iocp) PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
     if (m_thread.joinable()) m_thread.join();
 }
 
-// --- Reference Counting ---
 void Worker::retain_context(SocketContext* ctx) {
     if (ctx) ctx->ref_count++;
 }
@@ -77,7 +71,6 @@ void Worker::post_read(SocketContext* ctx) {
     memset(&ctx->read_io.overlapped, 0, sizeof(OVERLAPPED));
     ctx->read_io.type = IO_READ;
 
-    // RETAIN for IO
     retain_context(ctx);
 
     int ret = SOCKET_ERROR;
@@ -86,7 +79,6 @@ void Worker::post_read(SocketContext* ctx) {
         ctx->wsaBuf.buf = ctx->buffer;
         ctx->wsaBuf.len = 4096;
         ctx->remote_addr_len = sizeof(ctx->remote_addr);
-        flags = 0;
         
         ret = WSARecvFrom(ctx->sock, &ctx->wsaBuf, 1, &bytes, &flags, (sockaddr*)&ctx->remote_addr, &ctx->remote_addr_len, &ctx->read_io.overlapped, NULL);
     } else {
@@ -98,23 +90,47 @@ void Worker::post_read(SocketContext* ctx) {
 
     if (ret == SOCKET_ERROR) {
         if (WSAGetLastError() != WSA_IO_PENDING) {
-            // Immediate failure
             release_context(ctx);
         } else {
             ctx->read_pending = true;
         }
     } else {
-        // Immediate success (still generates completion)
         ctx->read_pending = true;
     }
 }
 
-void Worker::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void()> on_write, std::function<void()> on_close, bool is_udp) {
+void Worker::post_write(SocketContext* ctx, char* buf, int len) {
+    if (!ctx || ctx->write_pending) return;
+
+    memset(&ctx->write_io.overlapped, 0, sizeof(OVERLAPPED));
+    ctx->write_io.type = IO_WRITE;
+    
+    ctx->wsaWriteBuf.buf = buf;
+    ctx->wsaWriteBuf.len = len;
+
+    retain_context(ctx);
+
+    DWORD bytes = 0;
+    int ret = WSASend(ctx->sock, &ctx->wsaWriteBuf, 1, &bytes, 0, &ctx->write_io.overlapped, NULL);
+
+    if (ret == SOCKET_ERROR) {
+        if (WSAGetLastError() != WSA_IO_PENDING) {
+            ctx->write_pending = false;
+            release_context(ctx);
+            if (ctx->on_write) ctx->on_write(-1);
+        } else {
+            ctx->write_pending = true;
+        }
+    } else {
+        ctx->write_pending = true;
+    }
+}
+
+void Worker::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int)> on_write, std::function<void()> on_close, bool is_udp) {
     std::lock_guard<std::mutex> lock(m_mtx);
     
     m_task_queue.push_back([this, s, on_read, on_write, on_close, is_udp]() {
         SocketContext* ctx = nullptr;
-        
         auto it = m_sockets.find(s);
         bool new_association = false;
         
@@ -123,7 +139,6 @@ void Worker::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> 
         } else {
             ctx = new SocketContext();
             ctx->sock = s;
-            // RETAIN for Map ownership
             retain_context(ctx);
             m_sockets[s] = ctx;
             new_association = true;
@@ -152,16 +167,10 @@ void Worker::remove_socket(SOCKET s, std::function<void()> on_done) {
         auto it = m_sockets.find(s);
         if (it != m_sockets.end()) {
             SocketContext* ctx = it->second;
-            
-            // CRITICAL FIX: Nullify callbacks immediately.
-            // Even if IO is pending and ctx stays alive due to ref_count,
-            // we must NOT call the callbacks because the owner (TcpCtx) is about to be deleted via on_done.
             ctx->on_read = nullptr;
             ctx->on_write = nullptr;
             ctx->on_close = nullptr;
-
             m_sockets.erase(it);
-            // RELEASE for Map ownership
             release_context(ctx); 
         }
         if (on_done) on_done();
@@ -172,11 +181,9 @@ void Worker::remove_socket(SOCKET s, std::function<void()> on_done) {
 void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect) {
     std::lock_guard<std::mutex> lock(m_mtx);
     m_task_queue.push_back([this, s, addr, on_connect]() {
-        // Set TCP_NODELAY for low latency
         int flag = 1;
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
 
-        // Bind required for ConnectEx
         struct sockaddr_in bindAddr;
         memset(&bindAddr, 0, sizeof(bindAddr));
         bindAddr.sin_family = AF_INET;
@@ -186,9 +193,12 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
 
         SocketContext* ctx = new SocketContext();
         ctx->sock = s;
-        ctx->on_write = on_connect;
+        if (on_connect) {
+            ctx->on_write = [on_connect](int bytes) {
+                if (bytes >= 0) on_connect();
+            };
+        }
         
-        // RETAIN for Map ownership
         retain_context(ctx);
         m_sockets[s] = ctx;
 
@@ -197,21 +207,30 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
         memset(&ctx->connect_io.overlapped, 0, sizeof(OVERLAPPED));
         ctx->connect_io.type = IO_CONNECT;
         
-        // RETAIN for IO
         retain_context(ctx);
 
         if (m_lpfnConnectEx) {
             BOOL ret = m_lpfnConnectEx(s, (sockaddr*)&addr, sizeof(addr), NULL, 0, NULL, &ctx->connect_io.overlapped);
             if (!ret && WSAGetLastError() != ERROR_IO_PENDING) {
-                // Immediate failure
                 release_context(ctx);
             }
         } else {
-             // Should not happen if init correctly
              release_context(ctx);
         }
     });
     PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
+}
+
+bool Worker::send_async(SOCKET s, char* buf, int len) {
+    std::lock_guard<std::mutex> lock(m_mtx);
+    m_task_queue.push_back([this, s, buf, len]() {
+        auto it = m_sockets.find(s);
+        if (it != m_sockets.end()) {
+            post_write(it->second, buf, len);
+        }
+    });
+    PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
+    return true; 
 }
 
 void Worker::queue_task(std::function<void()> task) {
@@ -239,7 +258,6 @@ void Worker::resume_read(SOCKET s) {
             SocketContext* ctx = it->second;
             if (ctx->paused) {
                 ctx->paused = false;
-                // If no read is pending, we must kickstart it
                 if (!ctx->read_pending) {
                     post_read(ctx);
                 }
@@ -255,7 +273,6 @@ void Worker::loop() {
     LPOVERLAPPED overlapped;
 
     while (m_running) {
-        // 1. Process Tasks
         {
             std::vector<std::function<void()>> current_tasks;
             {
@@ -265,32 +282,20 @@ void Worker::loop() {
                 }
             }
             for (auto& task : current_tasks) {
-                try {
-                    task();
-                } catch (const std::exception& e) {
-                    printf("Worker task exception: %s\n", e.what());
-                } catch (...) {
-                    printf("Worker task unknown exception\n");
-                }
+                try { task(); } catch (...) {}
             }
         }
 
-        // 2. Wait for Completion
         BOOL ret = GetQueuedCompletionStatus(m_iocp, &bytesTransferred, &completionKey, &overlapped, 10);
 
         if (overlapped != NULL) {
             SocketContext* ctx = (SocketContext*)completionKey;
             IO_CONTEXT* ioCtx = (IO_CONTEXT*)overlapped;
 
-            // SAFETY CHECK: Verify Context Validity
-            if (!ctx || ctx->magic != SocketContext::MAGIC_VAL) {
-                printf("Worker: Bad/Deleted Context! Magic: 0x%x Addr: %p\n", ctx ? ctx->magic : 0, ctx);
-                continue; 
-            }
+            if (!ctx || ctx->magic != SocketContext::MAGIC_VAL) continue;
 
             try {
                 if (ret) {
-                    // Success
                     if (ioCtx->type == IO_READ) {
                         ctx->read_pending = false;
                         if (ctx->on_read) {
@@ -300,82 +305,30 @@ void Worker::loop() {
                                 ctx->on_read(nullptr, 0, nullptr);
                             }
                         }
-                        
-                        // Re-post only if socket still alive in map AND NOT PAUSED
-                        if (m_sockets.find(ctx->sock) != m_sockets.end()) {
-                            if (!ctx->paused) {
-                                post_read(ctx);
-                            }
+                        if (m_sockets.find(ctx->sock) != m_sockets.end() && !ctx->paused) {
+                            post_read(ctx);
                         }
                     } else if (ioCtx->type == IO_CONNECT) {
                         setsockopt(ctx->sock, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
-                        if (ctx->on_write) ctx->on_write();
+                        if (ctx->on_write) ctx->on_write(0); 
+                    } else if (ioCtx->type == IO_WRITE) {
+                        ctx->write_pending = false;
+                        if (ctx->on_write) ctx->on_write((int)bytesTransferred);
                     }
                 } else {
-                    // Failure (e.g. Cancelled, Connection Refused)
                     if (ioCtx->type == IO_READ) {
                         ctx->read_pending = false;
-                        // Trigger read callback to let recv() fail properly
-                        if (ctx->on_read) {
-                             if (ctx->is_udp) {
-                                // For UDP, bytesTransferred might be 0 on failure?
-                                // Pass nullptr or 0 len to indicate error?
-                                // Actually, standard IOCP failure doesn't return data.
-                                // We can pass len=-1 or rely on WSAGetLastError() which might be lost?
-                                // proxy_udp.cpp won't call recvfrom, so it needs to know it failed.
-                                // Let's pass 0 len.
-                                ctx->on_read(nullptr, 0, nullptr);
-                            } else {
-                                ctx->on_read(nullptr, 0, nullptr);
-                            }
-                        }
+                        if (ctx->on_read) ctx->on_read(nullptr, 0, nullptr);
                     } else if (ioCtx->type == IO_CONNECT) {
-                        if (ctx->on_write) ctx->on_write();
+                        if (ctx->on_write) ctx->on_write(-1); 
+                    } else if (ioCtx->type == IO_WRITE) {
+                        ctx->write_pending = false;
+                        if (ctx->on_write) ctx->on_write(-1); 
                     }
                 }
-            } catch (const std::exception& e) {
-                printf("Worker callback exception: %s\n", e.what());
-            } catch (...) {
-                printf("Worker callback unknown exception\n");
-            }
+            } catch (...) {}
             
-            // RELEASE for IO Completion
-            // This balances the retain_context called before WSARecv/ConnectEx
             release_context(ctx);
         }
-    }
-}
-
-// WorkerPool Implementation
-
-WorkerPool& WorkerPool::instance() {
-    static WorkerPool pool;
-    return pool;
-}
-
-void WorkerPool::init(int count) {
-    if (!m_workers.empty()) return;
-    for (int i = 0; i < count; ++i) {
-        Worker* w = new Worker();
-        w->start(i);
-        m_workers.push_back(w);
-    }
-    m_next_idx = 0;
-}
-
-Worker* WorkerPool::get_worker(uint32_t hash) {
-    if (m_workers.empty()) return nullptr;
-    return m_workers[hash % m_workers.size()];
-}
-
-Worker* WorkerPool::get_next_worker() {
-    if (m_workers.empty()) return nullptr;
-    return m_workers[m_next_idx++ % m_workers.size()];
-}
-
-void WorkerPool::for_each_worker(std::function<void(Worker*)> callback) {
-    if (m_workers.empty()) return;
-    for (auto* w : m_workers) {
-        callback(w);
     }
 }
