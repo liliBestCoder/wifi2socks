@@ -13,6 +13,7 @@ void process_tap_frame(uint8_t* buf, int len);
 
 // Helpers
 uint16_t ip_chksum_simple(void* dataptr, int len);
+void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len);
 
 extern struct netif g_netif;
 extern uint8_t HOST_MAC[6];

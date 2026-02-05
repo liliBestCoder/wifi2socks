@@ -32,6 +32,28 @@ uint16_t ip_chksum_simple(void* dataptr, int len) {
     return (uint16_t)~(acc);
 }
 
+uint32_t calculate_raw_sum(const void* data, int len) {
+    uint32_t sum = 0;
+    const uint16_t* ptr = (const uint16_t*)data;
+    while (len > 1) { sum += *ptr++; len -= 2; }
+    if (len > 0) { sum += (uint16_t)(*(const uint8_t*)ptr << 8); }
+    return sum;
+}
+
+void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len) {
+    *(uint16_t*)(tcp_base + 16) = 0;
+    uint32_t sum = 0;
+    uint16_t* ip_src = (uint16_t*)&ip->src.addr;
+    sum += ip_src[0]; sum += ip_src[1];
+    uint16_t* ip_dst = (uint16_t*)&ip->dest.addr;
+    sum += ip_dst[0]; sum += ip_dst[1];
+    sum += ::htons(IP_PROTO_TCP);
+    sum += ::htons((uint16_t)tcp_len);
+    sum += calculate_raw_sum(tcp_base, tcp_len);
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    *(uint16_t*)(tcp_base + 16) = (uint16_t)~sum;
+}
+
 err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
     // Optimization: Use static buffer to avoid heap allocation per packet.
     // In TUN mode, p->payload points directly to the IP header.
@@ -60,6 +82,10 @@ err_t tap_linkoutput(struct netif* netif, struct pbuf* p) {
                          
                          IPH_CHKSUM_SET(ip, 0);
                          IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+                         
+                         uint16_t ip_len = ::ntohs(IPH_LEN(ip));
+                         int tcp_len = ip_len - IPH_HL(ip) * 4;
+                         recalculate_tcp_checksum(ip, tcp_base, tcp_len);
                      }
                  }
              }
@@ -123,6 +149,12 @@ void process_tap_frame(uint8_t* buf, int len) {
 
             IPH_CHKSUM_SET(ip, 0);
             IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+            
+            uint16_t ip_len = ::ntohs(IPH_LEN(ip));
+            int tcp_len = ip_len - IPH_HL(ip) * 4;
+            if (tcp_len > 0) {
+               recalculate_tcp_checksum(ip, tcp_base, tcp_len);
+            }
         }
 
         if (IPH_PROTO(ip) == IP_PROTO_ICMP) {
