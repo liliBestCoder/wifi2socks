@@ -156,6 +156,40 @@ void close_udp_session_internal(UdpSession* sess) {
     }
 }
 
+// Helper to calculate UDP Checksum (Pseudo-header + Payload)
+uint16_t calculate_udp_checksum(uint32_t src_ip, uint32_t dst_ip, uint8_t* udp_pkt, int udp_len) {
+    uint32_t sum = 0;
+    
+    // 1. Pseudo Header
+    // Src IP
+    sum += (src_ip & 0xFFFF);
+    sum += (src_ip >> 16);
+    // Dst IP
+    sum += (dst_ip & 0xFFFF);
+    sum += (dst_ip >> 16);
+    // Protocol (17 for UDP) + UDP Length
+    sum += htons(17);
+    sum += htons((uint16_t)udp_len);
+
+    // 2. UDP Header + Payload
+    const uint16_t* ptr = (const uint16_t*)udp_pkt;
+    int len = udp_len;
+    while (len > 1) {
+        sum += *ptr++;
+        len -= 2;
+    }
+    if (len > 0) {
+        // Handle odd byte - Little Endian machine treating byte stream
+        // Standard says pad with zero byte at end.
+        // Reading one byte as uint16 in LE gives 0x00XX.
+        sum += (uint16_t)(*(const uint8_t*)ptr);
+    }
+
+    // 3. Finalize
+    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+    return (uint16_t)~sum;
+}
+
 void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* addr) {
     if (sess->state == UdpSession::CLOSED) return; 
     
@@ -187,9 +221,17 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
         *(uint16_t*)(udp_hdr + 0) = sess->original_dst_port; 
         *(uint16_t*)(udp_hdr + 2) = sess->src_port;          
         *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + len));
-        *(uint16_t*)(udp_hdr + 6) = 0; 
+        *(uint16_t*)(udp_hdr + 6) = 0; // Checksum placeholder
         
         memcpy(udp_hdr + 8, data, len);
+
+        // Calculate and Fill UDP Checksum
+        *(uint16_t*)(udp_hdr + 6) = calculate_udp_checksum(
+            sess->original_dst_ip, 
+            sess->src_ip, 
+            udp_hdr, 
+            8 + len
+        );
 
         // Try Log DNS Response for Direct UDP
         if (sess->original_dst_port == htons(53)) {
