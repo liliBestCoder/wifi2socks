@@ -424,34 +424,30 @@ void connect_to_proxy_async(TcpCtx* ctx) {
         BOOL keepAlive = TRUE;
         setsockopt(ctx->proxy_socket, SOL_SOCKET, SO_KEEPALIVE, (char*)&keepAlive, sizeof(keepAlive));
         
-        // 2. Increase Send Buffer to 4MB (Absorb bursts like Image Uploads)
-        int sndBuf = 4 * 1024 * 1024; 
-        setsockopt(ctx->proxy_socket, SOL_SOCKET, SO_SNDBUF, (char*)&sndBuf, sizeof(sndBuf));
+        // 2. Increase Send/Recv Buffer to 4MB (Absorb bursts like Image Uploads)
+        int bufSize = 4 * 1024 * 1024; 
+        setsockopt(ctx->proxy_socket, SOL_SOCKET, SO_SNDBUF, (char*)&bufSize, sizeof(bufSize));
+        setsockopt(ctx->proxy_socket, SOL_SOCKET, SO_RCVBUF, (char*)&bufSize, sizeof(bufSize));
 
         u_long mode = 1; ioctlsocket(ctx->proxy_socket, FIONBIO, &mode);
 
-        struct WinSockAddr {
-            short sin_family;
-            unsigned short sin_port;
-            struct { unsigned long S_addr; } sin_addr;
-            char sin_zero[8];
-        } addr;
+        sockaddr_in addr;
         memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
         
         unsigned int a, b, c, d;
         if (ctx->is_direct) {
-            addr.sin_addr.S_addr = ctx->target.original_dst_ip;
+            addr.sin_addr.s_addr = ctx->target.original_dst_ip;
             addr.sin_port = ctx->target.original_dst_port;
         } else {
             if (sscanf_s(g_config.proxy_ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
-                addr.sin_addr.S_addr = (a) | (b << 8) | (c << 16) | (d << 24);
-            } else { addr.sin_addr.S_addr = 0x0100007F; } // Default to 127.0.0.1
+                addr.sin_addr.s_addr = (a) | (b << 8) | (c << 16) | (d << 24);
+            } else { addr.sin_addr.s_addr = 0x0100007F; } // Default to 127.0.0.1
             addr.sin_port = htons(g_config.proxy_port);
         }
 
         ctx->worker->connect_async(
-            ctx->proxy_socket, *(sockaddr_in*)&addr, 
+            ctx->proxy_socket, addr, 
             [ctx]() { handle_proxy_connect(ctx); }
         );
     });
