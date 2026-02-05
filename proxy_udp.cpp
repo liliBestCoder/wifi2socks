@@ -13,6 +13,10 @@
 #include <vector>
 #include <deque>
 #include <algorithm>
+#include <atomic>
+
+// Global IP ID counter for outbound UDP
+static std::atomic<uint16_t> g_udp_ip_id(1000);
 
 // --- UDP Session ---
 struct UdpKey {
@@ -214,6 +218,7 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
         ip_hdr[8] = 64; 
         ip_hdr[9] = 17; 
         *(uint16_t*)(ip_hdr + 2) = htons((uint16_t)(20 + 8 + len));
+        *(uint16_t*)(ip_hdr + 4) = htons(g_udp_ip_id.fetch_add(1));
         *(uint32_t*)(ip_hdr + 12) = sess->original_dst_ip; 
         *(uint32_t*)(ip_hdr + 16) = sess->src_ip;          
         *(uint16_t*)(ip_hdr + 10) = ip_chksum_simple(ip_hdr, 20);
@@ -299,6 +304,7 @@ void send_dns_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     memset(ip_hdr, 0, 20);
     ip_hdr[0] = 0x45; ip_hdr[9] = 17; ip_hdr[8] = 64;
     *(uint16_t*)(ip_hdr + 2) = htons((uint16_t)(20 + 8 + resp.size()));
+    *(uint16_t*)(ip_hdr + 4) = htons(g_udp_ip_id.fetch_add(1));
     *(uint32_t*)(ip_hdr + 12) = dst_ip; // Original Dst (DNS Server) acts as Src
     *(uint32_t*)(ip_hdr + 16) = src_ip; // Client IP
     *(uint16_t*)(ip_hdr + 10) = ip_chksum_simple(ip_hdr, 20);
@@ -347,6 +353,7 @@ void send_dns_empty_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port
     memset(ip_hdr, 0, 20);
     ip_hdr[0] = 0x45; ip_hdr[9] = 17; ip_hdr[8] = 64;
     *(uint16_t*)(ip_hdr + 2) = htons((uint16_t)(20 + 8 + resp.size()));
+    *(uint16_t*)(ip_hdr + 4) = htons(g_udp_ip_id.fetch_add(1));
     *(uint32_t*)(ip_hdr + 12) = dst_ip; 
     *(uint32_t*)(ip_hdr + 16) = src_ip; 
     *(uint16_t*)(ip_hdr + 10) = ip_chksum_simple(ip_hdr, 20);
