@@ -437,12 +437,12 @@ void connect_to_proxy_async(TcpCtx* ctx) {
         
         unsigned int a, b, c, d;
         if (ctx->is_direct) {
-            addr.sin_addr.s_addr = ctx->target.original_dst_ip;
+            addr.sin_addr.S_un.S_addr = ctx->target.original_dst_ip;
             addr.sin_port = ctx->target.original_dst_port;
         } else {
             if (sscanf_s(g_config.proxy_ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
-                addr.sin_addr.s_addr = (a) | (b << 8) | (c << 16) | (d << 24);
-            } else { addr.sin_addr.s_addr = 0x0100007F; } // Default to 127.0.0.1
+                addr.sin_addr.S_un.S_addr = (a) | (b << 8) | (c << 16) | (d << 24);
+            } else { addr.sin_addr.S_un.S_addr = 0x0100007F; } // Default to 127.0.0.1
             addr.sin_port = htons(g_config.proxy_port);
         }
 
