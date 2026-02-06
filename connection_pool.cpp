@@ -54,8 +54,7 @@ SOCKET ConnectionPool::acquire(const std::string& destination) {
             
             // Check if timed out
             if (std::chrono::steady_clock::now() - entry.second < IDLE_TIMEOUT) {
-                LOG_DEBUG("[ConnPool] Reusing connection for %s
-", destination.c_str());
+                LOG_DEBUG("[ConnPool] Reusing connection for %s", destination.c_str());
                 return entry.first;
             } else {
                 // Connection timed out
@@ -63,8 +62,7 @@ SOCKET ConnectionPool::acquire(const std::string& destination) {
             }
         }
     }
-    LOG_DEBUG("[ConnPool] No reusable connection for %s, creating new.
-", destination.c_str());
+    LOG_DEBUG("[ConnPool] No reusable connection for %s, creating new.", destination.c_str());
     return INVALID_SOCKET;
 }
 
@@ -73,8 +71,7 @@ void ConnectionPool::release(const std::string& destination, SOCKET socket) {
         return;
     }
     std::lock_guard<std::mutex> lock(m_mutex);
-    LOG_DEBUG("[ConnPool] Releasing connection for %s to pool.
-", destination.c_str());
+    LOG_DEBUG("[ConnPool] Releasing connection for %s to pool.", destination.c_str());
     m_pool[destination].push_back({socket, std::chrono::steady_clock::now()});
 }
 
@@ -95,7 +92,6 @@ void ConnectionPool::cleanup() {
         });
     }
     if (cleaned_count > 0) {
-        LOG_DEBUG("[ConnPool] Cleaned up %d stale connections.
-", cleaned_count);
+        LOG_DEBUG("[ConnPool] Cleaned up %d stale connections.", cleaned_count);
     }
 }

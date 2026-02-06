@@ -20,12 +20,14 @@
 
 // --- 4. TCP/IP ---
 #define LWIP_TCP                        1
-#define TCP_MSS                         1300  // Reduced to 1300 to prevent IP fragmentation (Header+Options overhead)
-#define TCP_WND                         (1024 * 1024)  // Increase window to 1MB
-#define TCP_SND_BUF                     (4096 * 1024) 
-#define TCP_SNDLOWAT                    (32 * 1024)   // Fixed: Must be < 65535 - 4*MSS
+#define TCP_INITIAL_CWND                10
+#define TCP_MSS                         1300
+#define TCP_WND                         (65535UL << 5)
+#define TCP_SND_BUF                     (4*1024*1024)
+#define TCP_SND_QUEUELEN                6552
+#define TCP_SNDLOWAT                    (32*1024)
 #define LWIP_WND_SCALE                  1
-#define TCP_RCV_SCALE                   5     // Increased to 5 to allow 1MB window (1MB >> 5 < 65535)
+#define TCP_RCV_SCALE                   5
 
 #define LWIP_ARP                        1
 #define LWIP_ETHERNET                   1
