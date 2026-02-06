@@ -8,6 +8,7 @@
 #include "main_dispatcher.h"
 #include "geo_checker.h"
 #include "rule_manager.h"
+#include "connection_pool.h"
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -112,7 +113,18 @@ void final_cleanup_on_main(void* arg) {
 void internal_close_on_worker(TcpCtxPtr ctx) {
     if (ctx->proxy_socket != INVALID_SOCKET) {
         ctx->worker->remove_socket(ctx->proxy_socket, [ctx]() {
-            closesocket(ctx->proxy_socket);
+            // For direct connections, try to release the socket back to the pool
+            if (ctx->is_direct) {
+                uint32_t ip = ctx->target.original_dst_ip;
+                uint16_t port = ctx->target.original_dst_port;
+                std::string dest = std::to_string(ip & 0xFF) + "." + std::to_string((ip >> 8) & 0xFF) + "."
+                                 + std::to_string((ip >> 16) & 0xFF) + "." + std::to_string((ip >> 24) & 0xFF)
+                                 + ":" + std::to_string(ntohs(port));
+                ConnectionPool::instance().release(dest, ctx->proxy_socket);
+            } else {
+                closesocket(ctx->proxy_socket);
+            }
+            
             void* arg = ctx->lwip_arg;
             if (arg) {
                 MainDispatcher::instance().queue_task([arg]() {
@@ -487,6 +499,25 @@ void connect_to_proxy_async(TcpCtxPtr ctx) {
     ctx->state = TcpCtx::CONNECTING;
     ctx->worker->queue_task([ctx]() {
         if (ctx->closed) return;
+
+        // Try to acquire from pool for direct connections
+        if (ctx->is_direct) {
+            uint32_t ip = ctx->target.original_dst_ip;
+            uint16_t port = ctx->target.original_dst_port;
+            std::string dest = std::to_string(ip & 0xFF) + "." + std::to_string((ip >> 8) & 0xFF) + "."
+                             + std::to_string((ip >> 16) & 0xFF) + "." + std::to_string((ip >> 24) & 0xFF)
+                             + ":" + std::to_string(ntohs(port));
+            
+            SOCKET s = ConnectionPool::instance().acquire(dest);
+            if (s != INVALID_SOCKET) {
+                ctx->proxy_socket = s;
+                // Already connected, directly proceed to the next step
+                handle_proxy_connect(ctx);
+                return;
+            }
+        }
+
+        // Fallback: create a new connection
         ctx->proxy_socket = socket(AF_INET, SOCK_STREAM, 0);
         if (ctx->proxy_socket == INVALID_SOCKET) { close_tcp_ctx(ctx); return; }
         
