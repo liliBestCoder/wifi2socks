@@ -18,8 +18,8 @@
 #include <memory>
 
 // Flow Control Watermarks
-const size_t UPSTREAM_HIGH_WATER_MARK = 2 * 1024 * 1024; // 2MB: 超过此值暂停接收
-const size_t UPSTREAM_LOW_WATER_MARK = 1 * 1024 * 1024;  // 1MB: 低于此值恢复接收
+const size_t UPSTREAM_HIGH_WATER_MARK = 4 * 1024 * 1024; // 4MB: 超过此值暂停接收
+const size_t UPSTREAM_LOW_WATER_MARK = 2 * 1024 * 1024;  // 2MB: 低于此值恢复接收
 
 const size_t MAX_TX_QUEUE_SIZE = 4 * 1024 * 1024;    // Downstream 4MB High Water Mark
 const size_t RESUME_TX_QUEUE_SIZE = 2 * 1024 * 1024; // Downstream 2MB Low Water Mark
@@ -493,7 +493,9 @@ void handle_proxy_connect(TcpCtxPtr ctx) {
 
 void connect_to_proxy_async(TcpCtxPtr ctx) {
     if (!ctx->worker) {
-        ctx->worker = WorkerPool::instance().get_worker(ctx->target.original_dst_port);
+        // Distribute workers by client source port instead of destination port
+        // to avoid all connections to the same server being handled by one worker.
+        ctx->worker = WorkerPool::instance().get_worker(ctx->client_port);
         if (!ctx->worker) ctx->worker = WorkerPool::instance().get_next_worker();
     }
     ctx->state = TcpCtx::CONNECTING;
