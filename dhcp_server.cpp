@@ -1,7 +1,11 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include "dhcp_server.h"
 #include "app_config.h"
 #include "logger.h"
-#include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <cstring>
 #include <cstdint>

@@ -1,6 +1,9 @@
-#include "nat_table.h"
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include "nat_table.h"
 #include <cstring>
 #include <fstream>
 #include <algorithm>
