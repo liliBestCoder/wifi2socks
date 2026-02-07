@@ -128,18 +128,30 @@ static u8_t lwip_udp_raw_recv(void* arg, struct raw_pcb* pcb, struct pbuf* p, co
                     ip4_addr1_16(&ip->src), ip4_addr2_16(&ip->src), ip4_addr3_16(&ip->src), ip4_addr4_16(&ip->src), ntohs(src_port),
                     ip4_addr1_16(&ip->dest), ip4_addr2_16(&ip->dest), ip4_addr3_16(&ip->dest), ip4_addr4_16(&ip->dest), ntohs(dst_port), len);
 
+                // Recover original destination from NAT table
+                NatEntry target = NatTable::instance().get(ntohs(src_port));
+                uint32_t real_dst_ip = ip->dest.addr;
+                uint16_t real_dst_port = dst_port;
+
+                if (target.original_dst_ip != 0) {
+                    real_dst_ip = target.original_dst_ip;
+                    real_dst_port = target.original_dst_port;
+                    LOG_INFO("[LwIP] Recovered UDP destination: %d.%d.%d.%d:%d",
+                        real_dst_ip & 0xFF, (real_dst_ip >> 8) & 0xFF, (real_dst_ip >> 16) & 0xFF, (real_dst_ip >> 24) & 0xFF, ntohs(real_dst_port));
+                }
+
                 // Check if it's local traffic that should be bypassed
                 uint16_t sp_h = ::ntohs(src_port);
-                uint16_t dp_h = ::ntohs(dst_port);
+                uint16_t dp_h = ::ntohs(real_dst_port);
                 
                 ip4_addr_t lwip_ip;
                 ip4addr_aton("192.168.11.1", &lwip_ip);
-                bool is_local = (sp_h == 53 || dp_h == 53 || ip->dest.addr == lwip_ip.addr);
+                bool is_local = (sp_h == 53 || dp_h == 53 || real_dst_ip == lwip_ip.addr);
 
                 if (!is_local) {
                     uint8_t* payload = udp_ptr + 8;
                     int pay_len = len - (IPH_HL(ip) * 4 + 8);
-                    handle_udp_packet(ip->src.addr, ip->dest.addr, src_port, dst_port, payload, pay_len);
+                    handle_udp_packet(ip->src.addr, real_dst_ip, src_port, real_dst_port, payload, pay_len);
                 }
             }
         }
@@ -186,21 +198,30 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
         ip4addr_ntoa_r((const ip4_addr_t*)&(ip->dest), dst_ip, sizeof(dst_ip));
         LOG_INFO("[LwIP] Received packet: %s -> %s (%d bytes)", src_ip, dst_ip, len);
 
+        ip4_addr_t lwip_ip;
+        ip4addr_aton("192.168.11.1", &lwip_ip);
+
         if (IPH_PROTO(ip) == IP_PROTO_UDP) {
             LOG_INFO("[LwIP] Identifying UDP packet, len=%d", len);
             uint16_t frag_off = ::ntohs(IPH_OFFSET(ip));
             bool is_fragment = (frag_off & (IP_OFFMASK | IP_MF)) != 0;
+            bool is_first_fragment = (frag_off & IP_OFFMASK) == 0;
 
-            if (!is_fragment) {
+            if (!is_fragment || is_first_fragment) {
                 uint8_t* udp_ptr = (uint8_t*)buf + IPH_HL(ip) * 4;
-                if ((char*)udp_ptr + 8 > buf + len) return; // Bounds check
-                
-                uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
-                uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
-
-                // Let all UDP traffic pass to LwIP stack, which will use raw_recv to handle it.
-                // This simplifies logic here and centralizes UDP handling in lwip_udp_raw_recv.
+                if ((char*)udp_ptr + 8 <= buf + len) {
+                    uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
+                    uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
+                    
+                    // Store original destination for UDP
+                    NatTable::instance().set(ntohs(src_port), ip->dest.addr, dst_port);
+                }
             }
+
+            // Redirect all UDP to local IP to ensure LwIP processes it
+            ip->dest.addr = lwip_ip.addr;
+            IPH_CHKSUM_SET(ip, 0);
+            IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
         }
 
         // All traffic is from clients, going to the internet.
@@ -213,8 +234,6 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
 
             NatTable::instance().set(::ntohs(src_port), dst_ip, dst_port);
 
-            ip4_addr_t lwip_ip;
-            ip4addr_aton("192.168.11.1", &lwip_ip);
             ip->dest.addr = lwip_ip.addr;
 
             *(uint16_t*)(tcp_base + 2) = ::htons(g_config.lwip_listen_port);
