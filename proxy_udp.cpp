@@ -248,7 +248,7 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
         sess->last_active = GetTickCount64();
         if (g_windivert_driver) {
             WINDIVERT_ADDRESS send_addr = g_last_addr;
-            send_addr.Direction = WINDIVERT_DIRECTION_INBOUND;
+            send_addr.Outbound = 0;
             g_windivert_driver->send((const char*)packet, 20 + 8 + len, &send_addr);
         }
     }
@@ -325,7 +325,7 @@ void send_dns_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
 
     if (g_windivert_driver) {
         WINDIVERT_ADDRESS send_addr = g_last_addr;
-        send_addr.Direction = WINDIVERT_DIRECTION_INBOUND;
+        send_addr.Outbound = 0;
         g_windivert_driver->send((const char*)packet, 20 + 8 + (int)resp.size(), &send_addr);
     }
 }
@@ -378,7 +378,7 @@ void send_dns_empty_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port
 
     if (g_windivert_driver) {
         WINDIVERT_ADDRESS send_addr = g_last_addr;
-        send_addr.Direction = WINDIVERT_DIRECTION_INBOUND;
+        send_addr.Outbound = 0;
         g_windivert_driver->send((const char*)packet, 20 + 8 + (int)resp.size(), &send_addr);
     }
 }

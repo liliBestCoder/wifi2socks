@@ -101,9 +101,7 @@ err_t windivert_linkoutput(struct netif* netif, struct pbuf* p) {
     // The packet from LwIP is going out. We use the stored address from the
     // incoming packet and flip its direction.
     WINDIVERT_ADDRESS send_addr = g_last_addr;
-    send_addr.Direction = (g_last_addr.Direction == WINDIVERT_DIRECTION_OUTBOUND) ? 
-                           WINDIVERT_DIRECTION_INBOUND : 
-                           WINDIVERT_DIRECTION_OUTBOUND;
+    send_addr.Outbound = !g_last_addr.Outbound;
     
     g_windivert_driver->send((const char*)buf.data(), buf.size(), &send_addr);
     return ERR_OK;
@@ -246,7 +244,7 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
 
                     if (g_windivert_driver) {
                         WINDIVERT_ADDRESS send_addr = g_last_addr;
-                        send_addr.Direction = WINDIVERT_DIRECTION_INBOUND;
+                        send_addr.Outbound = 0;
                         g_windivert_driver->send((const char*)buf, len, &send_addr);
                     }
                     return; // Handled

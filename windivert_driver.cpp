@@ -45,18 +45,28 @@ void WinDivertDriver::run() {
     LOG_INFO("WinDivert capture loop entered.");
 
     while (running_) {
-        if (!WinDivertRecv(handle_, packet_buffer_.data(), (UINT)packet_buffer_.size(), &addr, &read_len)) {
+        read_len = 0;
+        memset(&addr, 0, sizeof(addr));
+
+        // 注意：根据最新的 windivert.h，Recv 的参数顺序是 (handle, packet, len, pRecvLen, pAddr)
+        if (!WinDivertRecv(handle_, packet_buffer_.data(), (UINT)packet_buffer_.size(), &read_len, &addr)) {
             if (running_) {
                 LOG_ERROR("WinDivertRecv failed with error: %d", GetLastError());
             }
             continue;
         }
 
-        // 每次抓到包都打印一条日志（调试用）
+        // 校验捕获长度，防止异常数据
+        if (read_len == 0 || read_len > WINDIVERT_MTU) {
+            LOG_ERROR("WinDivert captured invalid length: %u bytes.", read_len);
+            continue;
+        }
+
+        // 调试日志
         LOG_INFO("WinDivert captured %u bytes", read_len);
 
         if (packet_handler_) {
-            packet_handler_(packet_buffer_.data(), read_len, &addr);
+            packet_handler_(packet_buffer_.data(), (size_t)read_len, &addr);
         }
     }
 }
@@ -65,8 +75,9 @@ bool WinDivertDriver::send(const char* packet, size_t length, const WINDIVERT_AD
     if (handle_ == INVALID_HANDLE_VALUE) {
         return false;
     }
-    UINT write_len;
-    if (!WinDivertSend(handle_, (PVOID)packet, (UINT)length, addr, &write_len)) {
+    UINT write_len = 0;
+    // 注意：根据最新的 windivert.h，Send 的参数顺序是 (handle, packet, len, pSendLen, pAddr)
+    if (!WinDivertSend(handle_, (PVOID)packet, (UINT)length, &write_len, addr)) {
         LOG_ERROR("WinDivertSend failed with error: %d", GetLastError());
         return false;
     }
