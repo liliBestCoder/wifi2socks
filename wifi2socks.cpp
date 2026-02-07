@@ -83,8 +83,8 @@ int main() {
     }
 
     // 1. Initialize WinDivert
-    // 使用用户测试成功的范围比较语法，确保兼容性并修复 Error 87
-    static WinDivertDriver divert("ip and ((ip.SrcAddr >= 192.168.11.0 and ip.SrcAddr <= 192.168.11.255) or (ip.DstAddr >= 192.168.11.0 and ip.DstAddr <= 192.168.11.255))");
+    // 使用用户测试成功的原样语法
+    static WinDivertDriver divert("ip and ip.SrcAddr >= 192.168.11.0 and ip.SrcAddr <= 192.168.11.255");
     set_windivert_driver(&divert);
     WinDivertDriver::PacketHandler handler = [](const char* packet, size_t length, const WINDIVERT_ADDRESS* addr) {
         std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);

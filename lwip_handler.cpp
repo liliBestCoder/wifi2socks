@@ -178,6 +178,12 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
     if (IPH_V(ip) == 4) {
         if (ntohs(IPH_LEN(ip)) > len) return;
 
+        // 添加详细的包处理日志
+        char src_ip[16], dst_ip[16];
+        ip4addr_ntoa_r((const ip4_addr_t*)&(ip->src), src_ip, sizeof(src_ip));
+        ip4addr_ntoa_r((const ip4_addr_t*)&(ip->dest), dst_ip, sizeof(dst_ip));
+        LOG_INFO("[LwIP] Received packet: %s -> %s (%d bytes)", src_ip, dst_ip, len);
+
         if (IPH_PROTO(ip) == IP_PROTO_UDP) {
             uint16_t frag_off = ::ntohs(IPH_OFFSET(ip));
             bool is_fragment = (frag_off & (IP_OFFMASK | IP_MF)) != 0;
