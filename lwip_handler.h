@@ -3,6 +3,7 @@
 #include <cstdint>
 #include "lwip_includes.h"
 #include "windivert.h"
+#include "windivert_driver.h"
 
 // Global LwIP lock
 extern std::recursive_mutex g_lwip_mtx;
