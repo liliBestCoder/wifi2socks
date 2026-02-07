@@ -1,3 +1,5 @@
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #define NOMINMAX
 #include "windivert_driver.h"
 #include "proxy_udp.h"
@@ -65,11 +67,11 @@ std::string parse_dns_qname(const uint8_t* payload, int len, int* qname_len);
 void parse_and_log_dns_response(const uint8_t* payload, int len, const char* mode) {
     if (len < 12) return; 
     
-    uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
-    uint16_t an_count = ntohs(*(uint16_t*)(payload + 6));
+    uint16_t flags = ::ntohs(*(uint16_t*)(payload + 2));
+    uint16_t an_count = ::ntohs(*(uint16_t*)(payload + 6));
     
     if ((flags & 0x8000) && an_count > 0) { 
-        uint16_t qd_count = ntohs(*(uint16_t*)(payload + 4));
+        uint16_t qd_count = ::ntohs(*(uint16_t*)(payload + 4));
         int pos = 12;
         
         std::string domain;
@@ -109,9 +111,9 @@ void parse_and_log_dns_response(const uint8_t* payload, int len, const char* mod
             }
             if(pos+10 > len) break;
             
-            uint16_t type = ntohs(*(uint16_t*)(payload+pos));
-            uint32_t ttl = ntohl(*(uint32_t*)(payload+pos+4));
-            uint16_t rdlen = ntohs(*(uint16_t*)(payload+pos+8));
+            uint16_t type = ::ntohs(*(uint16_t*)(payload+pos));
+            uint32_t ttl = ::ntohl(*(uint32_t*)(payload+pos+4));
+            uint16_t rdlen = ::ntohs(*(uint16_t*)(payload+pos+8));
             pos += 10;
             
             if (type == 1 && rdlen == 4 && pos + 4 <= len) { 
@@ -172,8 +174,8 @@ uint16_t calculate_udp_checksum(uint32_t src_ip, uint32_t dst_ip, uint8_t* udp_p
     sum += (dst_ip & 0xFFFF);
     sum += (dst_ip >> 16);
     // Protocol (17 for UDP) + UDP Length
-    sum += htons(17);
-    sum += htons((uint16_t)udp_len);
+    sum += ::htons(17);
+    sum += ::htons((uint16_t)udp_len);
 
     // 2. UDP Header + Payload
     const uint16_t* ptr = (const uint16_t*)udp_pkt;
@@ -203,8 +205,8 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
         /*
         uint32_t src_ip_net = addr->sin_addr.S_un.S_addr;
         LOG_DEBUG("[UDP] Recv %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
-           src_ip_net & 0xFF, (src_ip_net >> 8) & 0xFF, (src_ip_net >> 16) & 0xFF, (src_ip_net >> 24) & 0xFF, ntohs(addr->sin_port),
-           sess->src_ip & 0xFF, (sess->src_ip >> 8) & 0xFF, (sess->src_ip >> 16) & 0xFF, (sess->src_ip >> 24) & 0xFF, ntohs(sess->src_port));
+           src_ip_net & 0xFF, (src_ip_net >> 8) & 0xFF, (src_ip_net >> 16) & 0xFF, (src_ip_net >> 24) & 0xFF, ::ntohs(addr->sin_port),
+           sess->src_ip & 0xFF, (sess->src_ip >> 8) & 0xFF, (sess->src_ip >> 16) & 0xFF, (sess->src_ip >> 24) & 0xFF, ::ntohs(sess->src_port));
         */
 
         uint8_t packet[4096];
@@ -217,15 +219,15 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
         ip_hdr[0] = 0x45; 
         ip_hdr[8] = 64; 
         ip_hdr[9] = 17; 
-        *(uint16_t*)(ip_hdr + 2) = htons((uint16_t)(20 + 8 + len));
-        *(uint16_t*)(ip_hdr + 4) = htons(g_udp_ip_id.fetch_add(1));
+        *(uint16_t*)(ip_hdr + 2) = ::htons((uint16_t)(20 + 8 + len));
+        *(uint16_t*)(ip_hdr + 4) = ::htons(g_udp_ip_id.fetch_add(1));
         *(uint32_t*)(ip_hdr + 12) = sess->original_dst_ip; 
         *(uint32_t*)(ip_hdr + 16) = sess->src_ip;          
         *(uint16_t*)(ip_hdr + 10) = ip_chksum_simple(ip_hdr, 20);
 
         *(uint16_t*)(udp_hdr + 0) = sess->original_dst_port; 
         *(uint16_t*)(udp_hdr + 2) = sess->src_port;          
-        *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + len));
+        *(uint16_t*)(udp_hdr + 4) = ::htons((uint16_t)(8 + len));
         *(uint16_t*)(udp_hdr + 6) = 0; // Checksum placeholder
         
         memcpy(udp_hdr + 8, data, len);
@@ -239,7 +241,7 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
         );
 
         // Try Log DNS Response for Direct UDP
-        if (sess->original_dst_port == htons(53)) {
+        if (sess->original_dst_port == ::htons(53)) {
             parse_and_log_dns_response((const uint8_t*)data, len, "Direct (UDP)");
         }
 
@@ -307,15 +309,15 @@ void send_dns_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     
     memset(ip_hdr, 0, 20);
     ip_hdr[0] = 0x45; ip_hdr[9] = 17; ip_hdr[8] = 64;
-    *(uint16_t*)(ip_hdr + 2) = htons((uint16_t)(20 + 8 + resp.size()));
-    *(uint16_t*)(ip_hdr + 4) = htons(g_udp_ip_id.fetch_add(1));
+    *(uint16_t*)(ip_hdr + 2) = ::htons((uint16_t)(20 + 8 + resp.size()));
+    *(uint16_t*)(ip_hdr + 4) = ::htons(g_udp_ip_id.fetch_add(1));
     *(uint32_t*)(ip_hdr + 12) = dst_ip; // Original Dst (DNS Server) acts as Src
     *(uint32_t*)(ip_hdr + 16) = src_ip; // Client IP
     *(uint16_t*)(ip_hdr + 10) = ip_chksum_simple(ip_hdr, 20);
 
     *(uint16_t*)(udp_hdr + 0) = dst_port; 
     *(uint16_t*)(udp_hdr + 2) = src_port; 
-    *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + resp.size()));
+    *(uint16_t*)(udp_hdr + 4) = ::htons((uint16_t)(8 + resp.size()));
     *(uint16_t*)(udp_hdr + 6) = 0;
     memcpy(udp_hdr + 8, resp.data(), resp.size());
 
@@ -360,15 +362,15 @@ void send_dns_empty_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port
     
     memset(ip_hdr, 0, 20);
     ip_hdr[0] = 0x45; ip_hdr[9] = 17; ip_hdr[8] = 64;
-    *(uint16_t*)(ip_hdr + 2) = htons((uint16_t)(20 + 8 + resp.size()));
-    *(uint16_t*)(ip_hdr + 4) = htons(g_udp_ip_id.fetch_add(1));
+    *(uint16_t*)(ip_hdr + 2) = ::htons((uint16_t)(20 + 8 + resp.size()));
+    *(uint16_t*)(ip_hdr + 4) = ::htons(g_udp_ip_id.fetch_add(1));
     *(uint32_t*)(ip_hdr + 12) = dst_ip; 
     *(uint32_t*)(ip_hdr + 16) = src_ip; 
     *(uint16_t*)(ip_hdr + 10) = ip_chksum_simple(ip_hdr, 20);
 
     *(uint16_t*)(udp_hdr + 0) = dst_port; 
     *(uint16_t*)(udp_hdr + 2) = src_port; 
-    *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + resp.size()));
+    *(uint16_t*)(udp_hdr + 4) = ::htons((uint16_t)(8 + resp.size()));
     *(uint16_t*)(udp_hdr + 6) = 0;
     memcpy(udp_hdr + 8, resp.data(), resp.size());
 
@@ -387,7 +389,7 @@ void send_dns_over_tcp(UdpSession* sess, const std::vector<uint8_t>& payload) {
     // DNS-over-TCP: 2 bytes Length + Payload
     if (payload.size() > 65535) return;
     
-    uint16_t len = htons((uint16_t)payload.size());
+    uint16_t len = ::htons((uint16_t)payload.size());
     std::vector<uint8_t> tcp_pkt;
     tcp_pkt.resize(2 + payload.size());
     
@@ -452,7 +454,7 @@ void handle_socks5_tcp_read(UdpSession* sess) {
             sess->tcp_rx_buffer.insert(sess->tcp_rx_buffer.end(), (uint8_t*)buf, (uint8_t*)buf + r);
             
             while (sess->tcp_rx_buffer.size() > 2) {
-                uint16_t pkt_len = ntohs(*(uint16_t*)sess->tcp_rx_buffer.data());
+                uint16_t pkt_len = ::ntohs(*(uint16_t*)sess->tcp_rx_buffer.data());
                 if (sess->tcp_rx_buffer.size() >= (size_t)2 + pkt_len) {
                     
                     uint8_t* payload = sess->tcp_rx_buffer.data() + 2;
@@ -471,11 +473,11 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                     // For minimal risk, I will KEEP the original parsing logic for response construction,
                     // but REMOVE the logging and cache update from it, since helper does it.
                     
-                    uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
-                    uint16_t an_count = ntohs(*(uint16_t*)(payload + 6));
+                    uint16_t flags = ::ntohs(*(uint16_t*)(payload + 2));
+                    uint16_t an_count = ::ntohs(*(uint16_t*)(payload + 6));
                     
                     if ((flags & 0x8000) && an_count > 0) {
-                        uint16_t qd_count = ntohs(*(uint16_t*)(payload + 4));
+                        uint16_t qd_count = ::ntohs(*(uint16_t*)(payload + 4));
                         int pos = 12;
                         for(int i=0; i<qd_count; i++) {
                             while(pos < pkt_len) {
@@ -496,8 +498,8 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                                 pos += n+1;
                             }
                             if(pos+10 > pkt_len) break;
-                            uint16_t type = ntohs(*(uint16_t*)(payload+pos));
-                            uint16_t rdlen = ntohs(*(uint16_t*)(payload+pos+8));
+                            uint16_t type = ::ntohs(*(uint16_t*)(payload+pos));
+                            uint16_t rdlen = ::ntohs(*(uint16_t*)(payload+pos+8));
                             pos += 10;
                             
                             if (type == 1 && rdlen == 4 && pos + 4 <= pkt_len) {
@@ -606,8 +608,8 @@ void udp_check_timeouts() {
 void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
     /*
      LOG_DEBUG("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
-        src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
-        dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
+        src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ::ntohs(src_port),
+        dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ::ntohs(dst_port));
     */
 
     uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
@@ -625,8 +627,8 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
             sess = it->second;
         } else {
             LOG_INFO("[UDP] Direct %d.%d.%d.%d:%-5d -> %d.%d.%d.%d:%d\n",
-                src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
-                dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
+                src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ::ntohs(src_port),
+                dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ::ntohs(dst_port));
 
             sess = new UdpSession();
             sess->src_ip = src_ip; 
@@ -705,7 +707,7 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
 
 // Called by Main Thread
 void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
-    uint16_t dport_h = ntohs(dst_port);
+    uint16_t dport_h = ::ntohs(dst_port);
 
     // 0. Drop Noisy Protocols (mDNS, NetBIOS, SSDP) - Check FIRST
     if (dport_h == 5353 ||  // mDNS
@@ -718,7 +720,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     }
 
     // 1. Rule Check (Highest Priority)
-    RouteAction ip_action = RuleManager::instance().match_ip(ntohl(dst_ip));
+    RouteAction ip_action = RuleManager::instance().match_ip(::ntohl(dst_ip));
     if (ip_action == RouteAction::BLOCK) return;
     if (ip_action == RouteAction::DIRECT) {
         forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);
@@ -726,8 +728,8 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     }
 
     // 2. UDP 443 (QUIC) Optimization
-    if (dst_port == htons(443)) {
-        bool cn = GeoChecker::instance().is_cn_ip(ntohl(dst_ip));
+    if (dst_port == ::htons(443)) {
+        bool cn = GeoChecker::instance().is_cn_ip(::ntohl(dst_ip));
         if (!cn) {
             LOG_INFO("[UDP] Blocked Google QUIC: %d.%d.%d.%d:443\n", 
                 dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF);
@@ -738,7 +740,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     }
 
     // 3. UDP 53 (DNS) Optimization
-    if (dst_port == htons(53)) {
+    if (dst_port == ::htons(53)) {
         int qname_len = 0;
         std::string full_domain = parse_dns_qname(payload, len, &qname_len);
         
@@ -765,7 +767,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
             }
 
             if (12 + qname_len + 2 <= len) {
-                uint16_t qtype = ntohs(*(uint16_t*)(payload + 12 + qname_len));
+                uint16_t qtype = ::ntohs(*(uint16_t*)(payload + 12 + qname_len));
                 if (qtype == 28) { // AAAA (IPv6) 
                     uint16_t id = *(uint16_t*)payload;
                     send_dns_empty_response(src_ip, dst_ip, src_port, dst_port, id, payload, len);
@@ -831,7 +833,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                         sess->src_ip = src_ip; sess->original_dst_ip = dst_ip; 
                         sess->src_port = src_port; sess->original_dst_port = dst_port;
                         sess->proxy_target_ip = google_dns;
-                        sess->proxy_target_port = htons(53);
+                        sess->proxy_target_port = ::htons(53);
                         sess->worker = w; sess->is_dns_tcp = true;
                         sess->original_domain_with_suffix = full_domain;
                         sess->clean_domain = clean_domain;
@@ -843,7 +845,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                         sockaddr_in proxy_addr; memset(&proxy_addr, 0, sizeof(proxy_addr));
                         proxy_addr.sin_family = AF_INET;
                         inet_pton(AF_INET, g_config.proxy_ip.c_str(), &proxy_addr.sin_addr);
-                        proxy_addr.sin_port = htons(g_config.proxy_port);
+                        proxy_addr.sin_port = ::htons(g_config.proxy_port);
                         
                         sess->worker->connect_async(sess->tcp_sock, proxy_addr, [sess]() {
                             if (sess->state == UdpSession::CLOSED) return;

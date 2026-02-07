@@ -2,9 +2,7 @@
 #include <mutex>
 #include <cstdint>
 #include "lwip_includes.h"
-
-class WinDivertDriver; // Forward declaration
-struct WINDIVERT_ADDRESS; // Forward declaration
+#include "windivert.h"
 
 // Global LwIP lock
 extern std::recursive_mutex g_lwip_mtx;

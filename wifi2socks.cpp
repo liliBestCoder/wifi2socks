@@ -85,11 +85,12 @@ int main() {
     // 1. Initialize WinDivert
     static WinDivertDriver divert("outbound and ip and ip.SrcAddr >= 192.168.137.0 and ip.SrcAddr <= 192.168.137.255");
     set_windivert_driver(&divert);
-    divert.start([](const char* packet, size_t length, const WINDIVERT_ADDRESS* addr) {
+    WinDivertDriver::PacketHandler handler = [](const char* packet, size_t length, const WINDIVERT_ADDRESS* addr) {
         std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
         TrafficManager::instance().report_tap_tx(length); // Use same traffic counter
-        process_ip_packet(packet, length, addr);
-    });
+        process_ip_packet(packet, (int)length, addr);
+    };
+    divert.start(handler);
 
     // 2. Initialize Worker Pool
     WorkerPool::instance().init(8);
