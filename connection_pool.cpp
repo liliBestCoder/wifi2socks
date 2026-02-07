@@ -1,4 +1,5 @@
 #include "connection_pool.h"
+#include "app_config.h"
 #include "logger.h" // Assuming a logger is available
 #include <vector>
 

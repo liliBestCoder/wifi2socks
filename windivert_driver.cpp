@@ -1,4 +1,5 @@
 #include "windivert_driver.h"
+#include "app_config.h"
 #include "logger.h"
 
 #pragma comment(lib, "WinDivert.lib")

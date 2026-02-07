@@ -7,7 +7,6 @@
 #include "traffic_manager.h"
 #include "rule_manager.h"
 #include "wifi_ap.h"
-#include "ics_manager.h"
 #include <iostream>
 #include <sstream>
 #include <vector>
@@ -65,25 +64,25 @@ void SimpleHttpServer::start(uint16_t port) {
 void SimpleHttpServer::stop() {
     if (!m_running.exchange(false)) return;
 
-    // ¹Ø±Õ¼àÌý socket
+    // ï¿½Ø±Õ¼ï¿½ï¿½ï¿½ socket
     if (m_listen_socket != INVALID_SOCKET) {
         closesocket(m_listen_socket);
         m_listen_socket = INVALID_SOCKET;
     }
 
-    // Í¨ÖªÏß³Ì³ØÀïµÄÏß³ÌÍË³ö
+    // Í¨Öªï¿½ß³Ì³ï¿½ï¿½ï¿½ï¿½ï¿½ß³ï¿½ï¿½Ë³ï¿½
     m_queue_cv.notify_all();
 
-    // µÈ´ý worker_loop Ïß³ÌÍË³ö
+    // ï¿½È´ï¿½ worker_loop ï¿½ß³ï¿½ï¿½Ë³ï¿½
     if (m_thread.joinable()) m_thread.join();
 
-    // È·±£Ïß³Ì³ØÀïµÄÏß³ÌÍË³ö²¢ join
+    // È·ï¿½ï¿½ï¿½ß³Ì³ï¿½ï¿½ï¿½ï¿½ï¿½ß³ï¿½ï¿½Ë³ï¿½ï¿½ï¿½ join
     for (auto& t : m_workers) {
         if (t.joinable()) t.join();
     }
     m_workers.clear();
 
-    // Çå¿ÕÈÎÎñ¶ÓÁÐ
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     std::queue<SOCKET> empty;
     std::swap(m_task_queue, empty);
 }
@@ -107,12 +106,12 @@ void SimpleHttpServer::worker_thread_loop() {
 }
 
 void SimpleHttpServer::worker_loop() {
-    // 1. ´´½¨Ïß³Ì³Ø
+    // 1. ï¿½ï¿½ï¿½ï¿½ï¿½ß³Ì³ï¿½
     for (int i = 0; i < m_thread_count; ++i) {
         m_workers.emplace_back([this]() { this->worker_thread_loop(); });
     }
 
-    // 2. Accept Ñ­»·£¬Ö»Èë¶Ó£¬²»´´½¨Ïß³Ì
+    // 2. Accept Ñ­ï¿½ï¿½ï¿½ï¿½Ö»ï¿½ï¿½Ó£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ß³ï¿½
     while (m_running) {
         sockaddr_in client_addr;
         int len = sizeof(client_addr);
@@ -123,15 +122,15 @@ void SimpleHttpServer::worker_loop() {
             continue;
         }
 
-        // ½«¿Í»§¶Ë·ÅÈëÈÎÎñ¶ÓÁÐ
+        // ï¿½ï¿½ï¿½Í»ï¿½ï¿½Ë·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         {
             std::lock_guard<std::mutex> lock(m_queue_mtx);
             m_task_queue.push(client_sock);
         }
-        m_queue_cv.notify_one(); // »½ÐÑÒ»¸öÏß³Ì´¦Àí
+        m_queue_cv.notify_one(); // ï¿½ï¿½ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ß³Ì´ï¿½ï¿½ï¿½
     }
 
-    // 3. Í£Ö¹Ê±Í¨ÖªÏß³Ì³ØÍË³ö
+    // 3. Í£Ö¹Ê±Í¨Öªï¿½ß³Ì³ï¿½ï¿½Ë³ï¿½
     m_queue_cv.notify_all();
     for (auto& t : m_workers) {
         if (t.joinable()) t.join();
@@ -411,40 +410,13 @@ std::string SimpleHttpServer::handle_logs_get() {
 }
 
 std::string SimpleHttpServer::handle_start() {
-    std::string fail_str = "{\"status\":\"err\",\"action\":\"stopped\"}";
     std::string success_str = "{\"status\":\"ok\",\"action\":\"started\"}";
-    try {
-        if (IcsManager::EnableICS(L"wifi2socks", L"Microsoft Wi-Fi Direct Virtual Adapter")) {
-            LOG_INFO("[HTTP] ICS Enabled.\n");
-            return success_str;
-        }
-        else {
-            LOG_INFO("[HTTP] ICS Enable Failed.\n");
-            return fail_str;
-        }
-    }
-    catch (const std::exception& e) {
-        LOG_ERROR("WiFi Start Error: %s\n", e.what());
-        return fail_str;
-    }
+    LOG_INFO("[HTTP] Start command received (no-op).");
+    return success_str;
 }
 
 std::string SimpleHttpServer::handle_stop() {
-    std::string fail_str = "{\"status\":\"err\",\"action\":\"stopped\"}";
     std::string success_str = "{\"status\":\"ok\",\"action\":\"stopped\"}";
-
-    try {
-        if (IcsManager::DisableICS(L"wifi2socks", L"Microsoft Wi-Fi Direct Virtual Adapter")) {
-            LOG_INFO("[HTTP] ICS Disabled.\n");
-            return success_str;
-        }
-        else {
-            LOG_INFO("[HTTP] ICS Disable Failed.\n");
-            return fail_str;
-        }
-    }
-    catch (const std::exception& e) {
-        LOG_ERROR("WiFi Stop Error: %s\n", e.what());
-        return fail_str;
-    }
+    LOG_INFO("[HTTP] Stop command received (no-op).");
+    return success_str;
 }

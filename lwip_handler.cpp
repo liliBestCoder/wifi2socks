@@ -12,8 +12,8 @@ struct netif g_netif;
 uint8_t HOST_MAC[6] = { 0 }; 
 bool g_host_mac_known = false;
 
-static WinDivertDriver* g_windivert_driver = nullptr;
-static WINDIVERT_ADDRESS g_last_addr; // HACK: Store last packet address. Not thread-safe if LwIP is concurrent.
+WinDivertDriver* g_windivert_driver = nullptr;
+WINDIVERT_ADDRESS g_last_addr; // HACK: Store last packet address. Not thread-safe if LwIP is concurrent.
 
 void set_windivert_driver(WinDivertDriver* driver) {
     g_windivert_driver = driver;

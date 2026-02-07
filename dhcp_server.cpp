@@ -1,4 +1,5 @@
 #include "dhcp_server.h"
+#include "app_config.h"
 #include "logger.h"
 #include <ws2tcpip.h>
 #include <iphlpapi.h>

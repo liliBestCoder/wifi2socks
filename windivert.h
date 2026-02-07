@@ -289,6 +289,7 @@ typedef struct
  * DEPRECATED: use WINDIVERT_IPHDR_GET_VER, WINDIVERT_IPHDR_GET_HLEN, etc.,
  * instead.
  */
+/*
 #define WINDIVERT_IPHDR_V(hdr)              (((hdr)->Version & 0xF0) >> 4)
 #define WINDIVERT_IPHDR_HL(hdr)             ((hdr)->Version & 0x0F)
 #define WINDIVERT_IPHDR_SET_V(hdr, val)     ((hdr)->Version = 
@@ -343,6 +344,7 @@ typedef struct
                                                 htons((val)? (ntohs((hdr)->Reserved1) | 0x8000) : (ntohs((hdr)->Reserved1) & 0x7FFF)))
 #define WINDIVERT_TCPHDR_SET_NS(hdr, val)   ((hdr)->Reserved2 = 
                                                 htons((val)? (ntohs((hdr)->Reserved2) | 0x0100) : (ntohs((hdr)->Reserved2) & 0xFEFF)))
+*/
 
 BOOL WinDivertHelperParsePacket(
     __in        PVOID pPacket,

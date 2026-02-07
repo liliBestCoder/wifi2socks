@@ -79,7 +79,7 @@ int main() {
         GeoChecker::instance().init();
         LOG_INFO("[CORE] GeoChecker loading in background...");
     } catch (const std::exception& e) {
-        LOG_WARN("[CORE] Warning: GeoChecker failed to load: %s. IP/Domain bypass may not work.", e.what());
+        LOG_ERROR("[CORE] Warning: GeoChecker failed to load: %s. IP/Domain bypass may not work.", e.what());
     }
 
     // 1. Initialize WinDivert

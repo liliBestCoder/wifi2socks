@@ -1,7 +1,7 @@
 #define NOMINMAX
+#include "windivert_driver.h"
 #include "proxy_udp.h"
 #include "worker.h"
-#include "tun_driver.h"
 #include "app_config.h"
 #include "traffic_manager.h"
 #include "lwip_handler.h"
@@ -244,7 +244,11 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
         }
 
         sess->last_active = GetTickCount64();
-        TunDriver::instance().send_async(packet, 20 + 8 + len);
+        if (g_windivert_driver) {
+            WINDIVERT_ADDRESS send_addr = g_last_addr;
+            send_addr.Direction = WINDIVERT_DIRECTION_INBOUND;
+            g_windivert_driver->send((const char*)packet, 20 + 8 + len, &send_addr);
+        }
     }
 }
 
@@ -317,7 +321,11 @@ void send_dns_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
 
     *(uint16_t*)(udp_hdr + 6) = calculate_udp_checksum(dst_ip, src_ip, udp_hdr, 8 + (int)resp.size());
 
-    TunDriver::instance().send_async(packet, 20 + 8 + (int)resp.size());
+    if (g_windivert_driver) {
+        WINDIVERT_ADDRESS send_addr = g_last_addr;
+        send_addr.Direction = WINDIVERT_DIRECTION_INBOUND;
+        g_windivert_driver->send((const char*)packet, 20 + 8 + (int)resp.size(), &send_addr);
+    }
 }
 
 // Helper to build an empty DNS Response (e.g. for AAAA blocking)
@@ -366,7 +374,11 @@ void send_dns_empty_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port
 
     *(uint16_t*)(udp_hdr + 6) = calculate_udp_checksum(dst_ip, src_ip, udp_hdr, 8 + (int)resp.size());
 
-    TunDriver::instance().send_async(packet, 20 + 8 + (int)resp.size());
+    if (g_windivert_driver) {
+        WINDIVERT_ADDRESS send_addr = g_last_addr;
+        send_addr.Direction = WINDIVERT_DIRECTION_INBOUND;
+        g_windivert_driver->send((const char*)packet, 20 + 8 + (int)resp.size(), &send_addr);
+    }
 }
 
 void send_dns_over_tcp(UdpSession* sess, const std::vector<uint8_t>& payload) {
