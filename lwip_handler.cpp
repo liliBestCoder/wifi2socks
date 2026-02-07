@@ -73,7 +73,7 @@ err_t windivert_linkoutput(struct netif* netif, struct pbuf* p) {
         struct ip_hdr* ip = (struct ip_hdr*)buf.data();
         if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
              ip4_addr_t lwip_ip;
-             ip4addr_aton("192.168.137.1", &lwip_ip);
+             ip4addr_aton("192.168.11.1", &lwip_ip);
              if (ip->src.addr == lwip_ip.addr) {
                  uint8_t* tcp_base = buf.data() + IPH_HL(ip) * 4;
                  uint16_t src_port = *(uint16_t*)tcp_base;
@@ -131,7 +131,7 @@ static u8_t lwip_udp_raw_recv(void* arg, struct raw_pcb* pcb, struct pbuf* p, co
                 uint16_t dp_h = ::ntohs(dst_port);
                 
                 ip4_addr_t lwip_ip;
-                ip4addr_aton("192.168.137.1", &lwip_ip);
+                ip4addr_aton("192.168.11.1", &lwip_ip);
                 bool is_local = (sp_h == 53 || dp_h == 53 || ip->dest.addr == lwip_ip.addr);
 
                 if (!is_local) {
@@ -205,7 +205,7 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
             NatTable::instance().set(::ntohs(src_port), dst_ip, dst_port);
 
             ip4_addr_t lwip_ip;
-            ip4addr_aton("192.168.137.1", &lwip_ip);
+            ip4addr_aton("192.168.11.1", &lwip_ip);
             ip->dest.addr = lwip_ip.addr;
 
             *(uint16_t*)(tcp_base + 2) = ::htons(g_config.lwip_listen_port);
@@ -223,7 +223,7 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
                 
                 // If the ping is for our gateway, reply directly.
                 ip4_addr_t lwip_ip;
-                ip4addr_aton("192.168.137.1", &lwip_ip);
+                ip4addr_aton("192.168.11.1", &lwip_ip);
                 if (ip->dest.addr == lwip_ip.addr) {
                     uint32_t tmp_ip = ip->src.addr;
                     ip->src.addr = ip->dest.addr;

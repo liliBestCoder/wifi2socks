@@ -9,6 +9,7 @@
 #pragma comment(lib, "ws2_32.lib")
 
 // DHCP Message Structure (simplified)
+#pragma pack(push, 1) // 开启 1 字节对齐
 struct DHCP_Message {
     uint8_t op;
     uint8_t htype;
@@ -26,6 +27,7 @@ struct DHCP_Message {
     uint8_t file[128];
     uint8_t options[312];
 };
+#pragma pack(pop) // 恢复默认对齐
 
 DhcpServer::DhcpServer(const std::string& listen_ip, int listen_port)
     : listen_ip_(listen_ip), listen_port_(listen_port), sock_(INVALID_SOCKET), running_(false) {}
@@ -62,7 +64,7 @@ bool DhcpServer::start() {
     server_addr.sin_port = htons(listen_port_);
 
     if (bind(sock_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        LOG_ERROR("Failed to bind socket to %s:%d. Error: %d", listen_ip_.c_str(), listen_port_, WSAGetLastError());
+        LOG_ERROR("Failed to bind socket to %s:%d. Error: %d\n", listen_ip_.c_str(), listen_port_, WSAGetLastError());
         closesocket(sock_);
         WSACleanup();
         return false;
@@ -106,7 +108,7 @@ void DhcpServer::run() {
 
 // Very basic DHCP message handling
 void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in& client_addr) {
-    if (size < sizeof(DHCP_Message)) {
+    if (size < 240) {
         return;
     }
     auto* msg = (DHCP_Message*)buffer;
@@ -197,7 +199,7 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
         ack_msg.flags = msg->flags;
         memcpy(ack_msg.chaddr, msg->chaddr, 16);
 
-        inet_pton(AF_INET, "192.168.137.2", &ack_msg.yiaddr); // Your IP for client
+        inet_pton(AF_INET, "192.168.11.2", &ack_msg.yiaddr); // Your IP for client
         inet_pton(AF_INET, listen_ip_.c_str(), &ack_msg.siaddr); // Server IP
 
         uint8_t* ack_options = ack_msg.options;

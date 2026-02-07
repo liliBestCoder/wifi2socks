@@ -68,7 +68,7 @@ int main() {
     }
     
     // Start DHCP Server
-    static DhcpServer dhcp_server("192.168.137.1");
+    static DhcpServer dhcp_server("192.168.11.1");
     dhcp_server.start();
 
     // -0.5 Start Traffic Manager & HTTP API
@@ -83,7 +83,7 @@ int main() {
     }
 
     // 1. Initialize WinDivert
-    static WinDivertDriver divert("outbound and ip and ip.SrcAddr >= 192.168.137.0 and ip.SrcAddr <= 192.168.137.255");
+    static WinDivertDriver divert("ip");
     set_windivert_driver(&divert);
     WinDivertDriver::PacketHandler handler = [](const char* packet, size_t length, const WINDIVERT_ADDRESS* addr) {
         std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
@@ -100,7 +100,7 @@ int main() {
     lwip_init();
 
     ip4_addr_t ip, mask, gw;
-    ip4addr_aton("192.168.137.1", &ip);
+    ip4addr_aton("192.168.11.1", &ip);
     ip4addr_aton("255.255.255.0", &mask);
     ip4addr_aton("0.0.0.0", &gw); // No real gateway for this interface
 

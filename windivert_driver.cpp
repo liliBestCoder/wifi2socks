@@ -15,7 +15,7 @@ bool WinDivertDriver::start(PacketHandler handler) {
     packet_handler_ = handler;
     handle_ = WinDivertOpen(filter_.c_str(), WINDIVERT_LAYER_NETWORK, 0, 0);
     if (handle_ == INVALID_HANDLE_VALUE) {
-        LOG_ERROR("Failed to open WinDivert handle. Error: %d. Make sure WinDivert.dll is in the same directory as the executable.", GetLastError());
+        LOG_INFO("Failed to open WinDivert handle. Error: %d. Make sure WinDivert.dll is in the same directory as the executable.", GetLastError());
         return false;
     }
 

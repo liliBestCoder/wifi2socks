@@ -7,11 +7,15 @@
 #include <thread>
 #include <vector>
 #include <string>
+#include <chrono>
 
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 
-void SetStaticIPOnWiFiAdapter();
+// 辅助函数：修改IP
+bool ForceSetStaticIP(const std::string& targetIp);
+// 辅助函数：停止ICS服务
+void StopICSService();
 
 using namespace ABI::Windows::Foundation;
 using namespace ABI::Windows::Foundation::Collections;
@@ -22,492 +26,191 @@ using namespace ABI::Windows::Networking;
 using namespace Microsoft::WRL;
 using namespace Microsoft::WRL::Wrappers;
 
+// 类型定义
 typedef __FITypedEventHandler_2_Windows__CDevices__CWiFiDirect__CWiFiDirectConnectionListener_Windows__CDevices__CWiFiDirect__CWiFiDirectConnectionRequestedEventArgs ConnectionRequestedHandler;
 typedef __FITypedEventHandler_2_Windows__CDevices__CWiFiDirect__CWiFiDirectAdvertisementPublisher_Windows__CDevices__CWiFiDirect__CWiFiDirectAdvertisementPublisherStatusChangedEventArgs StatusChangedHandler;
 typedef __FITypedEventHandler_2_Windows__CDevices__CWiFiDirect__CWiFiDirectDevice_IInspectable ConnectionStatusChangedHandler;
 typedef __FIAsyncOperationCompletedHandler_1_Windows__CDevices__CWiFiDirect__CWiFiDirectDevice FromIdAsyncHandler;
 typedef __FIVectorView_1_Windows__CNetworking__CEndpointPair EndpointPairCollection;
 
-WiFiAPManager& WiFiAPManager::instance()
-{
+WiFiAPManager& WiFiAPManager::instance() {
     static WiFiAPManager inst;
     return inst;
 }
 
-WiFiAPManager::WiFiAPManager()
-    : _ssidProvided(false),
-      _passphraseProvided(false),
-      _listener(nullptr)
-{
-}
+WiFiAPManager::WiFiAPManager() : _ssidProvided(false), _passphraseProvided(false), _listener(nullptr) {}
 
-WiFiAPManager::~WiFiAPManager()
-{
-    if (_publisher.Get() != nullptr)
-    {
-        _publisher->Stop();
-    }
+WiFiAPManager::~WiFiAPManager() {
+    if (_publisher.Get() != nullptr) _publisher->Stop();
     Reset();
 }
 
-void WiFiAPManager::SetSSID(const std::wstring& ssid)
-{
-    _ssid = ssid;
-    _ssidProvided = true;
+void WiFiAPManager::SetSSID(const std::wstring& ssid) { _ssid = ssid; _ssidProvided = true; }
+void WiFiAPManager::SetPassphrase(const std::wstring& passphrase) { _passphrase = passphrase; _passphraseProvided = true; }
+
+// --- 补全 CheckKeepAlive 实现，解决链接错误 ---
+void WiFiAPManager::CheckKeepAlive() {
+    std::vector<std::wstring> to_remove;
+    for (auto& pair : _connectedDevices) {
+        ComPtr<EndpointPairCollection> endpointPairs;
+        HRESULT hr = pair.second->GetConnectionEndpointPairs(endpointPairs.GetAddressOf());
+        if (FAILED(hr)) {
+            if (hr == HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED) || hr == RPC_E_DISCONNECTED) {
+                to_remove.push_back(pair.first);
+            }
+        }
+    }
+    for (const auto& id : to_remove) {
+        auto it = _connectedDevices.find(id);
+        if (it != _connectedDevices.end()) {
+            _connectedDevices.erase(it);
+            if (_listener) _listener->OnDeviceDisconnected(id);
+        }
+    }
 }
 
-void WiFiAPManager::SetPassphrase(const std::wstring& passphrase)
-{
-    _passphrase = passphrase;
-    _passphraseProvided = true;
-}
+void WiFiAPManager::Start() {
+    // 启动前先尝试停止 ICS 服务，防止其锁定 IP 137.1
+    StopICSService();
 
-void WiFiAPManager::Start()
-{
     HRESULT hr = S_OK;
-
     Reset();
 
     hr = Windows::Foundation::ActivateInstance(HStringReference(RuntimeClass_Windows_Devices_WiFiDirect_WiFiDirectAdvertisementPublisher).Get(), &_publisher);
-    if (FAILED(hr))
-    {
-        throw WiFiAPException("ActivateInstance for WiFiDirectAdvertisementPublisher failed", hr);
-    }
+    if (FAILED(hr)) throw WiFiAPException("ActivateInstance failed", hr);
 
-    hr = _publisher->add_StatusChanged(
-        Callback<StatusChangedHandler>([this](IWiFiDirectAdvertisementPublisher* sender, IWiFiDirectAdvertisementPublisherStatusChangedEventArgs* args) -> HRESULT
-    {
-        HRESULT hr = S_OK;
+    hr = _publisher->add_StatusChanged(Callback<StatusChangedHandler>([this](IWiFiDirectAdvertisementPublisher* sender, IWiFiDirectAdvertisementPublisherStatusChangedEventArgs* args) -> HRESULT {
         WiFiDirectAdvertisementPublisherStatus status;
-        WiFiDirectError error;
-
-        try
-        {
-            hr = args->get_Status(&status);
-            if (FAILED(hr)) throw WiFiAPException("Get Status failed", hr);
-
-            switch (status)
-            {
-                case WiFiDirectAdvertisementPublisherStatus_Started:
-                {
-                    StartListener();
-                    if (_listener) _listener->OnAdvertisementStarted();
-                    break;
-                }
-                case WiFiDirectAdvertisementPublisherStatus_Aborted:
-                {
-                    hr = args->get_Error(&error);
-                    if (FAILED(hr)) throw WiFiAPException("Get Error failed", hr);
-
-                    std::wstring message;
-                    switch (error)
-                    {
-                    case WiFiDirectError_RadioNotAvailable: message = L"Advertisement aborted, Wi-Fi radio is turned off"; break;
-                    case WiFiDirectError_ResourceInUse: message = L"Advertisement aborted, Resource In Use"; break;
-                    default: message = L"Advertisement aborted, unknown reason"; break;
-                    }
-
-                    if (_listener) _listener->OnAdvertisementAborted(message);
-
-                    // Auto-Restart logic for Aborted state
-                    // Use a small delay to avoid tight loop in case of persistent hardware error
-                    std::thread([this]() {
-                        Sleep(2000);
-                        try { this->Start(); } catch(...) {}
-                    }).detach();
-                    break;
-                }
-                case WiFiDirectAdvertisementPublisherStatus_Stopped:
-                {
-                    if (_listener) _listener->OnAdvertisementStopped(L"Advertisement stopped");
-                    break;
-                }
-            }
+        args->get_Status(&status);
+        if (status == WiFiDirectAdvertisementPublisherStatus_Started) {
+            StartListener();
+            if (_listener) _listener->OnAdvertisementStarted();
         }
-        catch (WiFiAPException& e)
-        {
-            if (_listener)
-            {
-                std::wostringstream ss;
-                ss << e.what() << ": " << e.GetErrorCode();
-                _listener->OnAsyncException(ss.str());
-            }
-            return e.GetErrorCode();
-        }
-        return hr;
-    }).Get(), &_statusChangedToken);
+        return S_OK;
+        }).Get(), &_statusChangedToken);
 
     hr = _publisher->get_Advertisement(_advertisement.GetAddressOf());
-    if (FAILED(hr)) throw WiFiAPException("Get advertisement failed", hr);
+    _advertisement->put_IsAutonomousGroupOwnerEnabled(true);
+    _advertisement->get_LegacySettings(_legacySettings.GetAddressOf());
+    _legacySettings->put_IsEnabled(true);
 
-    hr = _advertisement->put_IsAutonomousGroupOwnerEnabled(true);
-    if (FAILED(hr)) throw WiFiAPException("Set is autonomous group owner failed", hr);
-
-    hr = _advertisement->get_LegacySettings(_legacySettings.GetAddressOf());
-    if (FAILED(hr)) throw WiFiAPException("Get legacy settings failed", hr);
-
-    hr = _legacySettings->put_IsEnabled(true);
-    if (FAILED(hr)) throw WiFiAPException("Set is enabled failed", hr);
-
-    HString hstrSSID;
-    if (_ssidProvided)
-    {
-        hr = hstrSSID.Set(_ssid.c_str());
-        if (FAILED(hr)) throw WiFiAPException("Failed to create HSTRING for SSID", hr);
-
-        hr = _legacySettings->put_Ssid(hstrSSID.Get());
-        if (FAILED(hr)) throw WiFiAPException("Set SSID failed", hr);
-    }
-    else
-    {
-        hr = _legacySettings->get_Ssid(hstrSSID.GetAddressOf());
-        if (FAILED(hr)) throw WiFiAPException("Get SSID failed", hr);
-        _ssid = hstrSSID.GetRawBuffer(nullptr);
+    if (_ssidProvided) {
+        HString hstrSSID;
+        hstrSSID.Set(_ssid.c_str());
+        _legacySettings->put_Ssid(hstrSSID.Get());
     }
 
     ComPtr<IPasswordCredential> passwordCredential;
-    hr = _legacySettings->get_Passphrase(passwordCredential.GetAddressOf());
-    if (FAILED(hr)) throw WiFiAPException("Get Passphrase credential failed", hr);
-
-    HString hstrPassphrase;
-    if (_passphraseProvided)
-    {
-        hr = hstrPassphrase.Set(_passphrase.c_str());
-        if (FAILED(hr)) throw WiFiAPException("Failed to create HSTRING for Passphrase", hr);
-
-        hr = passwordCredential->put_Password(hstrPassphrase.Get());
-        if (FAILED(hr)) throw WiFiAPException("Set Passphrase failed", hr);
-    }
-    else
-    {
-        hr = passwordCredential->get_Password(hstrPassphrase.GetAddressOf());
-        if (FAILED(hr)) throw WiFiAPException("Get Passphrase failed", hr);
-        _passphrase = hstrPassphrase.GetRawBuffer(nullptr);
+    _legacySettings->get_Passphrase(passwordCredential.GetAddressOf());
+    if (_passphraseProvided) {
+        HString hstrPass;
+        hstrPass.Set(_passphrase.c_str());
+        passwordCredential->put_Password(hstrPass.Get());
     }
 
     hr = _publisher->Start();
     if (FAILED(hr)) throw WiFiAPException("Start failed", hr);
 }
 
-void WiFiAPManager::Stop()
-{
-    HRESULT hr = S_OK;
-    if (_publisher.Get() != nullptr)
-    {
-        hr = _publisher->Stop();
-        if (FAILED(hr)) throw WiFiAPException("Stop failed", hr);
-    }
-}
-
-void WiFiAPManager::CheckKeepAlive()
-{
-    // Periodically probe connected devices to prevent Windows from reclaiming the COM objects
-    // or dropping the connection due to perceived inactivity.
-    std::vector<std::wstring> to_remove;
-    for (auto& pair : _connectedDevices)
-    {
-        ComPtr<EndpointPairCollection> endpointPairs;
-        HRESULT hr = pair.second->GetConnectionEndpointPairs(endpointPairs.GetAddressOf());
-        if (FAILED(hr))
-        {
-            // If probing fails with a serious error, the device might be gone
-            if (hr == HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED) || hr == RPC_E_DISCONNECTED)
-            {
-                to_remove.push_back(pair.first);
-            }
-        }
-    }
-
-    for (const auto& id : to_remove)
-    {
-        auto itDevice = _connectedDevices.find(id);
-        auto itToken = _connectedDeviceStatusChangedTokens.find(id);
-        if (itToken != _connectedDeviceStatusChangedTokens.end())
-        {
-            if (itDevice != _connectedDevices.end())
-                itDevice->second->remove_ConnectionStatusChanged(itToken->second);
-            _connectedDeviceStatusChangedTokens.erase(itToken);
-        }
-        if (itDevice != _connectedDevices.end())
-            _connectedDevices.erase(itDevice);
-        
-        if (_listener) _listener->OnDeviceDisconnected(id);
-    }
-}
-
-void WiFiAPManager::StartListener()
-{
-    HRESULT hr = S_OK;
-
-    hr = Windows::Foundation::ActivateInstance(HStringReference(RuntimeClass_Windows_Devices_WiFiDirect_WiFiDirectConnectionListener).Get(), &_connectionListener);
-    if (FAILED(hr)) throw WiFiAPException("ActivateInstance for WiFiDirectConnectionListener failed", hr);
-
-    hr = _connectionListener->add_ConnectionRequested(
-        Callback<ConnectionRequestedHandler>([this](IWiFiDirectConnectionListener* sender, IWiFiDirectConnectionRequestedEventArgs* args) -> HRESULT
-    {
-        HRESULT hr = S_OK;
+void WiFiAPManager::StartListener() {
+    Windows::Foundation::ActivateInstance(HStringReference(RuntimeClass_Windows_Devices_WiFiDirect_WiFiDirectConnectionListener).Get(), &_connectionListener);
+    _connectionListener->add_ConnectionRequested(Callback<ConnectionRequestedHandler>([this](IWiFiDirectConnectionListener* sender, IWiFiDirectConnectionRequestedEventArgs* args) -> HRESULT {
         ComPtr<IWiFiDirectConnectionRequest> request;
-        ComPtr<IDeviceInformation> deviceInformation;
+        ComPtr<IDeviceInformation> deviceInfo;
         HString deviceId;
         ComPtr<IWiFiDirectDeviceStatics> wfdStatics;
 
-        if (_listener) _listener->LogMessage(L"Connection Requested...");
+        args->GetConnectionRequest(request.GetAddressOf());
+        request->get_DeviceInformation(deviceInfo.GetAddressOf());
+        GetActivationFactory(HStringReference(RuntimeClass_Windows_Devices_WiFiDirect_WiFiDirectDevice).Get(), &wfdStatics);
+        deviceInfo->get_Id(deviceId.GetAddressOf());
 
-        try
-        {
-            hr = args->GetConnectionRequest(request.GetAddressOf());
-            if (FAILED(hr)) throw WiFiAPException("GetConnectionRequest failed", hr);
-
-            hr = request->get_DeviceInformation(deviceInformation.GetAddressOf());
-            if (FAILED(hr)) throw WiFiAPException("Get device information failed", hr);
-
-            hr = GetActivationFactory(HStringReference(RuntimeClass_Windows_Devices_WiFiDirect_WiFiDirectDevice).Get(), &wfdStatics);
-            if (FAILED(hr)) throw WiFiAPException("GetActivationFactory failed", hr);
-
-            hr = deviceInformation->get_Id(deviceId.GetAddressOf());
-            if (FAILED(hr)) throw WiFiAPException("Get ID failed", hr);
-
-            ComPtr<IAsyncOperation<WiFiDirectDevice*>> asyncAction;
-            hr = wfdStatics->FromIdAsync(deviceId.Get(), &asyncAction);
-            if (FAILED(hr)) throw WiFiAPException("FromIdAsync failed", hr);
-
-            hr = asyncAction->put_Completed(Callback<FromIdAsyncHandler>([this](IAsyncOperation<WiFiDirectDevice*>* pHandler, AsyncStatus status) -> HRESULT
-            {
-                HRESULT hr = S_OK;
+        ComPtr<IAsyncOperation<WiFiDirectDevice*>> asyncAction;
+        wfdStatics->FromIdAsync(deviceId.Get(), &asyncAction);
+        asyncAction->put_Completed(Callback<FromIdAsyncHandler>([this](IAsyncOperation<WiFiDirectDevice*>* pHandler, AsyncStatus status) -> HRESULT {
+            if (status == AsyncStatus::Completed) {
                 ComPtr<IWiFiDirectDevice> wfdDevice;
-                ComPtr<EndpointPairCollection> endpointPairs;
-                ComPtr<IEndpointPair> endpointPair;
-                ComPtr<IHostName> remoteHostName;
-                HString remoteHostNameDisplay;
-                HString deviceId;
+                pHandler->GetResults(wfdDevice.GetAddressOf());
+                HString dId;
+                wfdDevice->get_DeviceId(dId.GetAddressOf());
+                _connectedDevices[dId.GetRawBuffer(nullptr)] = wfdDevice;
 
-                try
-                {
-                    if (status == AsyncStatus::Completed)
-                    {
-                        hr = pHandler->GetResults(wfdDevice.GetAddressOf());
-                        if (FAILED(hr)) throw WiFiAPException("GetResults failed", hr);
+                if (_listener) _listener->OnDeviceConnected(L"Connected Device");
 
-                        hr = wfdDevice->GetConnectionEndpointPairs(endpointPairs.GetAddressOf());
-                        if (FAILED(hr)) throw WiFiAPException("GetConnectionEndpointPairs failed", hr);
-
-                        // Sometimes endpoint pairs might be empty, check size? 
-                        // The original code assumed index 0 exists. We will keep it but it might be risky.
-                        // Ideally checking size would be better.
-                        
-                        unsigned int size = 0;
-                        endpointPairs->get_Size(&size);
-                        if(size > 0) {
-                             hr = endpointPairs->GetAt(0, endpointPair.GetAddressOf());
-                             if (FAILED(hr)) throw WiFiAPException("GetAt(0) failed", hr);
-                             
-                             hr = endpointPair->get_RemoteHostName(remoteHostName.GetAddressOf());
-                             if (FAILED(hr)) throw WiFiAPException("get_RemoteHostName failed", hr);
-
-                             hr = remoteHostName->get_DisplayName(remoteHostNameDisplay.GetAddressOf());
-                             if (FAILED(hr)) throw WiFiAPException("get_DisplayName failed", hr);
-                        } else {
-                             // Fallback or just ignore name
-                        }
-
-                        EventRegistrationToken statusChangedToken;
-                        hr = wfdDevice->add_ConnectionStatusChanged(Callback<ConnectionStatusChangedHandler>([this](IWiFiDirectDevice* sender, IInspectable*) -> HRESULT
-                        {
-                            WiFiDirectConnectionStatus status;
-                            HString deviceId;
-                            HRESULT hr = S_OK;
-
-                            try
-                            {
-                                hr = sender->get_ConnectionStatus(&status);
-                                if (FAILED(hr)) throw WiFiAPException("get_ConnectionStatus failed", hr);
-
-                                if (status == WiFiDirectConnectionStatus_Disconnected)
-                                {
-                                    hr = sender->get_DeviceId(deviceId.GetAddressOf());
-                                    if (FAILED(hr)) throw WiFiAPException("get_DeviceId failed", hr);
-
-                                    auto itDevice = _connectedDevices.find(deviceId.GetRawBuffer(nullptr));
-                                    auto itToken = _connectedDeviceStatusChangedTokens.find(deviceId.GetRawBuffer(nullptr));
-
-                                    if (itToken != _connectedDeviceStatusChangedTokens.end())
-                                    {
-                                        if (itDevice != _connectedDevices.end())
-                                            itDevice->second->remove_ConnectionStatusChanged(itToken->second);
-                                        _connectedDeviceStatusChangedTokens.erase(itToken);
-                                    }
-
-                                    if (itDevice != _connectedDevices.end())
-                                        _connectedDevices.erase(itDevice);
-
-                                    if (_listener) _listener->OnDeviceDisconnected(deviceId.GetRawBuffer(nullptr));
-                                }
-                            }
-                            catch (WiFiAPException& e)
-                            {
-                                if (_listener)
-                                {
-                                    std::wostringstream ss;
-                                    ss << e.what() << ": " << e.GetErrorCode();
-                                    _listener->OnAsyncException(ss.str());
-                                }
-                                return e.GetErrorCode();
-                            }
-                            return hr;
-                        }).Get(), &statusChangedToken);
-
-                        hr = wfdDevice->get_DeviceId(deviceId.GetAddressOf());
-                        if (FAILED(hr)) throw WiFiAPException("get_DeviceId failed", hr);
-
-                        _connectedDevices.insert(std::make_pair(deviceId.GetRawBuffer(nullptr), wfdDevice));
-                        _connectedDeviceStatusChangedTokens.insert(std::make_pair(deviceId.GetRawBuffer(nullptr), statusChangedToken));
-
-                        if (_listener)
-                        {
-                            _listener->OnDeviceConnected(remoteHostNameDisplay.GetRawBuffer(nullptr) ? remoteHostNameDisplay.GetRawBuffer(nullptr) : L"Unknown");
-                        }
-
-                        // Set static IP for the virtual adapter
-                        SetStaticIPOnWiFiAdapter();
+                // 异步设置 IP，增加重试机制
+                std::thread([]() {
+                    for (int i = 0; i < 3; ++i) { // 尝试3次
+                        std::this_thread::sleep_for(std::chrono::seconds(2));
+                        if (ForceSetStaticIP("192.168.11.1")) break;
                     }
-                    else
-                    {
-                        if (_listener)
-                        {
-                             std::wstring msg = L"Device connection status: ";
-                             if (status == AsyncStatus::Started) msg += L"Started";
-                             else if (status == AsyncStatus::Canceled) msg += L"Canceled";
-                             else if (status == AsyncStatus::Error) msg += L"Error";
-                             _listener->LogMessage(msg);
-                        }
-                    }
-                }
-                catch (WiFiAPException& e)
-                {
-                    if (_listener)
-                    {
-                        std::wostringstream ss;
-                        ss << e.what() << ": " << e.GetErrorCode();
-                        _listener->OnAsyncException(ss.str());
-                    }
-                    return e.GetErrorCode();
-                }
-                return hr;
-            }).Get());
-            if (FAILED(hr)) throw WiFiAPException("put_Completed failed", hr);
-
-        }
-        catch (WiFiAPException& e)
-        {
-            if (_listener)
-            {
-                std::wostringstream ss;
-                ss << e.what() << ": " << e.GetErrorCode();
-                _listener->OnAsyncException(ss.str());
+                    }).detach();
             }
-            return e.GetErrorCode();
-        }
-        return hr;
-    }).Get(), &_connectionRequestedToken);
-    
-    if (FAILED(hr)) throw WiFiAPException("add_ConnectionRequested failed", hr);
-    
-    if (_listener) _listener->LogMessage(L"Connection Listener is ready");
+            return S_OK;
+            }).Get());
+        return S_OK;
+        }).Get(), &_connectionRequestedToken);
 }
 
-void WiFiAPManager::Reset()
-{
-    if (_connectionListener.Get() != nullptr)
-    {
-        _connectionListener->remove_ConnectionRequested(_connectionRequestedToken);
-    }
-
-    if (_publisher.Get() != nullptr)
-    {
-        _publisher->remove_StatusChanged(_statusChangedToken);
-    }
-
-    // Explicitly unregister handlers from connected devices before clearing
-    for (auto& pair : _connectedDevices)
-    {
-        auto itToken = _connectedDeviceStatusChangedTokens.find(pair.first);
-        if (itToken != _connectedDeviceStatusChangedTokens.end())
-        {
-            pair.second->remove_ConnectionStatusChanged(itToken->second);
-        }
-    }
-
-    _legacySettings.Reset();
-    _advertisement.Reset();
+void WiFiAPManager::Reset() {
+    if (_connectionListener) _connectionListener->remove_ConnectionRequested(_connectionRequestedToken);
+    if (_publisher) _publisher->remove_StatusChanged(_statusChangedToken);
+    _connectedDevices.clear();
     _publisher.Reset();
     _connectionListener.Reset();
-
-    _connectedDevices.clear();
-    _connectedDeviceStatusChangedTokens.clear();
 }
 
-void SetStaticIPOnWiFiAdapter()
-{
+// 核心：强制设置静态IP
+bool ForceSetStaticIP(const std::string& targetIp) {
     ULONG bufferSize = 0;
-    if (GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, nullptr, &bufferSize) != ERROR_BUFFER_OVERFLOW)
-    {
-        // Failed to get buffer size
-        return;
-    }
-
+    GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, nullptr, &bufferSize);
     std::vector<BYTE> buffer(bufferSize);
     IP_ADAPTER_ADDRESSES* pAddresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+
     if (GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, pAddresses, &bufferSize) != NO_ERROR)
-    {
-        // Failed to get adapters
-        return;
-    }
+        return false;
 
-    IP_ADAPTER_ADDRESSES* pCurrAddresses = pAddresses;
-    while (pCurrAddresses)
-    {
-        if (std::wstring(pCurrAddresses->Description).find(L"Microsoft Wi-Fi Direct Virtual Adapter") != std::wstring::npos)
-        {
-            if (pCurrAddresses->OperStatus == IfOperStatusUp)
-            {
-                // Found the active Wi-Fi Direct adapter. Now set its IP.
-                MIB_UNICASTIPADDRESS_ROW newAddress;
-                InitializeUnicastIpAddressEntry(&newAddress);
+    for (auto pCurr = pAddresses; pCurr; pCurr = pCurr->Next) {
+        std::wstring desc = pCurr->Description;
+        // 修正：模糊匹配，适配不同编号的 Virtual Adapter
+        if (desc.find(L"Wi-Fi Direct Virtual Adapter") != std::wstring::npos) {
 
-                newAddress.Address.Ipv4.sin_family = AF_INET;
-                newAddress.InterfaceLuid = pCurrAddresses->Luid;
-                newAddress.OnLinkPrefixLength = 24; // Corresponds to 255.255.255.0
-                newAddress.DadState = IpDadStatePreferred;
-
-                // Set the IP address to 192.168.137.1
-                inet_pton(AF_INET, "192.168.137.1", &newAddress.Address.Ipv4.sin_addr);
-                
-                // Check if an IP address already exists. If so, delete it first.
-                // This is to handle re-connection scenarios.
-                for (IP_ADAPTER_UNICAST_ADDRESS* pUnicast = pCurrAddresses->FirstUnicastAddress; pUnicast != nullptr; pUnicast = pUnicast->Next)
-                {
-                    if (pUnicast->Address.lpSockaddr->sa_family == AF_INET)
-                    {
-                        // An IPv4 address exists, delete it.
-                        DeleteUnicastIpAddressEntry((MIB_UNICASTIPADDRESS_ROW*)pUnicast);
-                    }
+            // 删除旧的 IPv4 地址（包括 137.1）
+            for (auto pUnicast = pCurr->FirstUnicastAddress; pUnicast; pUnicast = pUnicast->Next) {
+                if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
+                    MIB_UNICASTIPADDRESS_ROW row;
+                    InitializeUnicastIpAddressEntry(&row);
+                    row.InterfaceLuid = pCurr->Luid;
+                    row.Address.Ipv4.sin_family = AF_INET;
+                    row.Address.Ipv4.sin_addr = ((sockaddr_in*)pUnicast->Address.lpSockaddr)->sin_addr;
+                    DeleteUnicastIpAddressEntry(&row);
                 }
-
-                HRESULT hr = CreateUnicastIpAddressEntry(&newAddress);
-                if (hr != NO_ERROR)
-                {
-                    // Log error if you have a logger
-                    // std::wcerr << L"Failed to set IP address. Error code: " << hr << std::endl;
-                }
-                else
-                {
-                    // std::wcout << L"Successfully set IP address 192.168.137.1 on " << pCurrAddresses->FriendlyName << std::endl;
-                }
-
-                // Assuming we only want to configure one adapter
-                break;
             }
+
+            // 插入 11.1
+            MIB_UNICASTIPADDRESS_ROW newRow;
+            InitializeUnicastIpAddressEntry(&newRow);
+            newRow.InterfaceLuid = pCurr->Luid;
+            newRow.Address.Ipv4.sin_family = AF_INET;
+            newRow.OnLinkPrefixLength = 24;
+            newRow.DadState = IpDadStatePreferred;
+            inet_pton(AF_INET, targetIp.c_str(), &newRow.Address.Ipv4.sin_addr);
+
+            return (CreateUnicastIpAddressEntry(&newRow) == NO_ERROR);
         }
-        pCurrAddresses = pCurrAddresses->Next;
+    }
+    return false;
+}
+
+// 停止 ICS 服务以解除对虚拟网卡的锁定
+void StopICSService() {
+    SC_HANDLE scm = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+    if (scm) {
+        SC_HANDLE svc = OpenService(scm, L"SharedAccess", SERVICE_STOP | SERVICE_QUERY_STATUS);
+        if (svc) {
+            SERVICE_STATUS status;
+            ControlService(svc, SERVICE_CONTROL_STOP, &status);
+            CloseServiceHandle(svc);
+        }
+        CloseServiceHandle(scm);
     }
 }
