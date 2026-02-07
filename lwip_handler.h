@@ -8,7 +8,7 @@
 // Global LwIP lock
 extern std::recursive_mutex g_lwip_mtx;
 extern WinDivertDriver* g_windivert_driver;
-extern WINDIVERT_ADDRESS g_last_addr;
+// g_last_addr removed - using NatTable instead for thread-safety
 
 uint32_t get_now_ms();
 void lwip_system_init();

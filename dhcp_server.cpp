@@ -9,7 +9,7 @@
 #pragma comment(lib, "ws2_32.lib")
 
 // DHCP Message Structure (simplified)
-#pragma pack(push, 1) // ¿ªÆô 1 ×Ö½Ú¶ÔÆë
+#pragma pack(push, 1) // ï¿½ï¿½ï¿½ï¿½ 1 ï¿½Ö½Ú¶ï¿½ï¿½ï¿½
 struct DHCP_Message {
     uint8_t op;
     uint8_t htype;
@@ -27,7 +27,7 @@ struct DHCP_Message {
     uint8_t file[128];
     uint8_t options[312];
 };
-#pragma pack(pop) // »Ö¸´Ä¬ÈÏ¶ÔÆë
+#pragma pack(pop) // ï¿½Ö¸ï¿½Ä¬ï¿½Ï¶ï¿½ï¿½ï¿½
 
 DhcpServer::DhcpServer(const std::string& listen_ip, int listen_port)
     : listen_ip_(listen_ip), listen_port_(listen_port), sock_(INVALID_SOCKET), running_(false) {}
@@ -150,8 +150,14 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
         offer_msg.flags = msg->flags;
         memcpy(offer_msg.chaddr, msg->chaddr, 16);
         
-        inet_pton(AF_INET, "192.168.137.2", &offer_msg.yiaddr); // Your IP for client
-        inet_pton(AF_INET, listen_ip_.c_str(), &offer_msg.siaddr); // Server IP
+        // Use an IP in the same subnet as listen_ip
+        uint32_t server_ip_addr;
+        inet_pton(AF_INET, listen_ip_.c_str(), &server_ip_addr);
+        uint32_t client_ip_addr = server_ip_addr;
+        ((uint8_t*)&client_ip_addr)[3] = 2; // Assume .2 for now, simple 
+        
+        offer_msg.yiaddr = client_ip_addr;
+        offer_msg.siaddr = server_ip_addr;
 
         uint8_t* offer_options = offer_msg.options;
         memcpy(offer_options, "\x63\x82\x53\x63", 4); // Magic cookie
@@ -199,8 +205,14 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
         ack_msg.flags = msg->flags;
         memcpy(ack_msg.chaddr, msg->chaddr, 16);
 
-        inet_pton(AF_INET, "192.168.11.2", &ack_msg.yiaddr); // Your IP for client
-        inet_pton(AF_INET, listen_ip_.c_str(), &ack_msg.siaddr); // Server IP
+        // Use same IP calculation as OFFER
+        uint32_t server_ip_addr;
+        inet_pton(AF_INET, listen_ip_.c_str(), &server_ip_addr);
+        uint32_t client_ip_addr = server_ip_addr;
+        ((uint8_t*)&client_ip_addr)[3] = 2;
+
+        ack_msg.yiaddr = client_ip_addr;
+        ack_msg.siaddr = server_ip_addr;
 
         uint8_t* ack_options = ack_msg.options;
         memcpy(ack_options, "\x63\x82\x53\x63", 4); // Magic cookie
@@ -237,4 +249,5 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
         sendto(sock_, (char*)&ack_msg, sizeof(ack_msg), 0, (sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
         LOG_INFO("DHCPACK sent");
     }
+
 }

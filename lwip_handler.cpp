@@ -13,7 +13,6 @@ uint8_t HOST_MAC[6] = { 0 };
 bool g_host_mac_known = false;
 
 WinDivertDriver* g_windivert_driver = nullptr;
-WINDIVERT_ADDRESS g_last_addr; // HACK: Store last packet address. Not thread-safe if LwIP is concurrent.
 
 void set_windivert_driver(WinDivertDriver* driver) {
     g_windivert_driver = driver;
@@ -74,18 +73,22 @@ err_t windivert_linkoutput(struct netif* netif, struct pbuf* p) {
     buf.assign(p->tot_len, 0);
     pbuf_copy_partial(p, buf.data(), p->tot_len, 0);
 
+    WINDIVERT_ADDRESS send_addr = {0};
+    bool addr_found = false;
+
     if (buf.size() >= 20) {
         struct ip_hdr* ip = (struct ip_hdr*)buf.data();
         if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
              ip4_addr_t lwip_ip;
-             ip4addr_aton("192.168.11.1", &lwip_ip);
+             ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
              if (ip->src.addr == lwip_ip.addr) {
                  uint8_t* tcp_base = buf.data() + IPH_HL(ip) * 4;
                  uint16_t src_port = *(uint16_t*)tcp_base;
                  uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
                  
                  if (src_port == ::htons(g_config.lwip_listen_port)) {
-                     NatEntry target = NatTable::instance().get(::ntohs(dst_port));
+                     // Since this is a reply, the "original source" is the current destination
+                     NatEntry target = NatTable::instance().get(ip->dest.addr, ::ntohs(dst_port));
                      
                      if (target.original_dst_ip != 0) {
                          ip->src.addr = target.original_dst_ip;
@@ -97,16 +100,22 @@ err_t windivert_linkoutput(struct netif* netif, struct pbuf* p) {
                          uint16_t ip_len = ::ntohs(IPH_LEN(ip));
                          int tcp_len = ip_len - IPH_HL(ip) * 4;
                          recalculate_tcp_checksum(ip, tcp_base, tcp_len);
+
+                         send_addr = target.addr;
+                         addr_found = true;
                      }
                  }
              }
         }
     }
 
-    // The packet from LwIP is going out. We use the stored address from the
-    // incoming packet and flip its direction.
-    WINDIVERT_ADDRESS send_addr = g_last_addr;
-    send_addr.Outbound = !g_last_addr.Outbound;
+    if (!addr_found) {
+        // Fallback or non-TCP traffic? 
+        return ERR_OK; 
+    }
+
+    // The packet from LwIP is going out. Flip its direction.
+    send_addr.Outbound = !send_addr.Outbound;
     
     g_windivert_driver->send((const char*)buf.data(), buf.size(), &send_addr);
     return ERR_OK;
@@ -130,7 +139,7 @@ static u8_t lwip_udp_raw_recv(void* arg, struct raw_pcb* pcb, struct pbuf* p, co
                 uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
                 
                 // Recover original destination from NAT table
-                NatEntry target = NatTable::instance().get(ntohs(src_port));
+                NatEntry target = NatTable::instance().get(ip->src.addr, ntohs(src_port));
                 uint32_t real_dst_ip = ip->dest.addr;
                 uint16_t real_dst_port = dst_port;
 
@@ -144,7 +153,7 @@ static u8_t lwip_udp_raw_recv(void* arg, struct raw_pcb* pcb, struct pbuf* p, co
                 uint16_t dp_h = ::ntohs(real_dst_port);
                 
                 ip4_addr_t lwip_ip;
-                ip4addr_aton("192.168.11.1", &lwip_ip);
+                ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
                 bool is_local = (sp_h == 53 || dp_h == 53 || real_dst_ip == lwip_ip.addr);
 
                 if (!is_local) {
@@ -187,15 +196,14 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
     char buf[WINDIVERT_MTU_MAX];
     memcpy(buf, buf_const, len);
     
-    // Store the address for the reply
-    g_last_addr = *(static_cast<const WINDIVERT_ADDRESS*>(addr));
+    const WINDIVERT_ADDRESS* p_addr = static_cast<const WINDIVERT_ADDRESS*>(addr);
 
     struct ip_hdr* ip = (struct ip_hdr*)buf;
     if (IPH_V(ip) == 4) {
         if (ntohs(IPH_LEN(ip)) > len) return;
 
         ip4_addr_t lwip_ip;
-        ip4addr_aton("192.168.11.1", &lwip_ip);
+        ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
 
         if (IPH_PROTO(ip) == IP_PROTO_UDP) {
             uint16_t frag_off = ::ntohs(IPH_OFFSET(ip));
@@ -209,7 +217,7 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
                     uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
                     
                     // Store original destination for UDP
-                    NatTable::instance().set(ntohs(src_port), ip->dest.addr, dst_port);
+                    NatTable::instance().set(ip->src.addr, ntohs(src_port), ip->dest.addr, dst_port, p_addr);
                 }
             }
 
@@ -217,7 +225,7 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
             ip->dest.addr = lwip_ip.addr;
             IPH_CHKSUM_SET(ip, 0);
             IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
-            LOG_INFO("[LwIP] Injected UDP packet redirected to 192.168.11.1");
+            // LOG_INFO("[LwIP] Injected UDP packet redirected to %s", g_config.tap_ip.c_str());
         }
 
         // All traffic is from clients, going to the internet.
@@ -228,7 +236,7 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
             uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
             uint32_t dst_ip = ip->dest.addr;
 
-            NatTable::instance().set(::ntohs(src_port), dst_ip, dst_port);
+            NatTable::instance().set(ip->src.addr, ::ntohs(src_port), dst_ip, dst_port, p_addr);
 
             ip->dest.addr = lwip_ip.addr;
 
@@ -246,8 +254,6 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
             if (icmp_base[0] == 8) { // Echo Request
                 
                 // If the ping is for our gateway, reply directly.
-                ip4_addr_t lwip_ip;
-                ip4addr_aton("192.168.11.1", &lwip_ip);
                 if (ip->dest.addr == lwip_ip.addr) {
                     uint32_t tmp_ip = ip->src.addr;
                     ip->src.addr = ip->dest.addr;
@@ -263,7 +269,7 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
                     *(uint16_t*)(icmp_base + 2) = ip_chksum_simple(icmp_base, icmp_len);
 
                     if (g_windivert_driver) {
-                        WINDIVERT_ADDRESS send_addr = g_last_addr;
+                        WINDIVERT_ADDRESS send_addr = *p_addr;
                         send_addr.Outbound = 0;
                         g_windivert_driver->send((const char*)buf, len, &send_addr);
                     }

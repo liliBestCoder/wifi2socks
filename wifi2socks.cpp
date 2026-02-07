@@ -68,7 +68,7 @@ int main() {
     }
     
     // Start DHCP Server
-    static DhcpServer dhcp_server("192.168.11.1");
+    static DhcpServer dhcp_server(g_config.tap_ip);
     dhcp_server.start();
 
     // -0.5 Start Traffic Manager & HTTP API
@@ -83,8 +83,13 @@ int main() {
     }
 
     // 1. Initialize WinDivert
-    // 使用用户测试成功的原样语法
-    static WinDivertDriver divert("ip and ip.SrcAddr >= 192.168.11.0 and ip.SrcAddr <= 192.168.11.255");
+    // Build filter based on config IP
+    std::string base_ip = g_config.tap_ip;
+    size_t last_dot = base_ip.find_last_of('.');
+    std::string subnet = base_ip.substr(0, last_dot);
+    std::string filter = "ip and ip.SrcAddr >= " + subnet + ".0 and ip.SrcAddr <= " + subnet + ".255";
+    
+    static WinDivertDriver divert(filter);
     set_windivert_driver(&divert);
     WinDivertDriver::PacketHandler handler = [](const char* packet, size_t length, const WINDIVERT_ADDRESS* addr) {
         std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
@@ -100,7 +105,7 @@ int main() {
     lwip_init();
 
     ip4_addr_t ip, mask, gw;
-    ip4addr_aton("192.168.11.1", &ip);
+    ip4addr_aton(g_config.tap_ip.c_str(), &ip);
     ip4addr_aton("255.255.255.0", &mask);
     ip4addr_aton("0.0.0.0", &gw); // No real gateway for this interface
 

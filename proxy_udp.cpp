@@ -201,13 +201,6 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
     
     if (len > 0 && data && addr) {
         TrafficManager::instance().report_proxy_rx(len, true); // Direct
-        // Log incoming packet (Debug) - Disabled for performance
-        /*
-        uint32_t src_ip_net = addr->sin_addr.S_un.S_addr;
-        LOG_DEBUG("[UDP] Recv %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
-           src_ip_net & 0xFF, (src_ip_net >> 8) & 0xFF, (src_ip_net >> 16) & 0xFF, (src_ip_net >> 24) & 0xFF, ::ntohs(addr->sin_port),
-           sess->src_ip & 0xFF, (sess->src_ip >> 8) & 0xFF, (sess->src_ip >> 16) & 0xFF, (sess->src_ip >> 24) & 0xFF, ::ntohs(sess->src_port));
-        */
 
         uint8_t packet[4096];
         if (20 + 8 + len > sizeof(packet)) return; 
@@ -247,9 +240,12 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
 
         sess->last_active = GetTickCount64();
         if (g_windivert_driver) {
-            WINDIVERT_ADDRESS send_addr = g_last_addr;
-            send_addr.Outbound = 0;
-            g_windivert_driver->send((const char*)packet, 20 + 8 + len, &send_addr);
+            NatEntry entry = NatTable::instance().get(sess->src_ip, ::ntohs(sess->src_port));
+            if (entry.original_dst_ip != 0) {
+                WINDIVERT_ADDRESS send_addr = entry.addr;
+                send_addr.Outbound = 0;
+                g_windivert_driver->send((const char*)packet, 20 + 8 + len, &send_addr);
+            }
         }
     }
 }
@@ -324,9 +320,12 @@ void send_dns_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     *(uint16_t*)(udp_hdr + 6) = calculate_udp_checksum(dst_ip, src_ip, udp_hdr, 8 + (int)resp.size());
 
     if (g_windivert_driver) {
-        WINDIVERT_ADDRESS send_addr = g_last_addr;
-        send_addr.Outbound = 0;
-        g_windivert_driver->send((const char*)packet, 20 + 8 + (int)resp.size(), &send_addr);
+        NatEntry entry = NatTable::instance().get(src_ip, ::ntohs(src_port));
+        if (entry.original_dst_ip != 0) {
+            WINDIVERT_ADDRESS send_addr = entry.addr;
+            send_addr.Outbound = 0;
+            g_windivert_driver->send((const char*)packet, 20 + 8 + (int)resp.size(), &send_addr);
+        }
     }
 }
 
@@ -377,9 +376,12 @@ void send_dns_empty_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port
     *(uint16_t*)(udp_hdr + 6) = calculate_udp_checksum(dst_ip, src_ip, udp_hdr, 8 + (int)resp.size());
 
     if (g_windivert_driver) {
-        WINDIVERT_ADDRESS send_addr = g_last_addr;
-        send_addr.Outbound = 0;
-        g_windivert_driver->send((const char*)packet, 20 + 8 + (int)resp.size(), &send_addr);
+        NatEntry entry = NatTable::instance().get(src_ip, ::ntohs(src_port));
+        if (entry.original_dst_ip != 0) {
+            WINDIVERT_ADDRESS send_addr = entry.addr;
+            send_addr.Outbound = 0;
+            g_windivert_driver->send((const char*)packet, 20 + 8 + (int)resp.size(), &send_addr);
+        }
     }
 }
 
@@ -465,14 +467,6 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                     // Parse and Log (updates cache internally)
                     parse_and_log_dns_response(payload, pkt_len, "Proxy (TCP)");
 
-                    // Re-parse just to get IP for send_dns_response construction?
-                    // Actually we need the IP to construct the UDP response. 
-                    // But wait, parse_and_log_dns_response does NOT return the IP.
-                    // We need to keep the original logic for constructing the response, 
-                    // OR modify the helper to return the IP.
-                    // For minimal risk, I will KEEP the original parsing logic for response construction,
-                    // but REMOVE the logging and cache update from it, since helper does it.
-                    
                     uint16_t flags = ::ntohs(*(uint16_t*)(payload + 2));
                     uint16_t an_count = ::ntohs(*(uint16_t*)(payload + 6));
                     
@@ -575,8 +569,8 @@ std::vector<uint8_t> build_dns_query(uint16_t id, const std::string& domain) {
             pos = next_dot + 1;
         }
         if (label.length() > 63) label = label.substr(0, 63); 
-        req.push_back((uint8_t)label.length());
-        for (char c : label) req.push_back(c);
+        resp.push_back((uint8_t)label.length());
+        for (char c : label) resp.push_back(c);
     }
     req.push_back(0); 
     
@@ -606,12 +600,6 @@ void udp_check_timeouts() {
 
 // Helper: Forward UDP packet directly
 void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
-    /*
-     LOG_DEBUG("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
-        src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ::ntohs(src_port),
-        dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ::ntohs(dst_port));
-    */
-
     uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
     Worker* w = WorkerPool::instance().get_worker(hash);
     if (!w) w = WorkerPool::instance().get_next_worker();
@@ -644,12 +632,11 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
                 return; 
             }
 
-            // Optimization 1: Bind to local port for Symmetric NAT behavior (STUN friendliness)
             sockaddr_in local_addr;
             memset(&local_addr, 0, sizeof(local_addr));
             local_addr.sin_family = AF_INET;
             local_addr.sin_addr.S_un.S_addr = INADDR_ANY;
-            local_addr.sin_port = 0; // Let OS assign random port directly (User Request)
+            local_addr.sin_port = 0;
 
             if (bind(sess->udp_sock, (sockaddr*)&local_addr, sizeof(local_addr)) != 0) {
                 closesocket(sess->udp_sock);
@@ -659,20 +646,13 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
 
             u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);
 
-            // Fix: Disable WSAECONNRESET to prevent UDP socket from dying on ICMP errors
             #ifndef SIO_UDP_CONNRESET
-
             #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
-
             #endif
-
             BOOL bNewBehavior = FALSE;
-
             DWORD dwBytesReturned = 0;
-
             WSAIoctl(sess->udp_sock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
 
-            // Optimization 2: Increase UDP Buffer for Video/Streaming (Correct 1MB)
             int buf_size = 1024 * 1024; 
             setsockopt(sess->udp_sock, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
             setsockopt(sess->udp_sock, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
@@ -709,7 +689,6 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
 void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
     uint16_t dport_h = ::ntohs(dst_port);
 
-    // 0. Drop Noisy Protocols (mDNS, NetBIOS, SSDP) - Check FIRST
     if (dport_h == 5353 ||  // mDNS
         dport_h == 5355 ||  // LLMNR
         dport_h == 137 ||   // NetBIOS Name Service
@@ -719,7 +698,6 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         return; // Drop immediately
     }
 
-    // 1. Rule Check (Highest Priority)
     RouteAction ip_action = RuleManager::instance().match_ip(::ntohl(dst_ip));
     if (ip_action == RouteAction::BLOCK) {
         LOG_INFO("[UDP] Blocked by rule: %d.%d.%d.%d", dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF);
@@ -731,7 +709,6 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         return;
     }
 
-    // 2. UDP 443 (QUIC) Optimization
     if (dst_port == ::htons(443)) {
         bool cn = GeoChecker::instance().is_cn_ip(::ntohl(dst_ip));
         if (!cn) {
@@ -743,27 +720,23 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         return;
     }
 
-    // 3. UDP 53 (DNS) Optimization
     if (dst_port == ::htons(53)) {
         int qname_len = 0;
         std::string full_domain = parse_dns_qname(payload, len, &qname_len);
         
         if (!full_domain.empty()) {
             LOG_INFO("[UDP] DNS Query: %s", full_domain.c_str());
-            // NCSI Hijacking to make Windows/Phone happy immediately
             if (full_domain.find("msftncsi") != std::string::npos || 
                 full_domain.find("msftconnecttest") != std::string::npos ||
                 full_domain.find("connectivitycheck") != std::string::npos) {
                 
                 uint16_t id = *(uint16_t*)payload;
-                // Resolve to a typical MS NCSI IP or any valid IP to satisfy the check
                 uint32_t ncsi_ip = inet_addr("131.107.255.255");
                 send_dns_response(src_ip, dst_ip, src_port, dst_port, id, full_domain, ncsi_ip);
                 LOG_INFO("[DNS] Hijacked NCSI check for: %s", full_domain.c_str());
                 return;
             }
 
-            // Rule Check for Domain
             RouteAction dom_action = RuleManager::instance().match_domain(full_domain);
             if (dom_action == RouteAction::BLOCK) {
                 LOG_INFO("[DNS] Blocked by rule: %s", full_domain.c_str());
