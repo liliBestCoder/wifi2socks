@@ -83,7 +83,8 @@ int main() {
     }
 
     // 1. Initialize WinDivert
-    static WinDivertDriver divert("ip");
+    // 使用与 netdump 类似的过滤器，确保能抓到来自客户端的 inbound 流量
+    static WinDivertDriver divert("ip and (ip.SrcAddr == 192.168.11.0/24 or ip.DstAddr == 192.168.11.0/24)");
     set_windivert_driver(&divert);
     WinDivertDriver::PacketHandler handler = [](const char* packet, size_t length, const WINDIVERT_ADDRESS* addr) {
         std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
