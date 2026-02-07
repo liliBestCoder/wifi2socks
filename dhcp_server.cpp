@@ -10,7 +10,7 @@
 #pragma comment(lib, "ws2_32.lib")
 
 // DHCP Message Structure (simplified)
-#pragma pack(push, 1) // ���� 1 �ֽڶ���
+#pragma pack(push, 1) 
 struct DHCP_Message {
     uint8_t op;
     uint8_t htype;
@@ -28,7 +28,7 @@ struct DHCP_Message {
     uint8_t file[128];
     uint8_t options[312];
 };
-#pragma pack(pop) // �ָ�Ĭ�϶���
+#pragma pack(pop) 
 
 DhcpServer::DhcpServer(const std::string& listen_ip, int listen_port)
     : listen_ip_(listen_ip), listen_port_(listen_port), sock_(INVALID_SOCKET), running_(false) {}
@@ -107,148 +107,100 @@ void DhcpServer::run() {
     }
 }
 
-// Very basic DHCP message handling
 void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in& client_addr) {
-    if (size < 240) {
-        return;
-    }
+    if (size < 240) return;
     auto* msg = (DHCP_Message*)buffer;
-
-    if (msg->op != 1) { // 1 = BOOTREQUEST
-        return;
-    }
+    if (msg->op != 1) return;
 
     uint8_t dhcp_message_type = 0;
     uint8_t* options = msg->options;
+    if (memcmp(options, "\x63\x82\x53\x63", 4) != 0) return;
     
-    // Magic cookie
-    if (memcmp(options, "\x63\x82\x53\x63", 4) != 0) {
-        return;
-    }
     options += 4;
     int option_len_rem = sizeof(msg->options) - 4;
-
-    // Find DHCP Message Type option
     while (option_len_rem > 0 && *options != 255) {
         uint8_t opt_code = *options++;
         uint8_t opt_len = *options++;
         option_len_rem -= 2;
-        if (opt_code == 53) { // DHCP Message Type
+        if (opt_code == 53) {
             dhcp_message_type = *options;
         }
         options += opt_len;
         option_len_rem -= opt_len;
     }
 
+    // Prepare shared IP info
+    uint32_t server_ip_addr;
+    inet_pton(AF_INET, listen_ip_.c_str(), &server_ip_addr);
+    uint32_t client_ip_addr = server_ip_addr;
+    ((uint8_t*)&client_ip_addr)[3] = 2; // Assign .2 to client
+
     if (dhcp_message_type == 1) { // DHCPDISCOVER
-        LOG_INFO("DHCPDISCOVER received");
-        
         DHCP_Message offer_msg = {0};
-        offer_msg.op = 2; // BOOTREPLY
+        offer_msg.op = 2; 
         offer_msg.htype = msg->htype;
         offer_msg.hlen = msg->hlen;
         offer_msg.xid = msg->xid;
         offer_msg.flags = msg->flags;
         memcpy(offer_msg.chaddr, msg->chaddr, 16);
         
-        // Use an IP in the same subnet as listen_ip
-        uint32_t server_ip_addr;
-        inet_pton(AF_INET, listen_ip_.c_str(), &server_ip_addr);
-        uint32_t client_ip_addr = server_ip_addr;
-        ((uint8_t*)&client_ip_addr)[3] = 2; // Assume .2 for now, simple 
-        
         offer_msg.yiaddr = client_ip_addr;
         offer_msg.siaddr = server_ip_addr;
 
         uint8_t* offer_options = offer_msg.options;
-        memcpy(offer_options, "\x63\x82\x53\x63", 4); // Magic cookie
+        memcpy(offer_options, "\x63\x82\x53\x63", 4); 
         offer_options += 4;
 
-        // DHCP Message Type: Offer
         *offer_options++ = 53; *offer_options++ = 1; *offer_options++ = 2; // DHCPOFFER
-
-        // Subnet Mask
-        *offer_options++ = 1; *offer_options++ = 4;
+        *offer_options++ = 1; *offer_options++ = 4; // Mask
         inet_pton(AF_INET, "255.255.255.0", offer_options); offer_options += 4;
-
-        // Router (Gateway)
-        *offer_options++ = 3; *offer_options++ = 4;
-        inet_pton(AF_INET, listen_ip_.c_str(), offer_options); offer_options += 4;
-
-        // DNS Server
-        *offer_options++ = 6; *offer_options++ = 4;
-        inet_pton(AF_INET, listen_ip_.c_str(), offer_options); offer_options += 4;
-        
-        // Lease Time
-        *offer_options++ = 51; *offer_options++ = 4;
-        uint32_t lease_time = htonl(86400); // 24 hours
-        memcpy(offer_options, &lease_time, 4); offer_options += 4;
-        
-        // End option
+        *offer_options++ = 3; *offer_options++ = 4; // Router
+        memcpy(offer_options, &server_ip_addr, 4); offer_options += 4;
+        *offer_options++ = 6; *offer_options++ = 4; // DNS
+        memcpy(offer_options, &server_ip_addr, 4); offer_options += 4;
+        *offer_options++ = 51; *offer_options++ = 4; // Lease
+        uint32_t lease_time = htonl(86400); memcpy(offer_options, &lease_time, 4); offer_options += 4;
         *offer_options++ = 255;
 
         sockaddr_in broadcast_addr;
         broadcast_addr.sin_family = AF_INET;
         broadcast_addr.sin_port = htons(68);
         broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
-
         sendto(sock_, (char*)&offer_msg, sizeof(offer_msg), 0, (sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
-        LOG_INFO("DHCPOFFER sent");
+        LOG_INFO("DHCPOFFER: Assigned %d.%d.%d.%d", ((uint8_t*)&client_ip_addr)[0], ((uint8_t*)&client_ip_addr)[1], ((uint8_t*)&client_ip_addr)[2], ((uint8_t*)&client_ip_addr)[3]);
 
     } else if (dhcp_message_type == 3) { // DHCPREQUEST
-        LOG_INFO("DHCPREQUEST received");
-
         DHCP_Message ack_msg = {0};
-        ack_msg.op = 2; // BOOTREPLY
+        ack_msg.op = 2; 
         ack_msg.htype = msg->htype;
         ack_msg.hlen = msg->hlen;
         ack_msg.xid = msg->xid;
         ack_msg.flags = msg->flags;
         memcpy(ack_msg.chaddr, msg->chaddr, 16);
 
-        // Use same IP calculation as OFFER
-        uint32_t server_ip_addr;
-        inet_pton(AF_INET, listen_ip_.c_str(), &server_ip_addr);
-        uint32_t client_ip_addr = server_ip_addr;
-        ((uint8_t*)&client_ip_addr)[3] = 2;
-
         ack_msg.yiaddr = client_ip_addr;
         ack_msg.siaddr = server_ip_addr;
 
         uint8_t* ack_options = ack_msg.options;
-        memcpy(ack_options, "\x63\x82\x53\x63", 4); // Magic cookie
+        memcpy(ack_options, "\x63\x82\x53\x63", 4); 
         ack_options += 4;
 
-        // DHCP Message Type: Ack
         *ack_options++ = 53; *ack_options++ = 1; *ack_options++ = 5; // DHCPACK
-
-        // Subnet Mask
         *ack_options++ = 1; *ack_options++ = 4;
         inet_pton(AF_INET, "255.255.255.0", ack_options); ack_options += 4;
-
-        // Router (Gateway)
         *ack_options++ = 3; *ack_options++ = 4;
-        inet_pton(AF_INET, listen_ip_.c_str(), ack_options); ack_options += 4;
-
-        // DNS Server
+        memcpy(ack_options, &server_ip_addr, 4); ack_options += 4;
         *ack_options++ = 6; *ack_options++ = 4;
-        inet_pton(AF_INET, listen_ip_.c_str(), ack_options); ack_options += 4;
-
-        // Lease Time
+        memcpy(ack_options, &server_ip_addr, 4); ack_options += 4;
         *ack_options++ = 51; *ack_options++ = 4;
-        uint32_t lease_time = htonl(86400); // 24 hours
-        memcpy(ack_options, &lease_time, 4); ack_options += 4;
-
-        // End option
+        uint32_t lease_time = htonl(86400); memcpy(ack_options, &lease_time, 4); ack_options += 4;
         *ack_options++ = 255;
 
         sockaddr_in broadcast_addr;
         broadcast_addr.sin_family = AF_INET;
         broadcast_addr.sin_port = htons(68);
         broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
-
         sendto(sock_, (char*)&ack_msg, sizeof(ack_msg), 0, (sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
-        LOG_INFO("DHCPACK sent");
+        LOG_INFO("DHCPACK: Assigned %d.%d.%d.%d", ((uint8_t*)&client_ip_addr)[0], ((uint8_t*)&client_ip_addr)[1], ((uint8_t*)&client_ip_addr)[2], ((uint8_t*)&client_ip_addr)[3]);
     }
-
 }

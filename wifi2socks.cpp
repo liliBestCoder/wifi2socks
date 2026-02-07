@@ -122,7 +122,7 @@ int main() {
     pcb = tcp_listen(pcb);
     tcp_accept(pcb, tcp_proxy_accept);
 
-    LOG_INFO("[CORE] LwIP Stack Running. Proxy: %s:%d, WiFi Net: 192.168.137.0/24", g_config.proxy_ip.c_str(), g_config.proxy_port);
+    LOG_INFO("[CORE] LwIP Stack Running. Proxy: %s:%d, WiFi Gateway: %s", g_config.proxy_ip.c_str(), g_config.proxy_port, g_config.tap_ip.c_str());
 
     SimpleHttpServer::instance().start(g_config.http_api_port);
 
