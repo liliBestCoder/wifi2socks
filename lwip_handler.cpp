@@ -29,6 +29,11 @@ extern "C" void lwip_win32_platform_diag(const char *format, ...) {
     OutputDebugStringA(buf); va_end(ap);
 }
 
+// Fix LNK2019: unresolved external symbol lwip_strerr
+extern "C" const char* lwip_strerr(int8_t err) {
+    return "LwIP_Error";
+}
+
 // --- Checksum Helpers ---
 uint16_t ip_chksum_simple(void* dataptr, int len) {
     uint32_t acc = 0;
