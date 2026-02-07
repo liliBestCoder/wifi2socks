@@ -1,6 +1,7 @@
 #include "nat_table.h"
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <cstring>
 #include <fstream>
 #include <algorithm>
 #include <vector>
@@ -34,7 +35,7 @@ NatEntry NatTable::get(uint32_t src_ip, uint16_t src_port) {
         it->second.last_active = GetTickCount64();
         return it->second;
     }
-    NatEntry empty = {0};
+    NatEntry empty{};
     return empty;
 }
 
@@ -46,7 +47,7 @@ NatEntry NatTable::get_by_port(uint16_t local_src_port) {
             return pair.second;
         }
     }
-    NatEntry empty = {0};
+    NatEntry empty{};
     return empty;
 }
 

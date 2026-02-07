@@ -6,6 +6,7 @@
 #include <vector>
 #include <iostream>
 #include <stdarg.h>
+#include <cstring>
 
 std::recursive_mutex g_lwip_mtx;
 struct netif g_netif;

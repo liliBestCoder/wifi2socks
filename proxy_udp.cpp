@@ -16,6 +16,7 @@
 #include <deque>
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 
 // Global IP ID counter for outbound UDP
 static std::atomic<uint16_t> g_udp_ip_id(1000);
@@ -569,8 +570,8 @@ std::vector<uint8_t> build_dns_query(uint16_t id, const std::string& domain) {
             pos = next_dot + 1;
         }
         if (label.length() > 63) label = label.substr(0, 63); 
-        resp.push_back((uint8_t)label.length());
-        for (char c : label) resp.push_back(c);
+        req.push_back((uint8_t)label.length());
+        for (char c : label) req.push_back(c);
     }
     req.push_back(0); 
     

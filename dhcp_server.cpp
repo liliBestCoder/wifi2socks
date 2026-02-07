@@ -3,6 +3,7 @@
 #include "logger.h"
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
+#include <cstring>
 #include <cstdint>
 #include <vector>
 

@@ -640,7 +640,7 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
 
 err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
     uint16_t client_port = newpcb->remote_port;
-    NatEntry target = NatTable::instance().get(client_port);
+    NatEntry target = NatTable::instance().get(newpcb->remote_ip.addr, client_port);
     if (target.original_dst_ip == 0) return ERR_ABRT;
     tcp_nagle_disable(newpcb);
     
