@@ -709,10 +709,6 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
 void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
     uint16_t dport_h = ::ntohs(dst_port);
 
-    LOG_INFO("[UDP] handle_udp_packet: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d (%d bytes)",
-        src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ::ntohs(src_port),
-        dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, dport_h, len);
-
     // 0. Drop Noisy Protocols (mDNS, NetBIOS, SSDP) - Check FIRST
     if (dport_h == 5353 ||  // mDNS
         dport_h == 5355 ||  // LLMNR
@@ -887,6 +883,5 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         }
     }
 
-    LOG_INFO("[UDP] Final Forward: %d.%d.%d.%d:%d", dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, dport_h);
     forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);
 }

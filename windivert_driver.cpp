@@ -62,9 +62,6 @@ void WinDivertDriver::run() {
             continue;
         }
 
-        // 调试日志
-        LOG_INFO("WinDivert captured %u bytes", read_len);
-
         if (packet_handler_) {
             packet_handler_(packet_buffer_.data(), (size_t)read_len, &addr);
         }

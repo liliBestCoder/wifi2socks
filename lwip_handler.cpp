@@ -124,10 +124,6 @@ static u8_t lwip_udp_raw_recv(void* arg, struct raw_pcb* pcb, struct pbuf* p, co
                 uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
                 uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
                 
-                LOG_INFO("[LwIP] UDP packet to raw_recv: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d (%d bytes)",
-                    ip4_addr1_16(&ip->src), ip4_addr2_16(&ip->src), ip4_addr3_16(&ip->src), ip4_addr4_16(&ip->src), ntohs(src_port),
-                    ip4_addr1_16(&ip->dest), ip4_addr2_16(&ip->dest), ip4_addr3_16(&ip->dest), ip4_addr4_16(&ip->dest), ntohs(dst_port), len);
-
                 // Recover original destination from NAT table
                 NatEntry target = NatTable::instance().get(ntohs(src_port));
                 uint32_t real_dst_ip = ip->dest.addr;
@@ -136,8 +132,6 @@ static u8_t lwip_udp_raw_recv(void* arg, struct raw_pcb* pcb, struct pbuf* p, co
                 if (target.original_dst_ip != 0) {
                     real_dst_ip = target.original_dst_ip;
                     real_dst_port = target.original_dst_port;
-                    LOG_INFO("[LwIP] Recovered UDP destination: %d.%d.%d.%d:%d",
-                        real_dst_ip & 0xFF, (real_dst_ip >> 8) & 0xFF, (real_dst_ip >> 16) & 0xFF, (real_dst_ip >> 24) & 0xFF, ntohs(real_dst_port));
                 }
 
                 // Check if it's local traffic that should be bypassed
@@ -192,17 +186,10 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
     if (IPH_V(ip) == 4) {
         if (ntohs(IPH_LEN(ip)) > len) return;
 
-        // 添加详细的包处理日志
-        char src_ip[16], dst_ip[16];
-        ip4addr_ntoa_r((const ip4_addr_t*)&(ip->src), src_ip, sizeof(src_ip));
-        ip4addr_ntoa_r((const ip4_addr_t*)&(ip->dest), dst_ip, sizeof(dst_ip));
-        LOG_INFO("[LwIP] Received packet: %s -> %s (%d bytes)", src_ip, dst_ip, len);
-
         ip4_addr_t lwip_ip;
         ip4addr_aton("192.168.11.1", &lwip_ip);
 
         if (IPH_PROTO(ip) == IP_PROTO_UDP) {
-            LOG_INFO("[LwIP] Identifying UDP packet, len=%d", len);
             uint16_t frag_off = ::ntohs(IPH_OFFSET(ip));
             bool is_fragment = (frag_off & (IP_OFFMASK | IP_MF)) != 0;
             bool is_first_fragment = (frag_off & IP_OFFMASK) == 0;
