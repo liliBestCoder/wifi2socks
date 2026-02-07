@@ -167,6 +167,9 @@ err_t netif_init_cb(struct netif* netif) {
     if (pcb) {
         raw_bind(pcb, IP_ADDR_ANY);
         raw_recv(pcb, lwip_udp_raw_recv, NULL);
+        LOG_INFO("[LwIP] Registered raw_pcb for protocol %d", IP_PROTO_UDP);
+    } else {
+        LOG_ERROR("[LwIP] Failed to create raw_pcb for UDP");
     }
 
     return ERR_OK;
@@ -209,6 +212,7 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
             ip->dest.addr = lwip_ip.addr;
             IPH_CHKSUM_SET(ip, 0);
             IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+            LOG_INFO("[LwIP] Injected UDP packet redirected to 192.168.11.1");
         }
 
         // All traffic is from clients, going to the internet.
@@ -267,7 +271,9 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
         struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         if (p) {
             pbuf_take(p, buf, len);
-            if (g_netif.input(p, &g_netif) != ERR_OK) {
+            err_t input_err = g_netif.input(p, &g_netif);
+            if (input_err != ERR_OK) {
+                LOG_ERROR("[LwIP] netif.input failed with error %d", (int)input_err);
                 pbuf_free(p);
             }
         }

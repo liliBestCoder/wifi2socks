@@ -44,7 +44,14 @@
 #define CHECKSUM_GEN_UDP                1
 #define CHECKSUM_GEN_TCP                1
 
-// --- 6. PLATFORM ---
+// --- 6. DEBUGGING ---
+#define LWIP_DEBUG                      1
+#define IP_DEBUG                        LWIP_DBG_ON
+#define RAW_DEBUG                       LWIP_DBG_ON
+#define UDP_DEBUG                       LWIP_DBG_ON
+#define NETIF_DEBUG                     LWIP_DBG_ON
+
+// --- 7. PLATFORM ---
 // Let LwIP define its own types for its core files
 #define LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS 0
 #define LWIP_TIMEVAL_PRIVATE 1
