@@ -2,6 +2,8 @@
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include "wifi_ap.h"
+#include "app_config.h"
+#include "logger.h"
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -12,9 +14,9 @@
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 
-// ¸¨Öúº¯Êý£ºÐÞ¸ÄIP
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Þ¸ï¿½IP
 bool ForceSetStaticIP(const std::string& targetIp);
-// ¸¨Öúº¯Êý£ºÍ£Ö¹ICS·þÎñ
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Í£Ö¹ICSï¿½ï¿½ï¿½ï¿½
 void StopICSService();
 
 using namespace ABI::Windows::Foundation;
@@ -26,7 +28,7 @@ using namespace ABI::Windows::Networking;
 using namespace Microsoft::WRL;
 using namespace Microsoft::WRL::Wrappers;
 
-// ÀàÐÍ¶¨Òå
+// ï¿½ï¿½ï¿½Í¶ï¿½ï¿½ï¿½
 typedef __FITypedEventHandler_2_Windows__CDevices__CWiFiDirect__CWiFiDirectConnectionListener_Windows__CDevices__CWiFiDirect__CWiFiDirectConnectionRequestedEventArgs ConnectionRequestedHandler;
 typedef __FITypedEventHandler_2_Windows__CDevices__CWiFiDirect__CWiFiDirectAdvertisementPublisher_Windows__CDevices__CWiFiDirect__CWiFiDirectAdvertisementPublisherStatusChangedEventArgs StatusChangedHandler;
 typedef __FITypedEventHandler_2_Windows__CDevices__CWiFiDirect__CWiFiDirectDevice_IInspectable ConnectionStatusChangedHandler;
@@ -48,7 +50,7 @@ WiFiAPManager::~WiFiAPManager() {
 void WiFiAPManager::SetSSID(const std::wstring& ssid) { _ssid = ssid; _ssidProvided = true; }
 void WiFiAPManager::SetPassphrase(const std::wstring& passphrase) { _passphrase = passphrase; _passphraseProvided = true; }
 
-// --- ²¹È« CheckKeepAlive ÊµÏÖ£¬½â¾öÁ´½Ó´íÎó ---
+// --- ï¿½ï¿½È« CheckKeepAlive Êµï¿½Ö£ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó´ï¿½ï¿½ï¿½ ---
 void WiFiAPManager::CheckKeepAlive() {
     std::vector<std::wstring> to_remove;
     for (auto& pair : _connectedDevices) {
@@ -70,7 +72,7 @@ void WiFiAPManager::CheckKeepAlive() {
 }
 
 void WiFiAPManager::Start() {
-    // Æô¶¯Ç°ÏÈ³¢ÊÔÍ£Ö¹ ICS ·þÎñ£¬·ÀÖ¹ÆäËø¶¨ IP 137.1
+    // ï¿½ï¿½ï¿½ï¿½Ç°ï¿½È³ï¿½ï¿½ï¿½Í£Ö¹ ICS ï¿½ï¿½ï¿½ñ£¬·ï¿½Ö¹ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ IP 137.1
     StopICSService();
 
     HRESULT hr = S_OK;
@@ -137,11 +139,11 @@ void WiFiAPManager::StartListener() {
 
                 if (_listener) _listener->OnDeviceConnected(L"Connected Device");
 
-                // Òì²½ÉèÖÃ IP£¬Ôö¼ÓÖØÊÔ»úÖÆ
+                // ï¿½ì²½ï¿½ï¿½ï¿½ï¿½ IPï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ô»ï¿½ï¿½ï¿½
                 std::thread([]() {
-                    for (int i = 0; i < 3; ++i) { // ³¢ÊÔ3´Î
+                    for (int i = 0; i < 3; ++i) { // ï¿½ï¿½ï¿½ï¿½3ï¿½ï¿½
                         std::this_thread::sleep_for(std::chrono::seconds(2));
-                        if (ForceSetStaticIP("192.168.11.1")) break;
+                        if (ForceSetStaticIP(g_config.tap_ip)) break;
                     }
                     }).detach();
             }
@@ -159,7 +161,7 @@ void WiFiAPManager::Reset() {
     _connectionListener.Reset();
 }
 
-// ºËÐÄ£ºÇ¿ÖÆÉèÖÃ¾²Ì¬IP
+// ï¿½ï¿½ï¿½Ä£ï¿½Ç¿ï¿½ï¿½ï¿½ï¿½ï¿½Ã¾ï¿½Ì¬IP
 bool ForceSetStaticIP(const std::string& targetIp) {
     ULONG bufferSize = 0;
     GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, nullptr, &bufferSize);
@@ -171,10 +173,10 @@ bool ForceSetStaticIP(const std::string& targetIp) {
 
     for (auto pCurr = pAddresses; pCurr; pCurr = pCurr->Next) {
         std::wstring desc = pCurr->Description;
-        // ÐÞÕý£ºÄ£ºýÆ¥Åä£¬ÊÊÅä²»Í¬±àºÅµÄ Virtual Adapter
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ä£ï¿½ï¿½Æ¥ï¿½ä£¬ï¿½ï¿½ï¿½ä²»Í¬ï¿½ï¿½Åµï¿½ Virtual Adapter
         if (desc.find(L"Wi-Fi Direct Virtual Adapter") != std::wstring::npos) {
 
-            // É¾³ý¾ÉµÄ IPv4 µØÖ·£¨°üÀ¨ 137.1£©
+            // É¾ï¿½ï¿½ï¿½Éµï¿½ IPv4 ï¿½ï¿½Ö·ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ 137.1ï¿½ï¿½
             for (auto pUnicast = pCurr->FirstUnicastAddress; pUnicast; pUnicast = pUnicast->Next) {
                 if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
                     MIB_UNICASTIPADDRESS_ROW row;
@@ -186,7 +188,7 @@ bool ForceSetStaticIP(const std::string& targetIp) {
                 }
             }
 
-            // ²åÈë 11.1
+            // ï¿½ï¿½ï¿½ï¿½ 11.1
             MIB_UNICASTIPADDRESS_ROW newRow;
             InitializeUnicastIpAddressEntry(&newRow);
             newRow.InterfaceLuid = pCurr->Luid;
@@ -201,7 +203,7 @@ bool ForceSetStaticIP(const std::string& targetIp) {
     return false;
 }
 
-// Í£Ö¹ ICS ·þÎñÒÔ½â³ý¶ÔÐéÄâÍø¿¨µÄËø¶¨
+// Í£Ö¹ ICS ï¿½ï¿½ï¿½ï¿½ï¿½Ô½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 void StopICSService() {
     SC_HANDLE scm = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (scm) {
