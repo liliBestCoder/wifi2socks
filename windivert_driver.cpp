@@ -5,7 +5,7 @@
 #pragma comment(lib, "WinDivert.lib")
 
 WinDivertDriver::WinDivertDriver(const std::string& filter)
-    : handle_(INVALID_HANDLE_VALUE), filter_(filter), running_(false), packet_buffer_(WINDIVERT_MTU) {}
+    : handle_(INVALID_HANDLE_VALUE), filter_(filter), running_(false), packet_buffer_(WINDIVERT_MTU_MAX) {}
 
 WinDivertDriver::~WinDivertDriver() {
     stop();
@@ -57,7 +57,7 @@ void WinDivertDriver::run() {
         }
 
         // 校验捕获长度，防止异常数据
-        if (read_len == 0 || read_len > WINDIVERT_MTU) {
+        if (read_len == 0 || read_len > WINDIVERT_MTU_MAX) {
             LOG_ERROR("WinDivert captured invalid length: %u bytes.", read_len);
             continue;
         }
