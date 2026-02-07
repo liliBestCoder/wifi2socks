@@ -3,6 +3,14 @@
 #include <sstream>
 #include <thread>
 #include <vector>
+#include <iphlpapi.h>
+#include <ws2tcpip.h>
+#include <string>
+
+#pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "ws2_32.lib")
+
+void SetStaticIPOnWiFiAdapter();
 
 using namespace ABI::Windows::Foundation;
 using namespace ABI::Windows::Foundation::Collections;
@@ -357,6 +365,9 @@ void WiFiAPManager::StartListener()
                         {
                             _listener->OnDeviceConnected(remoteHostNameDisplay.GetRawBuffer(nullptr) ? remoteHostNameDisplay.GetRawBuffer(nullptr) : L"Unknown");
                         }
+
+                        // Set static IP for the virtual adapter
+                        SetStaticIPOnWiFiAdapter();
                     }
                     else
                     {
@@ -432,4 +443,70 @@ void WiFiAPManager::Reset()
 
     _connectedDevices.clear();
     _connectedDeviceStatusChangedTokens.clear();
+}
+
+void SetStaticIPOnWiFiAdapter()
+{
+    ULONG bufferSize = 0;
+    if (GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, nullptr, &bufferSize) != ERROR_BUFFER_OVERFLOW)
+    {
+        // Failed to get buffer size
+        return;
+    }
+
+    std::vector<BYTE> buffer(bufferSize);
+    IP_ADAPTER_ADDRESSES* pAddresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+    if (GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, pAddresses, &bufferSize) != NO_ERROR)
+    {
+        // Failed to get adapters
+        return;
+    }
+
+    IP_ADAPTER_ADDRESSES* pCurrAddresses = pAddresses;
+    while (pCurrAddresses)
+    {
+        if (std::wstring(pCurrAddresses->Description).find(L"Microsoft Wi-Fi Direct Virtual Adapter") != std::wstring::npos)
+        {
+            if (pCurrAddresses->OperStatus == IfOperStatusUp)
+            {
+                // Found the active Wi-Fi Direct adapter. Now set its IP.
+                MIB_UNICASTIPADDRESS_ROW newAddress;
+                InitializeUnicastIpAddressEntry(&newAddress);
+
+                newAddress.Address.Ipv4.sin_family = AF_INET;
+                newAddress.InterfaceLuid = pCurrAddresses->Luid;
+                newAddress.OnLinkPrefixLength = 24; // Corresponds to 255.255.255.0
+                newAddress.DadState = IpDadStatePreferred;
+
+                // Set the IP address to 192.168.137.1
+                inet_pton(AF_INET, "192.168.137.1", &newAddress.Address.Ipv4.sin_addr);
+                
+                // Check if an IP address already exists. If so, delete it first.
+                // This is to handle re-connection scenarios.
+                for (IP_ADAPTER_UNICAST_ADDRESS* pUnicast = pCurrAddresses->FirstUnicastAddress; pUnicast != nullptr; pUnicast = pUnicast->Next)
+                {
+                    if (pUnicast->Address.lpSockaddr->sa_family == AF_INET)
+                    {
+                        // An IPv4 address exists, delete it.
+                        DeleteUnicastIpAddressEntry((MIB_UNICASTIPADDRESS_ROW*)pUnicast);
+                    }
+                }
+
+                HRESULT hr = CreateUnicastIpAddressEntry(&newAddress);
+                if (hr != NO_ERROR)
+                {
+                    // Log error if you have a logger
+                    // std::wcerr << L"Failed to set IP address. Error code: " << hr << std::endl;
+                }
+                else
+                {
+                    // std::wcout << L"Successfully set IP address 192.168.137.1 on " << pCurrAddresses->FriendlyName << std::endl;
+                }
+
+                // Assuming we only want to configure one adapter
+                break;
+            }
+        }
+        pCurrAddresses = pCurrAddresses->Next;
+    }
 }

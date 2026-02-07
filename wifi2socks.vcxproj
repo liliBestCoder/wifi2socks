@@ -84,7 +84,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y /d "$(ProjectDir)wintun.dll" "$(OutDir)"</Command>
+      <Command>xcopy /y /d "$(ProjectDir)WinDivert.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -103,7 +103,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y /d "$(ProjectDir)wintun.dll" "$(OutDir)"</Command>
+      <Command>xcopy /y /d "$(ProjectDir)WinDivert.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -120,7 +120,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y /d "$(ProjectDir)wintun.dll" "$(OutDir)"</Command>
+      <Command>xcopy /y /d "$(ProjectDir)WinDivert.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -139,7 +139,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y /d "$(ProjectDir)wintun.dll" "$(OutDir)"</Command>
+      <Command>xcopy /y /d "$(ProjectDir)WinDivert.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -154,13 +154,13 @@
     <ClCompile Include="nat_table.cpp" />
     <ClCompile Include="geo_checker.cpp" />
     <ClCompile Include="tls_parser.cpp" />
-    <ClCompile Include="tun_driver.cpp" />
+    <ClCompile Include="dhcp_server.cpp" />
+    <ClCompile Include="windivert_driver.cpp" />
     <ClCompile Include="proxy_tcp.cpp" />
     <ClCompile Include="proxy_udp.cpp" />
     <ClCompile Include="wifi_ap.cpp" />
     <ClCompile Include="wifi_ap_listener.cpp" />
     <ClCompile Include="lwip_handler.cpp" />
-    <ClCompile Include="ics_manager.cpp" />
     <ClCompile Include="main_dispatcher.cpp" />
     <ClCompile Include="connection_pool.cpp" />
     <ClCompile Include="lwip\src\core\init.c" />
@@ -206,14 +206,15 @@
     <ClInclude Include="logger.h" />
     <ClInclude Include="nat_table.h" />
     <ClInclude Include="tls_parser.h" />
-    <ClInclude Include="tun_driver.h" />
+    <ClInclude Include="dhcp_server.h" />
+    <ClInclude Include="windivert_driver.h" />
+    <ClInclude Include="windivert.h" />
     <ClInclude Include="wintun.h" />
     <ClInclude Include="proxy_tcp.h" />
     <ClInclude Include="proxy_udp.h" />
     <ClInclude Include="wifi_ap.h" />
     <ClInclude Include="wifi_ap_listener.h" />
     <ClInclude Include="lwip_handler.h" />
-    <ClInclude Include="ics_manager.h" />
     <ClInclude Include="connection_pool.h" />
     <ClInclude Include="lwip_includes.h" />
   </ItemGroup>
