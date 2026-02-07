@@ -91,7 +91,6 @@ int main() {
         TrafficManager::instance().report_tap_tx(length); // Use same traffic counter
         process_ip_packet(packet, (int)length, addr);
     };
-    divert.start(handler);
 
     // 2. Initialize Worker Pool
     WorkerPool::instance().init(8);
@@ -108,6 +107,9 @@ int main() {
     netif_add(&g_netif, &gw, &mask, &ip, NULL, netif_init_cb, ip_input);
     netif_set_default(&g_netif);
     netif_set_up(&g_netif);
+
+    // Start WinDivert capture AFTER LwIP is ready
+    divert.start(handler);
 
     // 5. Setup TCP Listener (Transparent Proxy)
     struct tcp_pcb* pcb = tcp_new();

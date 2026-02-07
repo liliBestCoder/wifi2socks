@@ -709,6 +709,10 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
 void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
     uint16_t dport_h = ::ntohs(dst_port);
 
+    LOG_INFO("[UDP] handle_udp_packet: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d (%d bytes)",
+        src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ::ntohs(src_port),
+        dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, dport_h, len);
+
     // 0. Drop Noisy Protocols (mDNS, NetBIOS, SSDP) - Check FIRST
     if (dport_h == 5353 ||  // mDNS
         dport_h == 5355 ||  // LLMNR
@@ -721,8 +725,12 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
 
     // 1. Rule Check (Highest Priority)
     RouteAction ip_action = RuleManager::instance().match_ip(::ntohl(dst_ip));
-    if (ip_action == RouteAction::BLOCK) return;
+    if (ip_action == RouteAction::BLOCK) {
+        LOG_INFO("[UDP] Blocked by rule: %d.%d.%d.%d", dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF);
+        return;
+    }
     if (ip_action == RouteAction::DIRECT) {
+        LOG_INFO("[UDP] Rule DIRECT for: %d.%d.%d.%d", dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF);
         forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);
         return;
     }
@@ -731,7 +739,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     if (dst_port == ::htons(443)) {
         bool cn = GeoChecker::instance().is_cn_ip(::ntohl(dst_ip));
         if (!cn) {
-            LOG_INFO("[UDP] Blocked Google QUIC: %d.%d.%d.%d:443\n", 
+            LOG_INFO("[UDP] Blocked Google QUIC: %d.%d.%d.%d:443", 
                 dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF);
             return;
         }
@@ -745,6 +753,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         std::string full_domain = parse_dns_qname(payload, len, &qname_len);
         
         if (!full_domain.empty()) {
+            LOG_INFO("[UDP] DNS Query: %s", full_domain.c_str());
             // NCSI Hijacking to make Windows/Phone happy immediately
             if (full_domain.find("msftncsi") != std::string::npos || 
                 full_domain.find("msftconnecttest") != std::string::npos ||
@@ -754,13 +763,14 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                 // Resolve to a typical MS NCSI IP or any valid IP to satisfy the check
                 uint32_t ncsi_ip = inet_addr("131.107.255.255");
                 send_dns_response(src_ip, dst_ip, src_port, dst_port, id, full_domain, ncsi_ip);
-                LOG_INFO("[DNS] Hijacked NCSI check for: %s\n", full_domain.c_str());
+                LOG_INFO("[DNS] Hijacked NCSI check for: %s", full_domain.c_str());
                 return;
             }
 
             // Rule Check for Domain
             RouteAction dom_action = RuleManager::instance().match_domain(full_domain);
             if (dom_action == RouteAction::BLOCK) {
+                LOG_INFO("[DNS] Blocked by rule: %s", full_domain.c_str());
                 uint16_t id = *(uint16_t*)payload;
                 send_dns_empty_response(src_ip, dst_ip, src_port, dst_port, id, payload, len);
                 return;
@@ -769,6 +779,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
             if (12 + qname_len + 2 <= len) {
                 uint16_t qtype = ::ntohs(*(uint16_t*)(payload + 12 + qname_len));
                 if (qtype == 28) { // AAAA (IPv6) 
+                    LOG_INFO("[DNS] Blocked AAAA for: %s", full_domain.c_str());
                     uint16_t id = *(uint16_t*)payload;
                     send_dns_empty_response(src_ip, dst_ip, src_port, dst_port, id, payload, len);
                     return; 
@@ -792,6 +803,8 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
             uint16_t id = *(uint16_t*)payload;
             uint32_t cached_ip = DnsCache::instance().get(clean_domain);
             if (cached_ip != 0) {
+                LOG_INFO("[DNS] Cache hit: %s -> %d.%d.%d.%d", clean_domain.c_str(), 
+                    cached_ip & 0xFF, (cached_ip >> 8) & 0xFF, (cached_ip >> 16) & 0xFF, (cached_ip >> 24) & 0xFF);
                 send_dns_response(src_ip, dst_ip, src_port, dst_port, id, full_domain, cached_ip);
                 return;
             }
@@ -803,6 +816,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                 uint32_t ali_dns;
                 uint8_t ali_ip[4] = {223, 5, 5, 5};
                 memcpy(&ali_dns, ali_ip, 4);
+                LOG_INFO("[UDP] DNS Domestic: %s -> AliDNS", clean_domain.c_str());
                 forward_udp_packet(src_ip, ali_dns, src_port, dst_port, payload, len);
                 return;
             } else { 
@@ -824,6 +838,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                 if (!w) w = WorkerPool::instance().get_next_worker();
                 std::vector<uint8_t> data(p_data, p_data + p_len);
                 
+                LOG_INFO("[UDP] DNS Proxy (TCP): %s via %s", clean_domain.c_str(), g_config.proxy_ip.c_str());
                 w->queue_task([src_ip, dst_ip, src_port, dst_port, google_dns, data = std::move(data), w, full_domain, clean_domain]() {
                     UdpKey key = { src_ip, dst_ip, src_port, dst_port };
                     UdpSession* sess = nullptr;
@@ -872,5 +887,6 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         }
     }
 
+    LOG_INFO("[UDP] Final Forward: %d.%d.%d.%d:%d", dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, dport_h);
     forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);
 }

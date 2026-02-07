@@ -124,6 +124,10 @@ static u8_t lwip_udp_raw_recv(void* arg, struct raw_pcb* pcb, struct pbuf* p, co
                 uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
                 uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
                 
+                LOG_INFO("[LwIP] UDP packet to raw_recv: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d (%d bytes)",
+                    ip4_addr1_16(&ip->src), ip4_addr2_16(&ip->src), ip4_addr3_16(&ip->src), ip4_addr4_16(&ip->src), ntohs(src_port),
+                    ip4_addr1_16(&ip->dest), ip4_addr2_16(&ip->dest), ip4_addr3_16(&ip->dest), ip4_addr4_16(&ip->dest), ntohs(dst_port), len);
+
                 // Check if it's local traffic that should be bypassed
                 uint16_t sp_h = ::ntohs(src_port);
                 uint16_t dp_h = ::ntohs(dst_port);
@@ -183,6 +187,7 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
         LOG_INFO("[LwIP] Received packet: %s -> %s (%d bytes)", src_ip, dst_ip, len);
 
         if (IPH_PROTO(ip) == IP_PROTO_UDP) {
+            LOG_INFO("[LwIP] Identifying UDP packet, len=%d", len);
             uint16_t frag_off = ::ntohs(IPH_OFFSET(ip));
             bool is_fragment = (frag_off & (IP_OFFMASK | IP_MF)) != 0;
 
