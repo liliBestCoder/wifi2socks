@@ -165,7 +165,7 @@ err_t netif_init_cb(struct netif* netif) {
 }
 
 void process_ip_packet(const char* buf_const, int len, const void* addr) {
-    if (len < 20) return;
+    if (len < 20 || len > WINDIVERT_MTU) return;
 
     // We need to modify the buffer for NAT, so we make a copy.
     char buf[WINDIVERT_MTU];

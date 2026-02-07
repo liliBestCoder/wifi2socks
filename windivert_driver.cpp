@@ -40,7 +40,7 @@ void WinDivertDriver::stop() {
 
 void WinDivertDriver::run() {
     WINDIVERT_ADDRESS addr;
-    UINT read_len;
+    UINT read_len = 0;
 
     LOG_INFO("WinDivert capture loop entered.");
 
