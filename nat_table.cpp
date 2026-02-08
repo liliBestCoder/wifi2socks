@@ -15,7 +15,7 @@ NatTable& NatTable::instance() {
     return instance;
 }
 
-void NatTable::set(uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint16_t dst_port, const WINDIVERT_ADDRESS* addr) {
+void NatTable::set(uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint16_t dst_port, const WINDIVERT_ADDRESS* addr, const uint8_t* src_mac, const uint8_t* dst_mac) {
     std::lock_guard<std::mutex> lock(m_mtx);
     NatEntry entry;
     entry.original_dst_ip = dst_ip;
@@ -27,6 +27,11 @@ void NatTable::set(uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint16_t
     } else {
         memset(&entry.addr, 0, sizeof(entry.addr));
     }
+    if (src_mac) memcpy(entry.src_mac, src_mac, 6);
+    else memset(entry.src_mac, 0, 6);
+    if (dst_mac) memcpy(entry.dst_mac, dst_mac, 6);
+    else memset(entry.dst_mac, 0, 6);
+
     entry.last_active = GetTickCount64();
     m_table[{src_ip, src_port}] = entry;
 }

@@ -72,6 +72,17 @@ void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len)
     *(uint16_t*)(tcp_base + 16) = (uint16_t)~sum;
 }
 
+#pragma pack(push, 1)
+struct eth_addr {
+    uint8_t addr[6];
+};
+struct eth_hdr {
+    struct eth_addr dest;
+    struct eth_addr src;
+    uint16_t type;
+};
+#pragma pack(pop)
+
 err_t windivert_linkoutput(struct netif* netif, struct pbuf* p) {
     if (!g_windivert_driver) return ERR_IF;
 
@@ -82,6 +93,8 @@ err_t windivert_linkoutput(struct netif* netif, struct pbuf* p) {
 
     WINDIVERT_ADDRESS send_addr = {0};
     bool addr_found = false;
+    uint8_t dst_mac[6] = {0};
+    uint8_t src_mac[6] = {0};
 
     if (buf.size() >= 20) {
         struct ip_hdr* ip = (struct ip_hdr*)buf.data();
@@ -109,6 +122,8 @@ err_t windivert_linkoutput(struct netif* netif, struct pbuf* p) {
                          recalculate_tcp_checksum(ip, tcp_base, tcp_len);
 
                          send_addr = target.addr;
+                         memcpy(dst_mac, target.src_mac, 6); // Dest MAC is client's MAC
+                         memcpy(src_mac, target.dst_mac, 6); // Src MAC is gateway's MAC
                          addr_found = true;
                      }
                  }
@@ -121,10 +136,19 @@ err_t windivert_linkoutput(struct netif* netif, struct pbuf* p) {
         return ERR_OK; 
     }
 
+    // Prepend Ethernet Header
+    std::vector<uint8_t> eth_buf;
+    eth_buf.resize(sizeof(struct eth_hdr) + buf.size());
+    struct eth_hdr* eth = (struct eth_hdr*)eth_buf.data();
+    memcpy(eth->dest.addr, dst_mac, 6);
+    memcpy(eth->src.addr, src_mac, 6);
+    eth->type = ::htons(0x0800); // IPv4
+    memcpy(eth_buf.data() + sizeof(struct eth_hdr), buf.data(), buf.size());
+
     // The packet from LwIP is going out. Flip its direction.
     send_addr.Outbound = !send_addr.Outbound;
     
-    g_windivert_driver->send((const char*)buf.data(), buf.size(), &send_addr);
+    g_windivert_driver->send((const char*)eth_buf.data(), eth_buf.size(), &send_addr);
     return ERR_OK;
 }
 
@@ -184,7 +208,7 @@ err_t netif_init_cb(struct netif* netif) {
     netif->output = windivert_netif_output;
     netif->mtu = 1500;
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_LINK_UP | NETIF_FLAG_UP;
-    netif->hwaddr_len = 0; // No MAC address 
+    netif->hwaddr_len = 0; // Keep as L3 interface for simplicity
 
     // Register a raw PCB to catch reassembled UDP fragments
     struct raw_pcb* pcb = raw_new(IP_PROTO_UDP);
@@ -199,25 +223,31 @@ err_t netif_init_cb(struct netif* netif) {
     return ERR_OK;
 }
 
-void process_ip_packet(const char* buf_const, int len, const void* addr) {
-    if (len < 20 || len > WINDIVERT_MTU_MAX) return;
+void process_ip_packet(const char* frame, int len, const void* addr) {
+    if (len < sizeof(struct eth_hdr) + 20 || len > WINDIVERT_MTU_MAX) return;
+
+    struct eth_hdr* eth = (struct eth_hdr*)frame;
+    if (ntohs(eth->type) != 0x0800) return; // Only handle IPv4
+
+    const char* buf_const = frame + sizeof(struct eth_hdr);
+    int ip_len = len - (int)sizeof(struct eth_hdr);
 
     // We need to modify the buffer for NAT, so we make a copy.
     char buf[WINDIVERT_MTU_MAX];
-    memcpy(buf, buf_const, len);
+    memcpy(buf, buf_const, ip_len);
     
     const WINDIVERT_ADDRESS* p_addr = static_cast<const WINDIVERT_ADDRESS*>(addr);
 
     struct ip_hdr* ip = (struct ip_hdr*)buf;
     if (IPH_V(ip) == 4) {
-        if (ntohs(IPH_LEN(ip)) > len) return;
+        if (ntohs(IPH_LEN(ip)) > ip_len) return;
 
         ip4_addr_t lwip_ip;
         ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
 
         if (IPH_PROTO(ip) == IP_PROTO_UDP) {
             uint8_t* udp_ptr = (uint8_t*)buf + IPH_HL(ip) * 4;
-            if ((char*)udp_ptr + 8 <= buf + len) {
+            if ((char*)udp_ptr + 8 <= buf + ip_len) {
                 uint16_t src_port_h = ntohs(*(uint16_t*)(udp_ptr + 0));
                 uint16_t dst_port_h = ntohs(*(uint16_t*)(udp_ptr + 2));
 
@@ -231,7 +261,7 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
                     client_sa.sin_port = htons(src_port_h);
                     
                     // The payload of UDP starts at udp_ptr + 8
-                    g_dhcp_server_ptr->handle_request((const char*)udp_ptr + 8, (int)(len - (IPH_HL(ip) * 4 + 8)), client_sa);
+                    g_dhcp_server_ptr->handle_request((const char*)udp_ptr + 8, (int)(ip_len - (IPH_HL(ip) * 4 + 8)), client_sa);
                     
                     // DROP the packet! ICS is now blinded.
                     return;
@@ -253,8 +283,8 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
                 bool is_first_fragment = (frag_off & IP_OFFMASK) == 0;
 
                 if (!is_fragment || is_first_fragment) {
-                    // Store original destination for UDP
-                    NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, p_addr);
+                    // Store original destination for UDP, including MAC addresses
+                    NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, p_addr, eth->src.addr, eth->dest.addr);
                 }
 
                 // Redirect all UDP to local IP to ensure LwIP processes it
@@ -272,7 +302,8 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
             uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
             uint32_t dst_ip = ip->dest.addr;
 
-            NatTable::instance().set(ip->src.addr, ::ntohs(src_port), dst_ip, dst_port, p_addr);
+            // Store MAC addresses for TCP too
+            NatTable::instance().set(ip->src.addr, ::ntohs(src_port), dst_ip, dst_port, p_addr, eth->src.addr, eth->dest.addr);
 
             ip->dest.addr = lwip_ip.addr;
 
@@ -299,15 +330,25 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
                     IPH_CHKSUM_SET(ip, 0);
                     IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
 
-                    int ip_len = ::ntohs(IPH_LEN(ip));
-                    int icmp_len = ip_len - IPH_HL(ip) * 4;
+                    int ip_len_icmp = ::ntohs(IPH_LEN(ip));
+                    int icmp_len = ip_len_icmp - IPH_HL(ip) * 4;
                     *(uint16_t*)(icmp_base + 2) = 0;
                     *(uint16_t*)(icmp_base + 2) = ip_chksum_simple(icmp_base, icmp_len);
 
                     if (g_windivert_driver) {
                         WINDIVERT_ADDRESS send_addr = *p_addr;
                         send_addr.Outbound = 0;
-                        g_windivert_driver->send((const char*)buf, len, &send_addr);
+                        
+                        // Wrap in Ethernet header
+                        std::vector<uint8_t> eth_buf_icmp;
+                        eth_buf_icmp.resize(sizeof(struct eth_hdr) + ip_len_icmp);
+                        struct eth_hdr* eth_icmp = (struct eth_hdr*)eth_buf_icmp.data();
+                        memcpy(eth_icmp->dest.addr, eth->src.addr, 6);
+                        memcpy(eth_icmp->src.addr, eth->dest.addr, 6);
+                        eth_icmp->type = ::htons(0x0800);
+                        memcpy(eth_buf_icmp.data() + sizeof(struct eth_hdr), buf, ip_len_icmp);
+
+                        g_windivert_driver->send((const char*)eth_buf_icmp.data(), eth_buf_icmp.size(), &send_addr);
                     }
                     return; // Handled
                 }
@@ -315,9 +356,9 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
         }
         
         // For all other traffic (UDP, and TCP to be processed by LwIP)
-        struct pbuf* p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
+        struct pbuf* p = pbuf_alloc(PBUF_RAW, ip_len, PBUF_POOL);
         if (p) {
-            pbuf_take(p, buf, len);
+            pbuf_take(p, buf, ip_len);
             err_t input_err = g_netif.input(p, &g_netif);
             if (input_err != ERR_OK) {
                 LOG_ERROR("[LwIP] netif.input failed with error %d", (int)input_err);
