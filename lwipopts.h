@@ -15,7 +15,7 @@
 #define MEM_LIBC_MALLOC                 1
 #define MEMP_MEM_MALLOC                 1
 #define MEM_ALIGNMENT                   4
-#define PBUF_POOL_SIZE                  8192 
+#define PBUF_POOL_SIZE                  4096 
 #define PBUF_POOL_BUFSIZE               2048 
 
 // --- 4. TCP/IP ---
@@ -28,13 +28,6 @@
 #define TCP_SNDLOWAT                    (32*1024)
 #define LWIP_WND_SCALE                  1
 #define TCP_RCV_SCALE                   5
-
-#define MEMP_NUM_TCP_SEG                TCP_SND_QUEUELEN
-#define TCP_OVERSIZE                    TCP_MSS
-#define LWIP_SINGLE_NETIF               1
-#define MEMP_NUM_TCP_PCB                256
-#define MEMP_NUM_TCP_PCB_LISTEN         64
-#define TCP_MSL                         10000UL
 
 #define LWIP_ARP                        1
 #define LWIP_ETHERNET                   1
