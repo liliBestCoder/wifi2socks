@@ -61,14 +61,14 @@
 #define CHECKSUM_GEN_TCP                1
 
 // --- 6. DEBUGGING ---
-#define LWIP_DEBUG                      1
-#define IP_DEBUG                        LWIP_DBG_ON
-#define RAW_DEBUG                       LWIP_DBG_ON
-#define UDP_DEBUG                       LWIP_DBG_ON
-#define NETIF_DEBUG                     LWIP_DBG_ON
-#define ETHARP_DEBUG                    LWIP_DBG_ON
-#define ICMP_DEBUG                      LWIP_DBG_ON
-#define DHCP_DEBUG                      LWIP_DBG_ON
+#define LWIP_DEBUG                      0
+#define IP_DEBUG                        LWIP_DBG_OFF
+#define RAW_DEBUG                       LWIP_DBG_OFF
+#define UDP_DEBUG                       LWIP_DBG_OFF
+#define NETIF_DEBUG                     LWIP_DBG_OFF
+#define ETHARP_DEBUG                    LWIP_DBG_OFF
+#define ICMP_DEBUG                      LWIP_DBG_OFF
+#define DHCP_DEBUG                      LWIP_DBG_OFF
 
 // --- 7. PLATFORM ---
 #define LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS 0
