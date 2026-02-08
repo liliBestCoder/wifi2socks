@@ -2,7 +2,7 @@
 #include "logger.h"
 #include <iostream>
 
-#pragma comment(lib, "ndisapi.lib")
+#pragma comment(lib, "ndisapilib.lib")
 
 WinPkFilterDriver::WinPkFilterDriver()
     : m_adapter_handle(nullptr), m_wait_event(nullptr), m_running(false) {
