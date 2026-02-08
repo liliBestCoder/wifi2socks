@@ -22,7 +22,8 @@ std::vector<std::pair<std::string, std::string>> WinPkFilterDriver::get_adapters
     TCP_AdapterList adapters;
     if (api.GetTcpipBoundAdaptersInfo(&adapters)) {
         for (UINT i = 0; i < adapters.m_nAdapterCount; ++i) {
-            result.push_back({ (char*)adapters.m_szAdapterName[i], (char*)adapters.m_caAdapterDescription[i] });
+            // Note: Common.h uses m_szAdapterNameList
+            result.push_back({ (char*)adapters.m_szAdapterNameList[i], (char*)adapters.m_szAdapterNameList[i] });
         }
     }
     return result;
@@ -42,7 +43,7 @@ bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler han
 
     bool found = false;
     for (UINT i = 0; i < adapters.m_nAdapterCount; ++i) {
-        if (adapter_name == (char*)adapters.m_szAdapterName[i]) {
+        if (adapter_name == (char*)adapters.m_szAdapterNameList[i]) {
             m_adapter_handle = adapters.m_nAdapterHandle[i];
             found = true;
             break;
@@ -66,9 +67,8 @@ bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler han
         return false;
     }
 
-    // MSTCP_FLAG_SENT_RECEIVE | MSTCP_FLAG_TUNNEL: Intercept packets in both directions
     ADAPTER_MODE mode;
-    mode.dwFlags = MSTCP_FLAG_SENT_RECEIVE | MSTCP_FLAG_TUNNEL;
+    mode.dwFlags = MSTCP_FLAG_SENT_RECEIVE | MSTCP_FLAG_SENT_TUNNEL | MSTCP_FLAG_RECV_TUNNEL;
     mode.hAdapterHandle = m_adapter_handle;
     if (!m_ndis_api.SetAdapterMode(&mode)) {
         LOG_ERROR("Failed to set adapter mode.");
@@ -93,7 +93,7 @@ void WinPkFilterDriver::stop() {
 
     if (m_adapter_handle) {
         ADAPTER_MODE mode;
-        mode.dwFlags = 0; // Default mode
+        mode.dwFlags = 0; 
         mode.hAdapterHandle = m_adapter_handle;
         m_ndis_api.SetAdapterMode(&mode);
         m_ndis_api.SetPacketEvent(m_adapter_handle, nullptr);
@@ -130,7 +130,6 @@ bool WinPkFilterDriver::get_adapter_mac(const std::string& adapter_name, uint8_t
     ULONG outBufLen = 15000;
     pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(outBufLen);
     
-    // We need to extract the GUID part from the NDIS name \DEVICE\TCPIP_{GUID}
     std::string guid = adapter_name;
     size_t pos = guid.find("{");
     if (pos != std::string::npos) {
@@ -140,7 +139,7 @@ bool WinPkFilterDriver::get_adapter_mac(const std::string& adapter_name, uint8_t
     if (GetAdaptersAddresses(AF_INET, 0, nullptr, pAddresses, &outBufLen) == ERROR_SUCCESS) {
         for (PIP_ADAPTER_ADDRESSES pCurrAddresses = pAddresses; pCurrAddresses != nullptr; pCurrAddresses = pCurrAddresses->Next) {
             std::string current_name = pCurrAddresses->AdapterName;
-            if (current_name.find(guid) != std::string::npos || guid.find(current_name) != std::string::npos) {
+            if (guid.find(current_name) != std::string::npos) {
                 if (pCurrAddresses->PhysicalAddressLength == 6) {
                     memcpy(mac, pCurrAddresses->PhysicalAddress, 6);
                     free(pAddresses);

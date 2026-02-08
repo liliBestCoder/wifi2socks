@@ -6,7 +6,6 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#define NOMINMAX
 #include "winpkfilter_driver.h"
 #include "proxy_udp.h"
 #include "worker.h"
