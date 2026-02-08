@@ -113,7 +113,7 @@ int main() {
     ip4addr_aton(g_config.tap_netmask.c_str(), &mask); 
     ip4addr_aton("0.0.0.0", &gw); 
 
-    netif_add(&g_netif, &gw, &mask, &ip, NULL, netif_init_cb, ethernet_input);
+    netif_add(&g_netif, &ip, &mask, &gw, NULL, netif_init_cb, ethernet_input);
     netif_set_default(&g_netif);
     
     if (!adapter_name.empty()) {
