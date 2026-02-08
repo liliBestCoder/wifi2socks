@@ -45,14 +45,23 @@ std::string find_adapter_by_ip(const std::string& target_ip) {
     ULONG outBufLen = 15000;
     pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(outBufLen);
     
+    LOG_INFO("[CORE] Searching for NDIS adapter with IP: %s", target_ip.c_str());
+
     if (GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, pAddresses, &outBufLen) == ERROR_SUCCESS) {
         for (PIP_ADAPTER_ADDRESSES pCurrAddresses = pAddresses; pCurrAddresses != nullptr; pCurrAddresses = pCurrAddresses->Next) {
+            std::string adapter_guid = pCurrAddresses->AdapterName;
+            std::wstring friendly_name = pCurrAddresses->FriendlyName;
+            
             for (PIP_ADAPTER_UNICAST_ADDRESS pUnicast = pCurrAddresses->FirstUnicastAddress; pUnicast != nullptr; pUnicast = pUnicast->Next) {
                 if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
                     sockaddr_in* sa_in = (sockaddr_in*)pUnicast->Address.lpSockaddr;
                     char ip_str[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &(sa_in->sin_addr), ip_str, INET_ADDRSTRLEN);
+                    
+                    LOG_INFO("Checking Adapter: %S (IP: %s)", friendly_name.c_str(), ip_str);
+
                     if (target_ip == ip_str) {
+                        LOG_INFO("MATCH FOUND BY IP: %S", friendly_name.c_str());
                         std::string name = pCurrAddresses->AdapterName;
                         free(pAddresses);
                         return "\\DEVICE\\TCPIP_" + name;
@@ -61,6 +70,21 @@ std::string find_adapter_by_ip(const std::string& target_ip) {
             }
         }
     }
+    
+    // Fallback: If IP matching fails, try searching by description for "Wi-Fi Direct"
+    LOG_INFO("[CORE] IP match failed. Trying fallback to 'Wi-Fi Direct' descriptions...");
+    if (pAddresses) {
+        for (PIP_ADAPTER_ADDRESSES pCurrAddresses = pAddresses; pCurrAddresses != nullptr; pCurrAddresses = pCurrAddresses->Next) {
+            std::wstring desc = pCurrAddresses->Description;
+            if (desc.find(L"Wi-Fi Direct") != std::wstring::npos) {
+                LOG_INFO("FALLBACK MATCH BY DESCRIPTION: %S", desc.c_str());
+                std::string name = pCurrAddresses->AdapterName;
+                free(pAddresses);
+                return "\\DEVICE\\TCPIP_" + name;
+            }
+        }
+    }
+
     if (pAddresses) free(pAddresses);
     return "";
 }
@@ -111,7 +135,7 @@ int main() {
     LOG_INFO("[CORE] Initializing GeoChecker...");
     try {
         GeoChecker::instance().init();
-        LOG_INFO("[CORE] GeoChecker initialization triggered.");
+        LOG_INFO("[CORE] GeoChecker initialization triggered (Async).");
     } catch (const std::exception& e) {
         LOG_ERROR("[CORE] Warning: GeoChecker failed to initialize: %s", e.what());
     }
@@ -119,8 +143,7 @@ int main() {
     // 1. Initialize WinPkFilter
     std::string adapter_name = find_adapter_by_ip(g_config.tap_ip);
     if (adapter_name.empty()) {
-        LOG_ERROR("[CORE] Could not find NDIS adapter with IP %s. Please ensure WiFi AP is active.", g_config.tap_ip.c_str());
-        // We'll try a fallback or just wait? For now, we need this to work.
+        LOG_ERROR("[CORE] Could not find NDIS adapter with IP %s. Trying default Wi-Fi Direct lookup.", g_config.tap_ip.c_str());
     }
 
     static WinPkFilterDriver pk_driver;
@@ -161,6 +184,8 @@ int main() {
     // Start WinPkFilter capture AFTER LwIP is ready
     if (!adapter_name.empty()) {
         pk_driver.start(adapter_name, handler);
+    } else {
+        LOG_ERROR("[CORE] Cannot start driver: No adapter selected.");
     }
 
     // 5. Setup TCP Listener (Transparent Proxy)

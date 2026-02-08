@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <iphlpapi.h>
 #include <iostream>
+#include <algorithm>
 
 #include "winpkfilter_driver.h"
 #include "app_config.h"
@@ -39,6 +40,8 @@ std::vector<std::pair<std::string, std::string>> WinPkFilterDriver::get_adapters
 }
 
 bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler handler) {
+    LOG_INFO("[Driver] Starting WinPkFilter on: %s", adapter_name.c_str());
+
     if (!m_ndis_api.IsDriverLoaded()) {
         LOG_ERROR("WinPkFilter driver not loaded.");
         return false;
@@ -46,11 +49,11 @@ bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler han
 
     TCP_AdapterList adapters;
     if (!m_ndis_api.GetTcpipBoundAdaptersInfo(&adapters)) {
-        LOG_ERROR("Failed to get adapter list.");
+        LOG_ERROR("Failed to get adapter list from driver.");
         return false;
     }
 
-    LOG_INFO("Total adapters found by WinPkFilter: %u", adapters.m_nAdapterCount);
+    LOG_INFO("[Driver] Total adapters reported by driver: %u", adapters.m_nAdapterCount);
     bool found = false;
     std::string target_lower = adapter_name;
     std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
@@ -60,18 +63,19 @@ bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler han
         std::string current_lower = current_name;
         std::transform(current_lower.begin(), current_lower.end(), current_lower.begin(), ::tolower);
 
-        LOG_INFO("Adapter [%u]: %s", i, current_name.c_str());
+        LOG_INFO("  Driver Adapter [%u]: %s", i, current_name.c_str());
 
+        // Substring match to handle potential naming variations
         if (current_lower.find(target_lower) != std::string::npos || target_lower.find(current_lower) != std::string::npos) {
             m_adapter_handle = adapters.m_nAdapterHandle[i];
             found = true;
-            LOG_INFO("Matched adapter: %s", current_name.c_str());
+            LOG_INFO("[Driver] MATCHED HANDLE: %p", m_adapter_handle);
             break;
         }
     }
 
     if (!found) {
-        LOG_ERROR("Target adapter not found: %s", adapter_name.c_str());
+        LOG_ERROR("[Driver] Critical: Could not map %s to a driver handle.", adapter_name.c_str());
         return false;
     }
 
@@ -83,22 +87,24 @@ bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler han
     }
 
     if (!m_ndis_api.SetPacketEvent(m_adapter_handle, m_wait_event)) {
-        LOG_ERROR("Failed to set packet event.");
+        LOG_ERROR("Failed to set packet event for handle %p.", m_adapter_handle);
         return false;
     }
 
     ADAPTER_MODE mode;
+    // Intercept both sent and received packets, enabling tunnel mode to bypass local stack
     mode.dwFlags = MSTCP_FLAG_SENT_RECEIVE | MSTCP_FLAG_SENT_TUNNEL | MSTCP_FLAG_RECV_TUNNEL;
     mode.hAdapterHandle = m_adapter_handle;
+    
     if (!m_ndis_api.SetAdapterMode(&mode)) {
-        LOG_ERROR("Failed to set adapter mode.");
+        LOG_ERROR("Failed to set adapter mode (TUNNEL) for handle %p. Error: %d", m_adapter_handle, GetLastError());
         return false;
     }
 
     m_running = true;
     m_worker_thread = std::thread(&WinPkFilterDriver::run, this);
 
-    LOG_INFO("WinPkFilter driver started on adapter: %s", adapter_name.c_str());
+    LOG_INFO("[Driver] WinPkFilter initialization successful. Capture thread running.");
     return true;
 }
 
@@ -132,21 +138,26 @@ void WinPkFilterDriver::run() {
     request.hAdapterHandle = m_adapter_handle;
     request.EthPacket.Buffer = buffer.get();
 
+    uint64_t packet_count = 0;
+    LOG_INFO("[Driver] Thread entered packet capture loop.");
+
     while (m_running) {
         WaitForSingleObject(m_wait_event, INFINITE);
         if (!m_running) break;
 
         while (m_ndis_api.ReadPacket(&request)) {
-            static uint64_t packet_count = 0;
-            if (++packet_count % 100 == 0) {
-                LOG_INFO("WinPkFilter: Captured 100 packets (Total: %llu)", packet_count);
+            packet_count++;
+            if (packet_count % 100 == 0) {
+                LOG_INFO("[Driver] Packet stats: %llu captured", packet_count);
             }
+            
             bool outbound = (buffer->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
             if (m_packet_handler) {
                 m_packet_handler((const char*)buffer->m_IBuffer, buffer->m_Length, outbound);
             }
         }
     }
+    LOG_INFO("[Driver] Thread exited packet capture loop.");
 }
 
 bool WinPkFilterDriver::get_adapter_mac(const std::string& adapter_name, uint8_t* mac) {
@@ -164,7 +175,7 @@ bool WinPkFilterDriver::get_adapter_mac(const std::string& adapter_name, uint8_t
     if (GetAdaptersAddresses(AF_INET, 0, nullptr, pAddresses, &outBufLen) == ERROR_SUCCESS) {
         for (PIP_ADAPTER_ADDRESSES pCurrAddresses = pAddresses; pCurrAddresses != nullptr; pCurrAddresses = pCurrAddresses->Next) {
             std::string current_name = pCurrAddresses->AdapterName;
-            if (guid.find(current_name) != std::string::npos) {
+            if (guid.find(current_name) != std::string::npos || current_name.find(guid) != std::string::npos) {
                 if (pCurrAddresses->PhysicalAddressLength == 6) {
                     memcpy(mac, pCurrAddresses->PhysicalAddress, 6);
                     free(pAddresses);

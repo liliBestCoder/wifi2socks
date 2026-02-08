@@ -11,7 +11,7 @@
 #include <set>
 #include <atomic>
 #include <thread>
-#include <mutex>
+#include <shared_mutex>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -37,7 +37,7 @@ struct GeoIPRange {
 class GeoChecker {
 public:
     static GeoChecker& instance();
-    GeoChecker(); // Default constructor, does not load
+    GeoChecker(); 
     ~GeoChecker();
 
     // Async Init
@@ -45,14 +45,12 @@ public:
     bool is_ready() const { return m_ready; }
 
     // --------- IP 查询 ----------
-    // ip_bytes 应当为 4 字节的二进制字符串（网络字节序）
     std::string query_ip(const std::string& ip_bytes);
     bool is_cn_ip(const uint32_t ip_host);
 
     // --------- 域名查询 ----------
     std::string query_domain(const std::string& domain);
     
-    // 专用判定函数（高性能优化版）
     bool is_cn_domain(const std::string& domain);
     bool is_google_domain(const std::string& domain);
     bool is_tencent_domain(const std::string& domain);
@@ -68,31 +66,19 @@ private:
     // Sync
     std::atomic<bool> m_ready;
     std::thread m_load_thread;
+    mutable std::shared_mutex m_mtx;
 
-    // 数据存储 - 分离 GeoIP 和 GeoSite
+    // 数据存储
     std::vector<std::string> geoip_codes_;
     std::vector<std::string> geosite_codes_;
-
-    // 加载时的临时索引 Cache (O(1) 查找)
     std::unordered_map<std::string, uint16_t> geoip_code_cache_;
     std::unordered_map<std::string, uint16_t> geosite_code_cache_;
-
-    // IP 数据
     std::vector<GeoIPRange> ip_ranges_;
-
-    // 域名匹配规则
-    // 1. Full/Exact: 完整匹配
     std::unordered_map<std::string, uint16_t> domain_exact_;
-    // 2. Domain/Suffix: 后缀匹配 (存储为 subdomain.google.com -> code)
     std::unordered_map<std::string, uint16_t> domain_suffix_;
-    // 3. Plain/Keyword: 关键字包含 (存储 <keyword, code>)
     std::vector<std::pair<std::string, uint16_t>> domain_keyword_;
-    // 4. Regex: 正则匹配 (存储 <regex, code>)
     std::vector<std::pair<std::regex, uint16_t>> domain_regex_;
 
-    // 预计算的关键 Tag 索引 (加速 is_cn_domain 等)
-    // 使用 set 存储，因为 "cn" 可能对应 "CN" 和 "cn" (如果不规范) 
-    // 或者 geosite 可能有多个类别都算 CN (如 "geolocation-cn")
     std::set<uint16_t> cn_site_idxs_;
     std::set<uint16_t> google_site_idxs_;
     std::set<uint16_t> tencent_site_idxs_;

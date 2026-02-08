@@ -103,15 +103,43 @@ err_t netif_init_cb(struct netif* netif) {
 }
 
 void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
-    if (length < sizeof(struct eth_hdr) || length > 1514) return;
-
-    if (outbound) {
-        return;
-    }
+    if (length < sizeof(struct eth_hdr) || length > 9014) return;
 
     struct eth_hdr* eth = (struct eth_hdr*)packet;
     uint16_t eth_type = ntohs(eth->type);
-    
+
+    if (outbound) {
+        // Packet from local MSTCP going to Adapter
+        if (eth_type == ETHTYPE_IP) {
+            struct ip_hdr* ip = (struct ip_hdr*)(packet + sizeof(struct eth_hdr));
+            if (IPH_PROTO(ip) == IP_PROTO_UDP) {
+                uint8_t* udp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
+                uint16_t src_port_h = ntohs(*(uint16_t*)(udp_ptr + 0));
+                
+                // Block Windows ICS DHCP responses (Source Port 67)
+                // BUT only if they are not from our process? 
+                // WinPkFilter intercepts ALL packets.
+                // We'll let it pass if it's NOT a DHCP response, 
+                // OR if we want to allow our own process to send.
+                if (src_port_h == 67) {
+                    // Check if the source IP is our configured gateway
+                    ip4_addr_t lwip_ip;
+                    ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
+                    if (ip->src.addr != lwip_ip.addr) {
+                        // Likely ICS (192.168.137.1). BLOCK IT.
+                        return;
+                    }
+                }
+            }
+        }
+        // Let other outbound traffic pass through to the wire
+        if (g_winpkfilter_driver) {
+            g_winpkfilter_driver->send_to_adapter(packet, length);
+        }
+        return;
+    }
+
+    // --- Inbound (From Client/Wire) ---
     const uint8_t* smac = (const uint8_t*)&eth->src;
     const uint8_t* dmac = (const uint8_t*)&eth->dest;
 
@@ -122,8 +150,8 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
         if (IPH_V(ip) == 4) {
             if (IPH_PROTO(ip) == IP_PROTO_UDP) {
                 uint8_t* udp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
-                uint16_t src_port_h = ntohs(*(uint16_t*)(udp_ptr + 0));
                 uint16_t dst_port_h = ntohs(*(uint16_t*)(udp_ptr + 2));
+                uint16_t src_port_h = ntohs(*(uint16_t*)(udp_ptr + 0));
 
                 if (dst_port_h == 67 && g_dhcp_server_ptr) {
                     sockaddr_in client_sa;
@@ -131,7 +159,7 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
                     client_sa.sin_family = AF_INET;
                     client_sa.sin_addr.S_un.S_addr = ip->src.addr;
                     g_dhcp_server_ptr->handle_request((const char*)udp_ptr + 8, ip_payload_len - (IPH_HL(ip) * 4 + 8), client_sa);
-                    return; 
+                    return; // Consumed, block from Windows
                 }
 
                 NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, smac, dmac);
@@ -140,12 +168,12 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
                 uint8_t* tcp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
                 uint16_t src_port_h = ntohs(*(uint16_t*)(tcp_ptr + 0));
                 uint16_t dst_port_h = ntohs(*(uint16_t*)(tcp_ptr + 2));
-                
                 NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, smac, dmac);
             }
         }
     }
 
+    // Pass client traffic to LwIP
     struct pbuf* p = pbuf_alloc(PBUF_RAW, (uint16_t)length, PBUF_POOL);
     if (p) {
         pbuf_take(p, packet, (uint16_t)length);
