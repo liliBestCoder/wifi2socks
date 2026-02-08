@@ -5,9 +5,20 @@ MainDispatcher& MainDispatcher::instance() {
     return inst;
 }
 
+MainDispatcher::MainDispatcher() {
+    m_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+}
+
+MainDispatcher::~MainDispatcher() {
+    CloseHandle(m_event);
+}
+
 void MainDispatcher::queue_task(std::function<void()> task) {
-    std::lock_guard<std::mutex> lk(m_mtx);
-    m_queue.push_back(task);
+    {
+        std::lock_guard<std::mutex> lk(m_mtx);
+        m_queue.push_back(task);
+    }
+    SetEvent(m_event);
 }
 
 void MainDispatcher::process_pending() {

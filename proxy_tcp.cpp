@@ -586,4 +586,39 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
                 connect_to_proxy_async(ctx);
             }
         }
-    }\n    pbuf_free(p);\n    return ERR_OK;\n}\n\nerr_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {\n    uint16_t client_port = newpcb->remote_port;\n    NatEntry target = NatTable::instance().get(newpcb->remote_ip.addr, client_port);\n    if (target.original_dst_ip == 0) return ERR_ABRT;\n    tcp_nagle_disable(newpcb);\n    \n    auto ctx = std::make_shared<TcpCtx>();\n    ctx->client_pcb = newpcb;\n    ctx->target = target;\n    ctx->client_ip = newpcb->remote_ip.addr;\n    ctx->client_port = newpcb->remote_port;\n\n    TcpCtxPtr* ptr = new TcpCtxPtr(ctx);\n    ctx->lwip_arg = ptr;\n\n    uint32_t dst_ip_h = ntohl(target.original_dst_ip);\n    RouteAction ip_action = RuleManager::instance().match_ip(dst_ip_h);\n    if (ip_action == RouteAction::BLOCK) { delete ptr; return ERR_ABRT; }\n    else if (ip_action == RouteAction::DIRECT) ctx->is_direct = true;\n    else if (ip_action == RouteAction::PROXY) ctx->is_direct = false;\n    else { if (GeoChecker::instance().is_cn_ip(dst_ip_h)) ctx->is_direct = true; }\n\n    tcp_arg(newpcb, ptr);\n    tcp_recv(newpcb, tcp_client_recv);\n    tcp_sent(newpcb, tcp_client_sent);\n    tcp_err(newpcb, [](void* arg, err_t err) { \n        TcpCtxPtr* ptr = (TcpCtxPtr*)arg;\n        if (ptr) { auto ctx = *ptr; ctx->client_pcb = NULL; close_tcp_ctx(ctx); }\n    });\n    return ERR_OK;\n}
+    }
+    pbuf_free(p);
+    return ERR_OK;
+}
+
+err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
+    uint16_t client_port = newpcb->remote_port;
+    NatEntry target = NatTable::instance().get(newpcb->remote_ip.addr, client_port);
+    if (target.original_dst_ip == 0) return ERR_ABRT;
+    tcp_nagle_disable(newpcb);
+    
+    auto ctx = std::make_shared<TcpCtx>();
+    ctx->client_pcb = newpcb;
+    ctx->target = target;
+    ctx->client_ip = newpcb->remote_ip.addr;
+    ctx->client_port = newpcb->remote_port;
+
+    TcpCtxPtr* ptr = new TcpCtxPtr(ctx);
+    ctx->lwip_arg = ptr;
+
+    uint32_t dst_ip_h = ntohl(target.original_dst_ip);
+    RouteAction ip_action = RuleManager::instance().match_ip(dst_ip_h);
+    if (ip_action == RouteAction::BLOCK) { delete ptr; return ERR_ABRT; }
+    else if (ip_action == RouteAction::DIRECT) ctx->is_direct = true;
+    else if (ip_action == RouteAction::PROXY) ctx->is_direct = false;
+    else { if (GeoChecker::instance().is_cn_ip(dst_ip_h)) ctx->is_direct = true; }
+
+    tcp_arg(newpcb, ptr);
+    tcp_recv(newpcb, tcp_client_recv);
+    tcp_sent(newpcb, tcp_client_sent);
+    tcp_err(newpcb, [](void* arg, err_t err) { 
+        TcpCtxPtr* ptr = (TcpCtxPtr*)arg;
+        if (ptr) { auto ctx = *ptr; ctx->client_pcb = NULL; close_tcp_ctx(ctx); }
+    });
+    return ERR_OK;
+}

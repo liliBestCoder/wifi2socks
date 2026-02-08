@@ -55,8 +55,8 @@ std::string find_adapter_by_ip(const std::string& target_ip) {
                         std::string name = pCurr->AdapterName;
                         LOG_INFO("MATCH FOUND BY IP: %s", name.c_str());
                         free(pAddresses);
-                        // 修正为 \Device\ 格式
-                        return "\\Device\\" + name;
+                        // 修正为 \\Device\\ 格式
+                        return "\\\\Device\\\\" + name;
                     }
                 }
             }
@@ -141,6 +141,9 @@ int main() {
     SimpleHttpServer::instance().start(g_config.http_api_port);
 
     while (true) {
+        // Wait for tasks or 1ms timeout (to let sys_check_timeouts run)
+        WaitForSingleObject(MainDispatcher::instance().get_event_handle(), 1);
+
         MainDispatcher::instance().process_pending();
         {
             std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
@@ -149,7 +152,6 @@ int main() {
         udp_check_timeouts();
         NatTable::instance().cleanup(300000); 
         WiFiAPManager::instance().CheckKeepAlive();
-        Sleep(1); 
     }
     return 0;
 }
