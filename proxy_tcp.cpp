@@ -22,13 +22,6 @@
 #include <algorithm>
 #include <memory>
 
-// Flow Control Watermarks
-const size_t UPSTREAM_HIGH_WATER_MARK = 4 * 1024 * 1024; // 4MB: 超过此值暂停接收
-const size_t UPSTREAM_LOW_WATER_MARK = 2 * 1024 * 1024;  // 2MB: 低于此值恢复接收
-
-const size_t MAX_TX_QUEUE_SIZE = 4 * 1024 * 1024;    // Downstream 4MB High Water Mark
-const size_t RESUME_TX_QUEUE_SIZE = 2 * 1024 * 1024; // Downstream 2MB Low Water Mark
-
 struct TcpCtx;
 typedef std::shared_ptr<TcpCtx> TcpCtxPtr;
 
@@ -69,11 +62,6 @@ struct TcpCtx : public std::enable_shared_from_this<TcpCtx> {
     size_t upstream_offset;
     bool upstream_busy;
 
-    // Flow Control (Upstream)
-    std::atomic<size_t> upstream_pending_bytes; // 待发送的总字节数
-    std::atomic<bool> upstream_paused;          // 是否处于反压暂停状态
-    size_t unacked_len;                         // 已从 LwIP 接收但尚未调用 tcp_recved 的长度
-
     std::mutex data_mtx;
     Worker* worker;
 
@@ -82,8 +70,7 @@ struct TcpCtx : public std::enable_shared_from_this<TcpCtx> {
     TcpCtx() : client_pcb(NULL), proxy_socket(INVALID_SOCKET), closed(false), connected(false), read_paused(false), worker(NULL), state(PRE_CONNECT),
                tx_acked_offset(0), tx_written_idx(0), tx_written_offset(0), 
                upstream_offset(0), upstream_busy(false), lwip_arg(nullptr), upstream_eof(false),
-               client_ip(0), client_port(0), is_direct(false),
-               upstream_pending_bytes(0), upstream_paused(false), unacked_len(0) {
+               client_ip(0), client_port(0), is_direct(false) {
         sni_buffer.reserve(g_config.max_sni_len);
         upstream_data.reserve(8192); 
     }
@@ -292,13 +279,6 @@ void handle_proxy_write(TcpCtxPtr ctx, int bytes) {
     TrafficManager::instance().report_proxy_tx(bytes, ctx->is_direct);
     ctx->upstream_offset += bytes;
     
-    // Update Flow Control Counter
-    if (ctx->upstream_pending_bytes >= (size_t)bytes) {
-        ctx->upstream_pending_bytes -= bytes;
-    } else {
-        ctx->upstream_pending_bytes = 0;
-    }
-
     // Check if current chunk is done
     if (!ctx->upstream_queue.empty()) {
         auto& head = ctx->upstream_queue.front();
@@ -306,28 +286,6 @@ void handle_proxy_write(TcpCtxPtr ctx, int bytes) {
             ctx->upstream_queue.pop_front();
             ctx->upstream_offset = 0;
         }
-    }
-
-    // --- Backpressure Release Check ---
-    if (ctx->upstream_paused && ctx->upstream_pending_bytes <= UPSTREAM_LOW_WATER_MARK) {
-        MainDispatcher::instance().queue_task([ctx]() {
-            std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
-            if (ctx->closed || !ctx->client_pcb) return;
-            
-            if (ctx->upstream_paused) {
-                if (ctx->unacked_len > 0) {
-                    size_t left = ctx->unacked_len;
-                    while (left > 0) {
-                        u16_t chunk = (u16_t)(std::min)(left, (size_t)0xFFFF);
-                        tcp_recved(ctx->client_pcb, chunk);
-                        left -= chunk;
-                    }
-                    ctx->unacked_len = 0;
-                }
-                ctx->upstream_paused = false;
-                // LOG_DEBUG("[TCP] Backpressure released. Queue: %zu\n", ctx->upstream_pending_bytes.load());
-            }
-        });
     }
 
     try_send_upstream(ctx);
@@ -567,21 +525,11 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
             data.insert(data.end(), (uint8_t*)q->payload, (uint8_t*)q->payload + q->len);
         }
         
-        size_t len = data.size();
-        ctx->upstream_pending_bytes += len;
-
-        // --- Backpressure Logic ---
-        if (ctx->upstream_pending_bytes > UPSTREAM_HIGH_WATER_MARK) {
-            ctx->upstream_paused = true;
-            ctx->unacked_len += len;
-            // 我们不调用 tcp_recved，让 TCP 窗口由于缓冲区满而收缩，从而通知发送端减速
-        } else {
-            size_t left = p->tot_len;
-            while (left > 0) {
-                u16_t chunk = (u16_t)(std::min)(left, (size_t)0xFFFF);
-                tcp_recved(tpcb, chunk);
-                left -= chunk;
-            }
+        size_t left = p->tot_len;
+        while (left > 0) {
+            u16_t chunk = (u16_t)(std::min)(left, (size_t)0xFFFF);
+            tcp_recved(tpcb, chunk);
+            left -= chunk;
         }
         
         ctx->worker->queue_task([ctx, d = std::move(data)]() {
@@ -594,83 +542,4 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         for (struct pbuf* q = p; q != NULL; q = q->next) {
             uint8_t* d = (uint8_t*)q->payload;
             ctx->upstream_data.insert(ctx->upstream_data.end(), d, d + q->len);
-            if (ctx->state == TcpCtx::PRE_CONNECT) {
-                if (ctx->sni_buffer.size() < g_config.max_sni_len) {
-                    size_t to_copy = (std::min)((size_t)q->len, (size_t)(g_config.max_sni_len - ctx->sni_buffer.size()));
-                    ctx->sni_buffer.insert(ctx->sni_buffer.end(), d, d + to_copy);
-                }
-            }
-        }
-        tcp_recved(tpcb, p->tot_len);
-        
-        if (ctx->state == TcpCtx::PRE_CONNECT) {
-            bool ready = false;
-            if (ctx->sni_buffer.size() >= 5 && ctx->sni_buffer[0] == 0x16) {
-                uint16_t tls_len = ((uint16_t)ctx->sni_buffer[3] << 8) | ctx->sni_buffer[4];
-                if (ctx->sni_buffer.size() >= (size_t)5 + tls_len) ready = true; 
-            }
-            else if (is_http_start(ctx->sni_buffer.data(), ctx->sni_buffer.size())) {
-                std::string host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
-                if (!host.empty()) ready = true;
-                else if (ctx->sni_buffer.size() > 1024) ready = true;
-            }
-            else if (ctx->sni_buffer.size() > 64) ready = true;
-            
-            if (ready) {
-                std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());
-                if (sni.empty()) sni = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());
-                if (!sni.empty()) {
-                    ctx->detected_domain = sni;
-                    RouteAction action = RuleManager::instance().match_domain(sni);
-                    if (action == RouteAction::DIRECT) ctx->is_direct = true;
-                    else if (action == RouteAction::PROXY) ctx->is_direct = false;
-                    else if (action == RouteAction::BLOCK) { close_tcp_ctx(ctx); return ERR_ABRT; }
-                    else {
-                        if (GeoChecker::instance().is_cn_domain(sni) || GeoChecker::instance().is_tencent_domain(sni)) ctx->is_direct = true;
-                        else if (!ctx->is_direct) ctx->is_direct = false;
-                    }
-                } else {
-                    uint32_t ip = ctx->target.original_dst_ip;
-                    RouteAction action = RuleManager::instance().match_ip(ntohl(ip));
-                    if (action == RouteAction::DIRECT) ctx->is_direct = true;
-                    else if (action == RouteAction::BLOCK) { close_tcp_ctx(ctx); return ERR_ABRT; }
-                }
-                connect_to_proxy_async(ctx);
-            }
-        }
-    }
-    pbuf_free(p);
-    return ERR_OK;
-}
-
-err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
-    uint16_t client_port = newpcb->remote_port;
-    NatEntry target = NatTable::instance().get(newpcb->remote_ip.addr, client_port);
-    if (target.original_dst_ip == 0) return ERR_ABRT;
-    tcp_nagle_disable(newpcb);
-    
-    auto ctx = std::make_shared<TcpCtx>();
-    ctx->client_pcb = newpcb;
-    ctx->target = target;
-    ctx->client_ip = newpcb->remote_ip.addr;
-    ctx->client_port = newpcb->remote_port;
-
-    TcpCtxPtr* ptr = new TcpCtxPtr(ctx);
-    ctx->lwip_arg = ptr;
-
-    uint32_t dst_ip_h = ntohl(target.original_dst_ip);
-    RouteAction ip_action = RuleManager::instance().match_ip(dst_ip_h);
-    if (ip_action == RouteAction::BLOCK) { delete ptr; return ERR_ABRT; }
-    else if (ip_action == RouteAction::DIRECT) ctx->is_direct = true;
-    else if (ip_action == RouteAction::PROXY) ctx->is_direct = false;
-    else { if (GeoChecker::instance().is_cn_ip(dst_ip_h)) ctx->is_direct = true; }
-
-    tcp_arg(newpcb, ptr);
-    tcp_recv(newpcb, tcp_client_recv);
-    tcp_sent(newpcb, tcp_client_sent);
-    tcp_err(newpcb, [](void* arg, err_t err) { 
-        TcpCtxPtr* ptr = (TcpCtxPtr*)arg;
-        if (ptr) { auto ctx = *ptr; ctx->client_pcb = NULL; close_tcp_ctx(ctx); }
-    });
-    return ERR_OK;
-}
+            if (ctx->state == TcpCtx::PRE_CONNECT) {\n                if (ctx->sni_buffer.size() < g_config.max_sni_len) {\n                    size_t to_copy = (std::min)((size_t)q->len, (size_t)(g_config.max_sni_len - ctx->sni_buffer.size()));\n                    ctx->sni_buffer.insert(ctx->sni_buffer.end(), d, d + to_copy);\n                }\n            }\n        }\n        tcp_recved(tpcb, p->tot_len);\n        \n        if (ctx->state == TcpCtx::PRE_CONNECT) {\n            bool ready = false;\n            if (ctx->sni_buffer.size() >= 5 && ctx->sni_buffer[0] == 0x16) {\n                uint16_t tls_len = ((uint16_t)ctx->sni_buffer[3] << 8) | ctx->sni_buffer[4];\n                if (ctx->sni_buffer.size() >= (size_t)5 + tls_len) ready = true; \n            }\n            else if (is_http_start(ctx->sni_buffer.data(), ctx->sni_buffer.size())) {\n                std::string host = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());\n                if (!host.empty()) ready = true;\n                else if (ctx->sni_buffer.size() > 1024) ready = true;\n            }\n            else if (ctx->sni_buffer.size() > 64) ready = true;\n            \n            if (ready) {\n                std::string sni = parse_tls_sni(ctx->sni_buffer.data(), ctx->sni_buffer.size());\n                if (sni.empty()) sni = parse_http_host(ctx->sni_buffer.data(), ctx->sni_buffer.size());\n                if (!sni.empty()) {\n                    ctx->detected_domain = sni;\n                    RouteAction action = RuleManager::instance().match_domain(sni);\n                    if (action == RouteAction::DIRECT) ctx->is_direct = true;\n                    else if (action == RouteAction::PROXY) ctx->is_direct = false;\n                    else if (action == RouteAction::BLOCK) { close_tcp_ctx(ctx); return ERR_ABRT; }\n                    else {\n                        if (GeoChecker::instance().is_cn_domain(sni) || GeoChecker::instance().is_tencent_domain(sni)) ctx->is_direct = true;\n                        else if (!ctx->is_direct) ctx->is_direct = false;\n                    }\n                } else {\n                    uint32_t ip = ctx->target.original_dst_ip;\n                    RouteAction action = RuleManager::instance().match_ip(ntohl(ip));\n                    if (action == RouteAction::DIRECT) ctx->is_direct = true;\n                    else if (action == RouteAction::BLOCK) { close_tcp_ctx(ctx); return ERR_ABRT; }\n                }\n                connect_to_proxy_async(ctx);\n            }\n        }\n    }\n    pbuf_free(p);\n    return ERR_OK;\n}\n\nerr_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {\n    uint16_t client_port = newpcb->remote_port;\n    NatEntry target = NatTable::instance().get(newpcb->remote_ip.addr, client_port);\n    if (target.original_dst_ip == 0) return ERR_ABRT;\n    tcp_nagle_disable(newpcb);\n    \n    auto ctx = std::make_shared<TcpCtx>();\n    ctx->client_pcb = newpcb;\n    ctx->target = target;\n    ctx->client_ip = newpcb->remote_ip.addr;\n    ctx->client_port = newpcb->remote_port;\n\n    TcpCtxPtr* ptr = new TcpCtxPtr(ctx);\n    ctx->lwip_arg = ptr;\n\n    uint32_t dst_ip_h = ntohl(target.original_dst_ip);\n    RouteAction ip_action = RuleManager::instance().match_ip(dst_ip_h);\n    if (ip_action == RouteAction::BLOCK) { delete ptr; return ERR_ABRT; }\n    else if (ip_action == RouteAction::DIRECT) ctx->is_direct = true;\n    else if (ip_action == RouteAction::PROXY) ctx->is_direct = false;\n    else { if (GeoChecker::instance().is_cn_ip(dst_ip_h)) ctx->is_direct = true; }\n\n    tcp_arg(newpcb, ptr);\n    tcp_recv(newpcb, tcp_client_recv);\n    tcp_sent(newpcb, tcp_client_sent);\n    tcp_err(newpcb, [](void* arg, err_t err) { \n        TcpCtxPtr* ptr = (TcpCtxPtr*)arg;\n        if (ptr) { auto ctx = *ptr; ctx->client_pcb = NULL; close_tcp_ctx(ctx); }\n    });\n    return ERR_OK;\n}
