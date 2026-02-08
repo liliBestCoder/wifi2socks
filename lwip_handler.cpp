@@ -22,6 +22,7 @@
 
 #include "lwip/prot/ethernet.h"
 #include "lwip/etharp.h"
+#include "lwip/prot/etharp.h"
 #include "lwip/prot/tcp.h"
 #include "lwip/prot/udp.h"
 #include "lwip/raw.h"
@@ -43,7 +44,8 @@ extern "C" unsigned int sys_win_rand() { return (unsigned int)rand(); }
 extern "C" void lwip_win32_platform_diag(const char *format, ...) {
     va_list ap; va_start(ap, format); 
     char buf[1024]; vsnprintf(buf, sizeof(buf), format, ap);
-    OutputDebugStringA(buf); va_end(ap);
+    LOG_DEBUG("[LwIP_Diag] %s", buf);
+    va_end(ap);
 }
 
 extern "C" const char* lwip_strerr(int8_t err) { return "LwIP_Error"; }
@@ -106,8 +108,8 @@ err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
         struct eth_hdr* eth = (struct eth_hdr*)buf.data();
         uint16_t type = ntohs(eth->type);
         if (type == ETHTYPE_IP) {
-            LOG_DEBUG("[LwIP] linkoutput: Sending IP packet, len=%d", (int)buf.size());
             struct ip_hdr* ip = (struct ip_hdr*)(buf.data() + sizeof(struct eth_hdr));
+            LOG_DEBUG("[LwIP] linkoutput: Sending IP packet %d bytes, proto=%d", (int)buf.size(), (int)IPH_PROTO(ip));
             if (IPH_PROTO(ip) == IP_PROTO_TCP) {
                 uint8_t* tcp_base = (uint8_t*)ip + IPH_HL(ip) * 4;
                 uint16_t src_p = ntohs(*(uint16_t*)tcp_base);
@@ -124,9 +126,7 @@ err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
                 }
             }
         } else if (type == ETHTYPE_ARP) {
-            LOG_DEBUG("[LwIP] linkoutput: Sending ARP packet, len=%d", (int)buf.size());
-        } else {
-            LOG_DEBUG("[LwIP] linkoutput: Sending packet type 0x%04X, len=%d", type, (int)buf.size());
+            LOG_DEBUG("[LwIP] linkoutput: Sending ARP packet %d bytes", (int)buf.size());
         }
     }
     
@@ -137,18 +137,22 @@ err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
 static u8_t lwip_udp_raw_recv(void* arg, struct raw_pcb* pcb, struct pbuf* p, const ip_addr_t* addr) {
     if (p != NULL) {
         struct ip_hdr* ip = (struct ip_hdr*)p->payload;
+        uint16_t ip_hdr_len = IPH_HL(ip) * 4;
+        
+        char src_str[16], dst_str[16];
+        ip4addr_ntoa_r((const ip4_addr_t*)&ip->src.addr, src_str, sizeof(src_str));
+        ip4addr_ntoa_r((const ip4_addr_t*)&ip->dest.addr, dst_str, sizeof(dst_str));
+        LOG_DEBUG("[LwIP] raw_recv UDP packet from %s to %s, proto=%d", src_str, dst_str, (int)IPH_PROTO(ip));
+
         if (IPH_PROTO(ip) == IP_PROTO_UDP) {
             uint8_t* buf = (uint8_t*)p->payload;
             int len = p->tot_len;
-            uint8_t* udp_ptr = buf + IPH_HL(ip) * 4;
-            if (len >= IPH_HL(ip) * 4 + 8) {
+            uint8_t* udp_ptr = buf + ip_hdr_len;
+            if (len >= ip_hdr_len + 8) {
                 uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
                 uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
                 
-                char src_str[16], dst_str[16];
-                ip4addr_ntoa_r((const ip4_addr_t*)&ip->src.addr, src_str, sizeof(src_str));
-                ip4addr_ntoa_r((const ip4_addr_t*)&ip->dest.addr, dst_str, sizeof(dst_str));
-                LOG_DEBUG("[LwIP] raw_recv UDP: %s:%d -> %s:%d", src_str, ntohs(src_port), dst_str, ntohs(dst_port));
+                LOG_DEBUG("[LwIP] UDP Ports: %d -> %d", ntohs(src_port), ntohs(dst_port));
 
                 NatEntry target = NatTable::instance().get(ip->src.addr, ntohs(src_port));
                 uint32_t real_dst_ip = ip->dest.addr;
@@ -157,7 +161,7 @@ static u8_t lwip_udp_raw_recv(void* arg, struct raw_pcb* pcb, struct pbuf* p, co
                     real_dst_ip = target.original_dst_ip;
                     real_dst_port = htons(target.original_dst_port);
                 }
-                handle_udp_packet(ip->src.addr, real_dst_ip, src_port, real_dst_port, udp_ptr + 8, len - (IPH_HL(ip) * 4 + 8));
+                handle_udp_packet(ip->src.addr, real_dst_ip, src_port, real_dst_port, udp_ptr + 8, len - (ip_hdr_len + 8));
             }
         }
         pbuf_free(p);
@@ -205,7 +209,12 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
     uint16_t eth_type = ntohs(eth->type);
 
     if (eth_type == ETHTYPE_ARP) {
-        LOG_DEBUG("[LwIP] Inbound ARP packet received");
+        struct etharp_hdr* arphdr = (struct etharp_hdr*)(buf.data() + sizeof(struct eth_hdr));
+        char tip_str[16];
+        ip4_addr_t tip;
+        memcpy(&tip.addr, &arphdr->dipaddr, 4);
+        ip4addr_ntoa_r(&tip, tip_str, sizeof(tip_str));
+        LOG_DEBUG("[LwIP] Inbound ARP packet: op=%d, target=%s", ntohs(arphdr->opcode), tip_str);
     }
 
     const uint8_t* smac = (const uint8_t*)&eth->src;
@@ -261,9 +270,18 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
     struct pbuf* p = pbuf_alloc(PBUF_RAW, (uint16_t)buf.size(), PBUF_POOL);
     if (p) {
         pbuf_take(p, buf.data(), (uint16_t)buf.size());
+        
+        char netif_ip_str[16];
+        ip4addr_ntoa_r(netif_ip4_addr(&g_netif), netif_ip_str, sizeof(netif_ip_str));
+        
         err_t err = g_netif.input(p, &g_netif);
         if (err != ERR_OK) {
-            LOG_ERROR("[LwIP] packet rejected by g_netif.input: %d", err);
+            LOG_ERROR("[LwIP] packet (type 0x%04X) rejected by g_netif.input (%s): %d", eth_type, netif_ip_str, err);
+        } else {
+            // For UDP packets that should have been handled by raw_pcb, if they weren't, they will just disappear into LwIP
+            if (eth_type == ETHTYPE_IP) {
+                 // LOG_DEBUG("[LwIP] packet accepted by netif %s", netif_ip_str);
+            }
         }
     } else {
         LOG_ERROR("[LwIP] pbuf_alloc failed for packet size %d", (int)buf.size());

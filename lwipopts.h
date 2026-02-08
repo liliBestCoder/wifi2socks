@@ -38,11 +38,18 @@
 #define ETHARP_SUPPORT_STATIC_ENTRIES   1
 
 // Force disable stats that might conflict with Windows headers
+#ifdef IP6_STATS
+#undef IP6_STATS
+#endif
+#define IP6_STATS                       0
+
+#ifdef TCP_STATS
+#undef TCP_STATS
+#endif
+#define TCP_STATS                       0
+
 #ifndef LWIP_STATS
 #define LWIP_STATS                      0
-#endif
-#ifndef IP6_STATS
-#define IP6_STATS                       0
 #endif
 
 // --- 5. OPTIMIZATIONS ---
@@ -60,6 +67,8 @@
 #define UDP_DEBUG                       LWIP_DBG_ON
 #define NETIF_DEBUG                     LWIP_DBG_ON
 #define ETHARP_DEBUG                    LWIP_DBG_ON
+#define ICMP_DEBUG                      LWIP_DBG_ON
+#define DHCP_DEBUG                      LWIP_DBG_ON
 
 // --- 7. PLATFORM ---
 #define LWIP_DONT_PROVIDE_BYTEORDER_FUNCTIONS 0
