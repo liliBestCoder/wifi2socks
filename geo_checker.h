@@ -65,7 +65,6 @@ private:
 
     // Sync
     std::atomic<bool> m_ready;
-    std::thread m_load_thread;
     mutable std::shared_mutex m_mtx;
 
     // 数据存储

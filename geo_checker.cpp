@@ -31,7 +31,6 @@ GeoChecker::GeoChecker() : m_ready(false) {
 }
 
 GeoChecker::~GeoChecker() {
-    if (m_load_thread.joinable()) m_load_thread.join();
 }
 
 void GeoChecker::load_data(const std::string& geoip_file, const std::string& geosite_file) {
@@ -51,12 +50,10 @@ void GeoChecker::load_data(const std::string& geoip_file, const std::string& geo
     geosite_code_cache_.clear();
 
     m_ready = true;
-    printf("[GeoChecker] Loaded sync. Ready.\n");
 }
 
 void GeoChecker::init(const std::string& geoip_file, const std::string& geosite_file) {
-    if (m_load_thread.joinable()) m_load_thread.join();
-    m_load_thread = std::thread(&GeoChecker::load_data, this, geoip_file, geosite_file);
+    load_data(geoip_file, geosite_file);
 }
 
 static bool read_file_to_buffer(const std::string& filepath, std::vector<char>& buffer) {
