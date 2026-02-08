@@ -1,6 +1,9 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #define NOMINMAX
@@ -252,8 +255,8 @@ void send_dns_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
         size_t next_dot = domain.find('.', pos);
         std::string label = (next_dot == std::string::npos) ? domain.substr(pos) : domain.substr(pos, next_dot - pos);
         pos = (next_dot == std::string::npos) ? domain.length() : next_dot + 1;
-        resp.push_back((uint8_t)std::min((size_t)63, label.length()));
-        for (size_t i=0; i<std::min((size_t)63, label.length()); ++i) resp.push_back(label[i]);
+        resp.push_back((uint8_t)(std::min)((size_t)63, label.length()));
+        for (size_t i=0; i<(std::min)((size_t)63, label.length()); ++i) resp.push_back(label[i]);
     }
     resp.push_back(0); 
     resp.push_back(0x00); resp.push_back(0x01); resp.push_back(0x00); resp.push_back(0x01);
@@ -393,7 +396,7 @@ std::vector<uint8_t> build_dns_query(uint16_t id, const std::string& domain) {
         size_t next_dot = domain.find('.', pos);
         std::string label = (next_dot == std::string::npos) ? domain.substr(pos) : domain.substr(pos, next_dot - pos);
         pos = (next_dot == std::string::npos) ? domain.length() : next_dot + 1;
-        req.push_back((uint8_t)std::min((size_t)63, label.length()));
+        req.push_back((uint8_t)(std::min)((size_t)63, label.length()));
         for (char c : label) req.push_back(c);
     }
     req.push_back(0); req.push_back(0x00); req.push_back(0x01); req.push_back(0x00); req.push_back(0x01);

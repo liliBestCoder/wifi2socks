@@ -120,6 +120,8 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
     // Packet from client (Wire)
     struct eth_hdr* eth = (struct eth_hdr*)packet;
     uint16_t eth_type = ntohs(eth->type);
+    const uint8_t* src_mac = (const uint8_t*)&eth->src;
+    const uint8_t* dst_mac = (const uint8_t*)&eth->dest;
 
     if (eth_type == ETHTYPE_IP) {
         struct ip_hdr* ip = (struct ip_hdr*)(packet + sizeof(struct eth_hdr));

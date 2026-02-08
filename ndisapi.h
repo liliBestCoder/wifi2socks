@@ -14,6 +14,11 @@
 /*************************************************************************/
 #pragma once
 
+#include <winsock2.h>
+#include <windows.h>
+#include <tchar.h>
+#include "Common.h"
+
 #ifdef _LIB // must be defined when linking static library version of ndisapi.dll
 #define NDISAPI_API 
 #else

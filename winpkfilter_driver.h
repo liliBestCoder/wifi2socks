@@ -1,14 +1,16 @@
 #pragma once
 
+#include <winsock2.h>
 #include <windows.h>
+#include <tchar.h>
 #include <string>
 #include <functional>
 #include <thread>
 #include <vector>
 #include <mutex>
 
-// We'll define the necessary structures if ndisapi.h is not found, 
-// but since the user installed it, we expect it to be available.
+// WinPkFilter SDK headers
+#include "Common.h"
 #include "ndisapi.h"
 
 class WinPkFilterDriver {

@@ -100,7 +100,7 @@ bool is_http_start(const uint8_t* data, size_t len) {
 std::string parse_http_host(const uint8_t* data, size_t len) {
     if (!is_http_start(data, len)) return "";
     
-    std::string s((const char*)data, std::min((size_t)len, (size_t)4096)); // Limit scan
+    std::string s((const char*)data, (std::min)((size_t)len, (size_t)4096)); // Limit scan
     
     // Case-insensitive search helper
     auto find_case_insensitive = [](const std::string& haystack, const std::string& needle, size_t pos) -> size_t {
