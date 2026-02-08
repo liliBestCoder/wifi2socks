@@ -68,14 +68,13 @@ static bool read_file_to_buffer(const std::string& filepath, std::vector<char>& 
 }
 
 void GeoChecker::load_geoip(const std::string& filepath) {
-    // 使用指针分配且不 delete，以规避 /MT 与 Protobuf DLL (/MD) 堆空间不一致导致的析构崩溃
-    auto* list = new v2ray::core::app::router::routercommon::GeoIPList();
+    v2ray::core::app::router::routercommon::GeoIPList list;
     std::vector<char> buffer;
     if (!read_file_to_buffer(filepath, buffer)) return;
-    if (!list->ParseFromArray(buffer.data(), (int)buffer.size())) return;
+    if (!list.ParseFromArray(buffer.data(), (int)buffer.size())) return;
 
-    for (int i = 0; i < list->entry_size(); ++i) {
-        const auto& entry = list->entry(i);
+    for (int i = 0; i < list.entry_size(); ++i) {
+        const auto& entry = list.entry(i);
         uint16_t idx = get_or_create_geoip_code(entry.country_code());
         for (int j = 0; j < entry.cidr_size(); ++j) {
             const auto& cidr = entry.cidr(j);
@@ -130,14 +129,13 @@ uint16_t GeoChecker::get_or_create_geosite_code(const std::string& code) {
 }
 
 void GeoChecker::load_geosite(const std::string& filepath) {
-    // 使用指针分配且不 delete，以规避析构时的堆冲突
-    auto* list = new v2ray::core::app::router::routercommon::GeoSiteList();
+    v2ray::core::app::router::routercommon::GeoSiteList list;
     std::vector<char> buffer;
     if (!read_file_to_buffer(filepath, buffer)) return;
-    if (!list->ParseFromArray(buffer.data(), (int)buffer.size())) return;
+    if (!list.ParseFromArray(buffer.data(), (int)buffer.size())) return;
 
-    for (int i = 0; i < list->entry_size(); ++i) {
-        const auto& entry = list->entry(i);
+    for (int i = 0; i < list.entry_size(); ++i) {
+        const auto& entry = list.entry(i);
         uint16_t idx = get_or_create_geosite_code(entry.country_code());
         for (int j = 0; j < entry.domain_size(); ++j) {
             const auto& d = entry.domain(j);
