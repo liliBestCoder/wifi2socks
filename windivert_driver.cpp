@@ -19,7 +19,7 @@ WinDivertDriver::~WinDivertDriver() {
 bool WinDivertDriver::start(PacketHandler handler) {
     packet_handler_ = handler;
     // 使用 WINDIVERT_LAYER_ETHERNET 以支持二层拦截，绕过 ICS
-    handle_ = WinDivertOpen(filter_.c_str(), WINDIVERT_LAYER_ETHERNET, 1000, 0);
+    handle_ = WinDivertOpen(filter_.c_str(), (WINDIVERT_LAYER)WINDIVERT_LAYER_ETHERNET, 1000, 0);
     if (handle_ == INVALID_HANDLE_VALUE) {
         LOG_INFO("Failed to open WinDivert handle. Error: %d. Make sure WinDivert.dll is in the same directory as the executable.", GetLastError());
         return false;
