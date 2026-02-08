@@ -125,13 +125,15 @@ int main() {
     netif_set_link_up(&g_netif);
 
     if (!adapter_name.empty()) {
-        pk_driver.start_batch(adapter_name, [](std::vector<WinPkFilterDriver::Packet>&& packets) {
+        if (!pk_driver.start_batch(adapter_name, [](std::vector<WinPkFilterDriver::Packet>&& packets) {
             MainDispatcher::instance().queue_task([pkts = std::move(packets)]() {
                 for (const auto& p : pkts) {
                     process_ethernet_frame(p.data.data(), p.data.size(), p.outbound);
                 }
             });
-        });
+        })) {
+            LOG_ERROR("[CORE] Failed to start WinPkFilter driver in batch mode.");
+        }
     }
 
     struct tcp_pcb* pcb = tcp_new();
