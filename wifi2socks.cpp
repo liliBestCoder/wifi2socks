@@ -149,7 +149,7 @@ int main() {
         udp_check_timeouts();
         NatTable::instance().cleanup(300000); 
         WiFiAPManager::instance().CheckKeepAlive();
-        Sleep(50); 
+        Sleep(1); 
     }
     return 0;
 }

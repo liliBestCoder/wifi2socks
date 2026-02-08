@@ -15,8 +15,10 @@
 #define MEM_LIBC_MALLOC                 1
 #define MEMP_MEM_MALLOC                 1
 #define MEM_ALIGNMENT                   4
-#define PBUF_POOL_SIZE                  4096 
+#define PBUF_POOL_SIZE                  16384 
 #define PBUF_POOL_BUFSIZE               2048 
+#define MEMP_NUM_TCP_SEG                16384
+#define TCP_OVERSIZE                    1300
 
 // --- 4. TCP/IP ---
 #define LWIP_TCP                        1
