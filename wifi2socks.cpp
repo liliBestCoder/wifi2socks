@@ -93,8 +93,8 @@ int main() {
 
     TrafficManager::instance().start();
 
-    // 禁用 GeoChecker
-    LOG_INFO("[CORE] GeoChecker Disabled by user request.");
+    GeoChecker::instance().init();
+    LOG_INFO("[CORE] GeoChecker Initialized.");
 
     std::string adapter_name = find_adapter_by_ip(g_config.tap_ip);
     static WinPkFilterDriver pk_driver;
