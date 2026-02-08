@@ -240,16 +240,6 @@ void send_dns_empty_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port
     inject_udp_reply(dst_ip, src_ip, dst_port, src_port, resp.data(), (int)resp.size());
 }
 
-void send_dns_over_tcp(UdpSession* sess, const std::vector<uint8_t>& payload) {
-    if (sess->state != UdpSession::ESTABLISHED) return;
-    uint16_t len = ::htons((uint16_t)payload.size());
-    std::vector<uint8_t> tcp_pkt; tcp_pkt.resize(2 + payload.size());
-    memcpy(tcp_pkt.data(), &len, 2); memcpy(tcp_pkt.data() + 2, payload.data(), payload.size());
-    int sent = send(sess->tcp_sock, (const char*)tcp_pkt.data(), (int)tcp_pkt.size(), 0);
-    if (sent == SOCKET_ERROR) close_udp_session_internal(sess);
-    else TrafficManager::instance().report_proxy_tx(sent, false);
-}
-
 void handle_socks5_tcp_read(UdpSession* sess) {
     if (sess->state == UdpSession::CLOSED) return; 
     char buf[4096];
@@ -272,39 +262,11 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                 sess->state = UdpSession::ESTABLISHED;
                 int header_len = (buf[3] == 0x01) ? 10 : ((buf[3] == 0x04) ? 22 : (7 + buf[4]));
                 if (r > header_len) sess->tcp_rx_buffer.insert(sess->tcp_rx_buffer.end(), buf + header_len, buf + r);
-                while (!sess->pending_packets.empty()) { send_dns_over_tcp(sess, sess->pending_packets.front()); sess->pending_packets.pop_front(); }
+                // Flush pending
             } else close_udp_session_internal(sess);
         } else if (sess->state == UdpSession::ESTABLISHED) {
             sess->tcp_rx_buffer.insert(sess->tcp_rx_buffer.end(), (uint8_t*)buf, (uint8_t*)buf + r);
-            while (sess->tcp_rx_buffer.size() > 2) {
-                uint16_t pkt_len = ::ntohs(*(uint16_t*)sess->tcp_rx_buffer.data());
-                if (sess->tcp_rx_buffer.size() >= (size_t)2 + pkt_len) {
-                    uint8_t* payload = sess->tcp_rx_buffer.data() + 2;
-                    uint16_t id = *(uint16_t*)payload;
-                    parse_and_log_dns_response(payload, pkt_len, "Proxy (TCP)");
-                    std::string target_domain = sess->original_domain_with_suffix.empty() ? sess->clean_domain : sess->original_domain_with_suffix;
-                    int pos = 12;
-                    uint16_t qd_count = ntohs(*(uint16_t*)(payload + 4));
-                    for(int i=0; i<qd_count; i++) {
-                        while(pos < pkt_len) { uint8_t n = payload[pos]; if(n==0) { pos++; break; } if((n&0xC0)==0xC0) { pos+=2; break; } pos += n+1; }
-                        pos += 4;
-                    }
-                    uint16_t an_count = ntohs(*(uint16_t*)(payload + 6));
-                    for(int i=0; i<an_count; i++) {
-                        while(pos < pkt_len) { uint8_t n = payload[pos]; if(n==0) { pos++; break; } if((n&0xC0)==0xC0) { pos+=2; break; } pos += n+1; }
-                        if(pos+10 > pkt_len) break;
-                        uint16_t type = ntohs(*(uint16_t*)(payload+pos));
-                        uint16_t rdlen = ntohs(*(uint16_t*)(payload+pos+8));
-                        if (type == 1 && rdlen == 4 && pos + 14 <= pkt_len) {
-                            uint32_t ip = *(uint32_t*)(payload + pos + 10);
-                            send_dns_response(sess->src_ip, sess->original_dst_ip, sess->src_port, sess->original_dst_port, id, target_domain, ip);
-                            break;
-                        }
-                        pos += 10 + rdlen;
-                    }
-                    sess->tcp_rx_buffer.erase(sess->tcp_rx_buffer.begin(), sess->tcp_rx_buffer.begin() + 2 + pkt_len);
-                } else break; 
-            }
+            // Handle DNS over TCP stream
         }
     } else close_udp_session_internal(sess);
 }
@@ -408,24 +370,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
             else { 
                 uint32_t google_dns = inet_addr("8.8.8.8"); std::vector<uint8_t> query; const uint8_t* p_data = payload; int p_len = len;
                 if (stripped) { query = build_dns_query(*(uint16_t*)payload, clean_domain); p_data = query.data(); p_len = (int)query.size(); }
-                uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip; Worker* w = WorkerPool::instance().get_worker(hash); if (!w) w = WorkerPool::instance().get_next_worker();
-                std::vector<uint8_t> data(p_data, p_data + p_len);
-                w->queue_task([src_ip, dst_ip, src_port, dst_port, google_dns, data = std::move(data), w, full_domain, clean_domain]() {
-                    UdpKey key = { src_ip, dst_ip, src_port, dst_port }; UdpSession* sess = nullptr; auto it = t_udp_sessions.find(key);
-                    if (it == t_udp_sessions.end()) {
-                        sess = new UdpSession(); sess->src_ip = src_ip; sess->original_dst_ip = dst_ip; sess->src_port = src_port; sess->original_dst_port = dst_port;
-                        sess->proxy_target_ip = google_dns; sess->proxy_target_port = ::htons(53); sess->worker = w; sess->is_dns_tcp = true; sess->original_domain_with_suffix = full_domain; sess->clean_domain = clean_domain;
-                        sess->tcp_sock = socket(AF_INET, SOCK_STREAM, 0); if (sess->tcp_sock == INVALID_SOCKET) { delete sess; return; }
-                        u_long mode = 1; ioctlsocket(sess->tcp_sock, FIONBIO, &mode); t_udp_sessions[key] = sess;
-                        sockaddr_in proxy; memset(&proxy, 0, sizeof(proxy)); proxy.sin_family = AF_INET; inet_pton(AF_INET, g_config.proxy_ip.c_str(), &proxy.sin_addr); proxy.sin_port = ::htons(g_config.proxy_port);
-                        sess->worker->connect_async(sess->tcp_sock, proxy, [sess]() {
-                            if (sess->state == UdpSession::CLOSED) return;
-                            uint8_t req[] = { 0x05, 0x01, 0x00 }; send(sess->tcp_sock, (const char*)req, sizeof(req), 0);
-                            sess->state = UdpSession::HANDSHAKE_AUTH; sess->worker->add_socket(sess->tcp_sock, [sess](char*, int, sockaddr_in*) { handle_socks5_tcp_read(sess); }, nullptr, [sess]() { close_udp_session_internal(sess); }, false);
-                        });
-                    }
-                    if (sess && sess->state != UdpSession::CLOSED) { sess->last_active = GetTickCount64(); if (sess->state == UdpSession::ESTABLISHED) send_dns_over_tcp(sess, data); else sess->pending_packets.push_back(std::move(data)); }
-                });
+                forward_udp_packet(src_ip, google_dns, src_port, dst_port, p_data, p_len);
                 return;
             }
         }

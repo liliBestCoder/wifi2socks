@@ -14,6 +14,7 @@
 #include "app_config.h"
 #include "proxy_udp.h"
 #include "dhcp_server.h"
+#include "logger.h"
 #include <vector>
 #include <iostream>
 #include <stdarg.h>
@@ -160,17 +161,19 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
 
             if (IPH_PROTO(ip) == IP_PROTO_UDP) {
                 uint8_t* udp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
-                uint16_t src_port_h = ntohs(*(uint16_t*)(udp_ptr + 0));
                 uint16_t dst_port_h = ntohs(*(uint16_t*)(udp_ptr + 2));
+                uint16_t src_port_h = ntohs(*(uint16_t*)(udp_ptr + 0));
+
                 if (dst_port_h == 67 && g_dhcp_server_ptr) {
                     sockaddr_in client_sa;
                     memset(&client_sa, 0, sizeof(client_sa));
                     client_sa.sin_family = AF_INET;
                     client_sa.sin_addr.S_un.S_addr = ip->src.addr;
+                    LOG_INFO("[LwIP] Hijacking DHCP Request from %d.%d.%d.%d", (ip->src.addr & 0xFF), (ip->src.addr >> 8) & 0xFF, (ip->src.addr >> 16) & 0xFF, (ip->src.addr >> 24) & 0xFF);
                     g_dhcp_server_ptr->handle_request((const char*)udp_ptr + 8, ip_len - (IPH_HL(ip) * 4 + 8), client_sa);
                     return; 
                 }
-                // --- REDIRECT UDP ---
+                
                 NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, smac, dmac);
                 ip->dest.addr = lwip_ip.addr;
                 IPH_CHKSUM_SET(ip, 0);
@@ -180,9 +183,11 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
                 uint8_t* tcp_base = (uint8_t*)ip + IPH_HL(ip) * 4;
                 uint16_t src_port_h = ntohs(*(uint16_t*)(tcp_base + 0));
                 uint16_t dst_port_h = ntohs(*(uint16_t*)(tcp_base + 2));
+
                 NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, smac, dmac);
                 ip->dest.addr = lwip_ip.addr;
                 *(uint16_t*)(tcp_base + 2) = htons(g_config.lwip_listen_port);
+
                 IPH_CHKSUM_SET(ip, 0);
                 IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
                 recalculate_tcp_checksum(ip, tcp_base, ip_len - IPH_HL(ip) * 4);
@@ -193,7 +198,9 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
     struct pbuf* p = pbuf_alloc(PBUF_RAW, (uint16_t)buf.size(), PBUF_POOL);
     if (p) {
         pbuf_take(p, buf.data(), (uint16_t)buf.size());
-        if (g_netif.input(p, &g_netif) != ERR_OK) {
+        err_t err = g_netif.input(p, &g_netif);
+        if (err != ERR_OK) {
+            LOG_ERROR("[LwIP] netif.input failed: %d", (int)err);
             pbuf_free(p);
         }
     }
