@@ -174,76 +174,149 @@ err_t netif_init_cb(struct netif* netif) {
 }
 
 void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
+
     if (length < sizeof(struct eth_hdr) || length > 9014) return;
+
+    
+
     if (outbound) {
+
         struct eth_hdr* eth = (struct eth_hdr*)packet;
+
         if (ntohs(eth->type) == ETHTYPE_IP) {
+
             struct ip_hdr* ip = (struct ip_hdr*)(packet + sizeof(struct eth_hdr));
+
             if (IPH_PROTO(ip) == IP_PROTO_UDP) {
+
                 uint8_t* udp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
+
                 if (ntohs(*(uint16_t*)(udp_ptr + 0)) == 67) {
+
                     ip4_addr_t lwip_ip; ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
+
                     if (ip->src.addr != lwip_ip.addr) return; 
+
                 }
+
             }
+
         }
+
         if (g_winpkfilter_driver) g_winpkfilter_driver->send_to_adapter(packet, length);
+
         return;
+
     }
 
-    static std::vector<uint8_t> buf;
-    buf.assign(packet, packet + length);
-    struct eth_hdr* eth = (struct eth_hdr*)buf.data();
+
+
+    struct pbuf* p = pbuf_alloc(PBUF_RAW, (uint16_t)length, PBUF_RAM);
+
+    if (!p) {
+
+        LOG_ERROR("[LwIP] pbuf_alloc failed for packet size %d", (int)length);
+
+        return;
+
+    }
+
+    memcpy(p->payload, packet, length);
+
+
+
+    struct eth_hdr* eth = (struct eth_hdr*)p->payload;
+
     uint16_t eth_type = ntohs(eth->type);
 
-    const uint8_t* smac = (const uint8_t*)&eth->src;
-    const uint8_t* dmac = (const uint8_t*)&eth->dest;
+
 
     if (eth_type == ETHTYPE_IP) {
-        // --- 修复：入站 IP 包必须将目标 MAC 改为 LwIP 接口的 MAC ---
+
+        // Update destination MAC to LwIP's MAC
+
         memcpy(eth->dest.addr, g_netif.hwaddr, 6);
 
-        struct ip_hdr* ip = (struct ip_hdr*)(buf.data() + sizeof(struct eth_hdr));
-        int ip_len = (int)buf.size() - (int)sizeof(struct eth_hdr);
+
+
+        struct ip_hdr* ip = (struct ip_hdr*)((uint8_t*)p->payload + sizeof(struct eth_hdr));
+
+        int ip_len = (int)p->len - (int)sizeof(struct eth_hdr);
+
         
+
         if (IPH_V(ip) == 4) {
+
             ip4_addr_t lwip_ip; ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
 
+
+
             if (IPH_PROTO(ip) == IP_PROTO_UDP) {
+
                 uint8_t* udp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
+
                 uint16_t sp_h = ntohs(*(uint16_t*)(udp_ptr + 0));
+
                 uint16_t dp_h = ntohs(*(uint16_t*)(udp_ptr + 2));
+
                 
+
                 if (dp_h == 67 && g_dhcp_server_ptr) {
+
                     sockaddr_in sa; memset(&sa, 0, sizeof(sa));
+
                     sa.sin_family = AF_INET; sa.sin_addr.S_un.S_addr = ip->src.addr;
+
                     g_dhcp_server_ptr->handle_request((const char*)udp_ptr + 8, ip_len - (IPH_HL(ip) * 4 + 8), sa);
+
+                    pbuf_free(p);
+
                     return; 
+
                 }
+
                 // --- REDIRECT UDP ---
-                NatTable::instance().set(ip->src.addr, sp_h, ip->dest.addr, dp_h, smac, dmac);
+
+                NatTable::instance().set(ip->src.addr, sp_h, ip->dest.addr, dp_h, (const uint8_t*)&eth->src, (const uint8_t*)&eth->dest);
+
                 ip->dest.addr = lwip_ip.addr;
+
                 IPH_CHKSUM_SET(ip, 0); IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+
                 recalculate_udp_checksum(ip, udp_ptr, ip_len - IPH_HL(ip) * 4);
+
             }
+
             else if (IPH_PROTO(ip) == IP_PROTO_TCP) {
+
                 uint8_t* tcp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
+
                 uint16_t sp_h = ntohs(*(uint16_t*)(tcp_ptr + 0));
+
                 uint16_t dp_h = ntohs(*(uint16_t*)(tcp_ptr + 2));
-                NatTable::instance().set(ip->src.addr, sp_h, ip->dest.addr, dp_h, smac, dmac);
+
+                NatTable::instance().set(ip->src.addr, sp_h, ip->dest.addr, dp_h, (const uint8_t*)&eth->src, (const uint8_t*)&eth->dest);
+
                 ip->dest.addr = lwip_ip.addr;
+
                 *(uint16_t*)(tcp_ptr + 2) = htons(g_config.lwip_listen_port);
+
                 IPH_CHKSUM_SET(ip, 0); IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+
                 recalculate_tcp_checksum(ip, tcp_ptr, ip_len - IPH_HL(ip) * 4);
+
             }
+
         }
+
     }
 
-    struct pbuf* p = pbuf_alloc(PBUF_RAW, (uint16_t)buf.size(), PBUF_POOL);
-    if (p) {
-        pbuf_take(p, buf.data(), (uint16_t)buf.size());
-        g_netif.input(p, &g_netif);
-    } else {
-        LOG_ERROR("[LwIP] pbuf_alloc failed for packet size %d", (int)buf.size());
+
+
+    if (g_netif.input(p, &g_netif) != ERR_OK) {
+
+        pbuf_free(p);
+
     }
+
 }

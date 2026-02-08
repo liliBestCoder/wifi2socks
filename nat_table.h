@@ -1,9 +1,8 @@
 #pragma once
 #include <cstdint>
-#include <map>
+#include <unordered_map>
 #include <utility>
 #include <mutex>
-#include <unordered_set>
 #include <string>
 #include <vector>
 
@@ -15,6 +14,12 @@ struct NatEntry {
     uint8_t src_mac[6];
     uint8_t dst_mac[6];
     uint64_t last_active;
+};
+
+struct PairHash {
+    size_t operator()(const std::pair<uint32_t, uint16_t>& p) const {
+        return std::hash<uint32_t>{}(p.first) ^ (std::hash<uint16_t>{}(p.second) << 1);
+    }
 };
 
 // Singleton or global access to NAT table
@@ -30,6 +35,6 @@ public:
     void cleanup(uint64_t timeout_ms);
 
 private:
-    std::map<std::pair<uint32_t, uint16_t>, NatEntry> m_table;
+    std::unordered_map<std::pair<uint32_t, uint16_t>, NatEntry, PairHash> m_table;
     std::mutex m_mtx;
 };

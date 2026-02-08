@@ -55,7 +55,7 @@ std::vector<std::pair<std::string, std::string>> WinPkFilterDriver::get_adapters
     return result;
 }
 
-bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler handler) {
+bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler handler, std::function<void()> on_before_batch, std::function<void()> on_after_batch) {
     LOG_INFO("[Driver] Initializing WinPkFilter on: %s", adapter_name.c_str());
     if (!m_ndis_api.IsDriverLoaded()) {
         LOG_ERROR("WinPkFilter driver not loaded.");
@@ -88,6 +88,9 @@ bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler han
     }
 
     m_packet_handler = handler;
+    m_on_before_batch = on_before_batch;
+    m_on_after_batch = on_after_batch;
+
     m_wait_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (!m_ndis_api.SetPacketEvent(m_adapter_handle, m_wait_event)) return false;
 
@@ -112,6 +115,8 @@ void WinPkFilterDriver::stop() {
         m_adapter_handle = nullptr;
     }
     if (m_wait_event) { CloseHandle(m_wait_event); m_wait_event = nullptr; }
+    m_on_before_batch = nullptr;
+    m_on_after_batch = nullptr;
 }
 
 void WinPkFilterDriver::run() {
@@ -122,12 +127,18 @@ void WinPkFilterDriver::run() {
         if (!m_running) break;
 
         while (m_running && m_ndis_api.ReadPackets(m_read_request)) {
-            for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
-                PINTERMEDIATE_BUFFER buf = m_read_request->EthPacket[i].Buffer;
-                bool outbound = (buf->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
-                if (m_packet_handler) {
-                    m_packet_handler((const char*)buf->m_IBuffer, buf->m_Length, outbound);
+            if (m_read_request->dwPacketsSuccess > 0) {
+                if (m_on_before_batch) m_on_before_batch();
+                
+                for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
+                    PINTERMEDIATE_BUFFER buf = m_read_request->EthPacket[i].Buffer;
+                    bool outbound = (buf->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
+                    if (m_packet_handler) {
+                        m_packet_handler((const char*)buf->m_IBuffer, buf->m_Length, outbound);
+                    }
                 }
+
+                if (m_on_after_batch) m_on_after_batch();
             }
             // Reset success count for next call
             m_read_request->dwPacketsSuccess = 0;

@@ -101,7 +101,6 @@ int main() {
     set_winpkfilter_driver(&pk_driver);
     
     WinPkFilterDriver::PacketHandler handler = [](const char* packet, size_t length, bool outbound) {
-        std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
         process_ethernet_frame(packet, length, outbound);
     };
 
@@ -130,7 +129,10 @@ int main() {
     netif_set_link_up(&g_netif);
 
     if (!adapter_name.empty()) {
-        pk_driver.start(adapter_name, handler);
+        pk_driver.start(adapter_name, handler, 
+            []() { g_lwip_mtx.lock(); }, 
+            []() { g_lwip_mtx.unlock(); }
+        );
     }
 
     struct tcp_pcb* pcb = tcp_new();
@@ -140,6 +142,8 @@ int main() {
 
     SimpleHttpServer::instance().start(g_config.http_api_port);
 
+    uint64_t last_cleanup = 0;
+    uint64_t last_keepalive = 0;
     while (true) {
         // Wait for tasks or 1ms timeout (to let sys_check_timeouts run)
         WaitForSingleObject(MainDispatcher::instance().get_event_handle(), 1);
@@ -150,8 +154,18 @@ int main() {
             sys_check_timeouts();
         }
         udp_check_timeouts();
-        NatTable::instance().cleanup(300000); 
-        WiFiAPManager::instance().CheckKeepAlive();
+
+        uint64_t now = GetTickCount64();
+        // Cleanup NAT table every 10 seconds
+        if (now - last_cleanup > 10000) {
+            NatTable::instance().cleanup(300000); 
+            last_cleanup = now;
+        }
+        // Check WiFi KeepAlive every 1 second
+        if (now - last_keepalive > 1000) {
+            WiFiAPManager::instance().CheckKeepAlive();
+            last_keepalive = now;
+        }
     }
     return 0;
 }

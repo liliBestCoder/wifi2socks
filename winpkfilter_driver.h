@@ -29,36 +29,75 @@
 #endif
 
 class WinPkFilterDriver {
+
 public:
+
     using PacketHandler = std::function<void(const char* packet, size_t length, bool outbound)>;
 
+
+
     WinPkFilterDriver();
+
     ~WinPkFilterDriver();
 
-    bool start(const std::string& adapter_name, PacketHandler handler);
+
+
+    bool start(const std::string& adapter_name, PacketHandler handler, std::function<void()> on_before_batch = nullptr, std::function<void()> on_after_batch = nullptr);
+
     void stop();
 
+
+
     bool send_to_adapter(const char* packet, size_t length);
+
     bool send_to_mstcp(const char* packet, size_t length);
+
     bool get_adapter_mac(const std::string& adapter_name, uint8_t* mac);
+
+
 
     static std::vector<std::pair<std::string, std::string>> get_adapters();
 
+
+
 private:
+
     void run();
 
+
+
     CNdisApi m_ndis_api;
+
     HANDLE m_adapter_handle;
+
     HANDLE m_wait_event;
+
     
+
     PacketHandler m_packet_handler;
+
+    std::function<void()> m_on_before_batch;
+
+    std::function<void()> m_on_after_batch;
+
+
+
     std::thread m_worker_thread;
+
     bool m_running;
 
+
+
     static const int BATCH_SIZE = 64;
+
     PETH_M_REQUEST m_read_request;
+
     PINTERMEDIATE_BUFFER m_read_buffers[BATCH_SIZE];
+
     
+
     INTERMEDIATE_BUFFER* m_send_buffer;
+
     std::mutex m_send_mutex;
+
 };

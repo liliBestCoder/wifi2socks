@@ -184,13 +184,16 @@ void try_send_downstream(TcpCtxPtr ctx) {
                 ctx->tx_written_idx++;
                 ctx->tx_written_offset = 0;
             }
-            tcp_output(ctx->client_pcb);
         } else if (err == ERR_MEM) {
             break;
         } else {
             close_tcp_ctx(ctx);
             return;
         }
+    }
+    
+    if (ctx->client_pcb) {
+        tcp_output(ctx->client_pcb);
     }
 
     // Graceful Shutdown Check
