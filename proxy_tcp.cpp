@@ -124,7 +124,7 @@ void internal_close_on_worker(TcpCtxPtr ctx) {
                 uint16_t port = ctx->target.original_dst_port;
                 std::string dest = std::to_string(ip & 0xFF) + "." + std::to_string((ip >> 8) & 0xFF) + "."
                                  + std::to_string((ip >> 16) & 0xFF) + "." + std::to_string((ip >> 24) & 0xFF)
-                                 + ":" + std::to_string(ntohs(port));
+                                 + ":" + std::to_string(port);
                 ConnectionPool::instance().release(dest, ctx->proxy_socket);
             } else {
                 closesocket(ctx->proxy_socket);
@@ -377,12 +377,12 @@ void handle_handshake_read(TcpCtxPtr ctx) {
                 uint32_t dip = ctx->target.original_dst_ip;
                 if (ctx->detected_domain.empty()) {
                     LOG_INFO("[TCP] Proxy %d.%d.%d.%d:%-5d -> %d.%d.%d.%d:%d",
-                        cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ntohs(ctx->client_port),
-                        dip & 0xFF, (dip >> 8) & 0xFF, (dip >> 16) & 0xFF, (dip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
+                        cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ctx->client_port,
+                        dip & 0xFF, (dip >> 8) & 0xFF, (dip >> 16) & 0xFF, (dip >> 24) & 0xFF, ctx->target.original_dst_port);
                 } else {
                     LOG_INFO("[TCP] Proxy %d.%d.%d.%d:%-5d -> %s:%d",
-                        cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ntohs(ctx->client_port),
-                        ctx->detected_domain.c_str(), ntohs(ctx->target.original_dst_port));
+                        cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ctx->client_port,
+                        ctx->detected_domain.c_str(), ctx->target.original_dst_port);
                 }
                 
                 {
@@ -445,12 +445,12 @@ void handle_proxy_connect(TcpCtxPtr ctx) {
         uint32_t dip = ctx->target.original_dst_ip;
         if (ctx->detected_domain.empty()) {
             LOG_INFO("[TCP] Direct %d.%d.%d.%d:%-5d -> %d.%d.%d.%d:%d",
-                cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ntohs(ctx->client_port),
-                dip & 0xFF, (dip >> 8) & 0xFF, (dip >> 16) & 0xFF, (dip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
+                cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ctx->client_port,
+                dip & 0xFF, (dip >> 8) & 0xFF, (dip >> 16) & 0xFF, (dip >> 24) & 0xFF, ctx->target.original_dst_port);
         } else {
             LOG_INFO("[TCP] Direct %d.%d.%d.%d:%-5d -> %s:%d",
-                cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ntohs(ctx->client_port),
-                ctx->detected_domain.c_str(), ntohs(ctx->target.original_dst_port));
+                cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ctx->client_port,
+                ctx->detected_domain.c_str(), ctx->target.original_dst_port);
         }
         {
             std::lock_guard<std::mutex> lock(ctx->data_mtx);
@@ -477,7 +477,7 @@ void handle_proxy_connect(TcpCtxPtr ctx) {
                         + std::to_string((ip >> 16) & 0xFF) + "." + std::to_string((ip >> 24) & 0xFF);
     std::string host = !sni.empty() ? sni : ip_str;
     char cmd[1024];
-    uint16_t port = ntohs(ctx->target.original_dst_port);
+    uint16_t port = ctx->target.original_dst_port;
     
     sprintf_s(cmd, "CONNECT %s:%d HTTP/1.1\r\nHost: %s\r\n\r\n", host.c_str(), port, host.c_str());
     int cmd_len = (int)strlen(cmd);
@@ -513,7 +513,7 @@ void connect_to_proxy_async(TcpCtxPtr ctx) {
             uint16_t port = ctx->target.original_dst_port;
             std::string dest = std::to_string(ip & 0xFF) + "." + std::to_string((ip >> 8) & 0xFF) + "."
                              + std::to_string((ip >> 16) & 0xFF) + "." + std::to_string((ip >> 24) & 0xFF)
-                             + ":" + std::to_string(ntohs(port));
+                             + ":" + std::to_string(port);
             
             SOCKET s = ConnectionPool::instance().acquire(dest);
             if (s != INVALID_SOCKET) {
@@ -542,7 +542,7 @@ void connect_to_proxy_async(TcpCtxPtr ctx) {
         unsigned int a, b, c, d;
         if (ctx->is_direct) {
             addr.sin_addr.S_un.S_addr = ctx->target.original_dst_ip;
-            addr.sin_port = ctx->target.original_dst_port;
+            addr.sin_port = htons(ctx->target.original_dst_port);
         } else {
             if (sscanf_s(g_config.proxy_ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
                 addr.sin_addr.S_un.S_addr = (a) | (b << 8) | (c << 16) | (d << 24);

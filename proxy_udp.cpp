@@ -350,7 +350,12 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     RouteAction ip_action = RuleManager::instance().match_ip(::ntohl(dst_ip));
     if (ip_action == RouteAction::BLOCK) return;
     if (ip_action == RouteAction::DIRECT) { forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len); return; }
-    if (dst_port == ::htons(443)) { if (GeoChecker::instance().is_cn_ip(::ntohl(dst_ip))) forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len); return; }
+    if (dst_port == ::htons(443)) { 
+        if (GeoChecker::instance().is_cn_ip(::ntohl(dst_ip))) {
+            forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len); 
+            return; 
+        }
+    }
     if (dst_port == ::htons(53)) {
         int qname_len = 0; std::string full_domain = parse_dns_qname(payload, len, &qname_len);
         if (!full_domain.empty()) {
