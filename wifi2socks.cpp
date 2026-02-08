@@ -38,18 +38,53 @@ DhcpServer* g_dhcp_server_ptr = nullptr;
 
 // Main Entry Point
 int main() {
-    // ... (previous initialization code) ...
+    // 0. Initialize Winsock and WinRT
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        printf("WSAStartup failed.\n");
+        return 1;
+    }
+
+    // Initialize WinRT for WiFi
+    Microsoft::WRL::Wrappers::RoInitializeWrapper initialize(RO_INIT_MULTITHREADED);
+    if (FAILED(initialize)) {
+        printf("Failed to initialize Windows Runtime\n");
+        return 1;
+    }
+
+    // -1. Load Config
     load_config("config.ini");
 
     // 0. Initialize WiFi AP
-    // ... (rest of WiFi initialization) ...
+    static Wifi2SocksWiFiListener wifi_listener;
+    try {
+        std::wstring ssid(g_config.wifi_ssid.begin(), g_config.wifi_ssid.end());
+        std::wstring pass(g_config.wifi_password.begin(), g_config.wifi_password.end());
 
+        WiFiAPManager::instance().SetSSID(ssid);
+        WiFiAPManager::instance().SetPassphrase(pass);
+        WiFiAPManager::instance().RegisterListener(&wifi_listener);
+        WiFiAPManager::instance().Start();
+        LOG_INFO("[CORE] WiFi AP Initialized (SSID: %s).", g_config.wifi_ssid.c_str());
+    } catch (const std::exception& e) {
+        LOG_ERROR("[CORE] WiFi AP Initialization failed: %s", e.what());
+    }
+    
     // Start DHCP Server
     static DhcpServer dhcp_server(g_config.tap_ip);
     g_dhcp_server_ptr = &dhcp_server;
     dhcp_server.start();
 
-    // ... ( GeoChecker and other init ) ...
+    // -0.5 Start Traffic Manager & HTTP API
+    TrafficManager::instance().start();
+
+    // 0.5 Pre-load GeoIP/GeoSite
+    try {
+        GeoChecker::instance().init();
+        LOG_INFO("[CORE] GeoChecker loading in background...");
+    } catch (const std::exception& e) {
+        LOG_ERROR("[CORE] Warning: GeoChecker failed to load: %s. IP/Domain bypass may not work.", e.what());
+    }
 
     // 1. Initialize WinDivert
     // ULTIMATE HIJACK FILTER: 
@@ -82,7 +117,7 @@ int main() {
 
     ip4_addr_t ip, mask, gw;
     ip4addr_aton(g_config.tap_ip.c_str(), &ip);
-    ip4addr_aton("255.255.0.0", &mask); // Use 255.255.0.0 to cover hijack subnets (11.x & 137.x)
+    ip4addr_aton("255.255.0.0", &mask); // Cover hijack subnets (11.x & 137.x)
     ip4addr_aton("0.0.0.0", &gw); 
 
     netif_add(&g_netif, &gw, &mask, &ip, NULL, netif_init_cb, ip_input);
