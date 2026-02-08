@@ -204,12 +204,8 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
 
     if (eth_type == ETHTYPE_IP) {
         struct ip_hdr* ip = (struct ip_hdr*)(buf.data() + sizeof(struct eth_hdr));
-        if (IPH_PROTO(ip) == IP_PROTO_UDP) {
-             LOG_DEBUG("[LwIP] Inbound UDP packet received, len=%d", (int)length);
-        }
-    }
-
         int ip_len = (int)buf.size() - (int)sizeof(struct eth_hdr);
+        
         if (IPH_V(ip) == 4) {
             ip4_addr_t lwip_ip; ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
 
@@ -217,6 +213,9 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
                 uint8_t* udp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
                 uint16_t sp_h = ntohs(*(uint16_t*)(udp_ptr + 0));
                 uint16_t dp_h = ntohs(*(uint16_t*)(udp_ptr + 2));
+                
+                LOG_DEBUG("[LwIP] Inbound UDP packet received, len=%d", (int)length);
+
                 if (dp_h == 67 && g_dhcp_server_ptr) {
                     sockaddr_in sa; memset(&sa, 0, sizeof(sa));
                     sa.sin_family = AF_INET; sa.sin_addr.S_un.S_addr = ip->src.addr;
