@@ -126,11 +126,27 @@ int main() {
 
     if (!adapter_name.empty()) {
         if (!pk_driver.start_batch(adapter_name, [](std::vector<WinPkFilterDriver::Packet>&& packets) {
-            MainDispatcher::instance().queue_task([pkts = std::move(packets)]() {
-                for (const auto& p : pkts) {
-                    process_ethernet_frame(p.data.data(), p.data.size(), p.outbound);
+            std::vector<WinPkFilterDriver::Packet> inbound_pkts;
+            inbound_pkts.reserve(packets.size());
+
+            for (auto& p : packets) {
+                if (p.outbound) {
+                    // 出站包（来自宿主机协议栈）在驱动线程立即处理并转发
+                    // 避免排队延迟，且出站路径不触及 LwIP 状态，是线程安全的
+                    process_ethernet_frame(p.data.data(), p.data.size(), true);
+                } else {
+                    // 入站包（来自手机/客户端）收集起来批量交给主线程处理
+                    inbound_pkts.push_back(std::move(p));
                 }
-            });
+            }
+
+            if (!inbound_pkts.empty()) {
+                MainDispatcher::instance().queue_task([pkts = std::move(inbound_pkts)]() {
+                    for (const auto& p : pkts) {
+                        process_ethernet_frame(p.data.data(), p.data.size(), false);
+                    }
+                });
+            }
         })) {
             LOG_ERROR("[CORE] Failed to start WinPkFilter driver in batch mode.");
         }
