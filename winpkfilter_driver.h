@@ -3,7 +3,6 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
-#include <iphlpapi.h>
 #include <tchar.h>
 #include <string>
 #include <functional>
@@ -11,28 +10,35 @@
 #include <vector>
 #include <mutex>
 
-// WinPkFilter SDK headers
+// Enable Jumbo Frame support to ensure buffer size is 9014 (safe for all DLL versions)
+#ifndef JUMBO_FRAME_SUPPORTED
+#define JUMBO_FRAME_SUPPORTED 1
+#endif
+
+// WinPkFilter SDK headers (Original ones restored)
 #include "Common.h"
 #include "ndisapi.h"
 
+// Combined flags for convenience if not in older Common.h
+#ifndef MSTCP_FLAG_TUNNEL
+#define MSTCP_FLAG_TUNNEL (0x00000001 | 0x00000002)
+#endif
+#ifndef MSTCP_FLAG_SENT_RECEIVE
+#define MSTCP_FLAG_SENT_RECEIVE (0x00000001 | 0x00000002)
+#endif
+
 class WinPkFilterDriver {
 public:
-    // Callback: packet data, length, outbound (true) or inbound (false)
     using PacketHandler = std::function<void(const char* packet, size_t length, bool outbound)>;
 
     WinPkFilterDriver();
     ~WinPkFilterDriver();
 
-    // adapter_name is the NDIS internal name (e.g. \DEVICE\TCPIP_{...})
     bool start(const std::string& adapter_name, PacketHandler handler);
     void stop();
 
-    // Send packet to adapter (injecting into the wire)
     bool send_to_adapter(const char* packet, size_t length);
-    
-    // Send packet to MSTCP (injecting into the local stack)
     bool send_to_mstcp(const char* packet, size_t length);
-
     bool get_adapter_mac(const std::string& adapter_name, uint8_t* mac);
 
     static std::vector<std::pair<std::string, std::string>> get_adapters();

@@ -108,18 +108,20 @@ void WinPkFilterDriver::stop() {
 
 void WinPkFilterDriver::run() {
     ETH_REQUEST request;
-    INTERMEDIATE_BUFFER buffer;
+    // VERY IMPORTANT: Allocate the buffer on the heap or ensure enough stack space.
+    // The INTERMEDIATE_BUFFER must match the one in Common.h EXACTLY.
+    auto buffer = std::make_unique<INTERMEDIATE_BUFFER>();
     request.hAdapterHandle = m_adapter_handle;
-    request.EthPacket.Buffer = &buffer;
+    request.EthPacket.Buffer = buffer.get();
 
     while (m_running) {
         WaitForSingleObject(m_wait_event, INFINITE);
         if (!m_running) break;
 
         while (m_ndis_api.ReadPacket(&request)) {
-            bool outbound = (buffer.m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
+            bool outbound = (buffer->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
             if (m_packet_handler) {
-                m_packet_handler((const char*)buffer.m_IBuffer, buffer.m_Length, outbound);
+                m_packet_handler((const char*)buffer->m_IBuffer, buffer->m_Length, outbound);
             }
         }
     }
@@ -157,9 +159,9 @@ bool WinPkFilterDriver::send_to_adapter(const char* packet, size_t length) {
 
     INTERMEDIATE_BUFFER buffer;
     memset(&buffer, 0, sizeof(buffer));
-    length = (length > MAX_ETHER_FRAME) ? MAX_ETHER_FRAME : length;
-    memcpy(buffer.m_IBuffer, packet, length);
-    buffer.m_Length = (ULONG)length;
+    size_t copy_len = (length > MAX_ETHER_FRAME) ? MAX_ETHER_FRAME : length;
+    memcpy(buffer.m_IBuffer, packet, copy_len);
+    buffer.m_Length = (ULONG)copy_len;
     buffer.m_dwDeviceFlags = PACKET_FLAG_ON_SEND;
 
     ETH_REQUEST request;
@@ -174,9 +176,9 @@ bool WinPkFilterDriver::send_to_mstcp(const char* packet, size_t length) {
 
     INTERMEDIATE_BUFFER buffer;
     memset(&buffer, 0, sizeof(buffer));
-    length = (length > MAX_ETHER_FRAME) ? MAX_ETHER_FRAME : length;
-    memcpy(buffer.m_IBuffer, packet, length);
-    buffer.m_Length = (ULONG)length;
+    size_t copy_len = (length > MAX_ETHER_FRAME) ? MAX_ETHER_FRAME : length;
+    memcpy(buffer.m_IBuffer, packet, copy_len);
+    buffer.m_Length = (ULONG)copy_len;
     buffer.m_dwDeviceFlags = PACKET_FLAG_ON_RECEIVE;
 
     ETH_REQUEST request;
