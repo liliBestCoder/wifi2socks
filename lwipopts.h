@@ -26,7 +26,7 @@
 
 // --- 4. TCP/IP ---
 #define LWIP_TCP                        1
-#define TCP_INITIAL_CWND                10
+#define TCP_INITIAL_CWND                30
 #define TCP_MSS                         1460
 #define TCP_WND                         (65535UL << 5)
 #define TCP_SND_BUF                     (4*1024*1024)
