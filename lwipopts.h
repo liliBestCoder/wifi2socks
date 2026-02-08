@@ -14,11 +14,14 @@
 // --- 3. MEMORY ---
 #define MEM_LIBC_MALLOC                 0
 #define MEMP_MEM_MALLOC                 0
-#define MEM_SIZE                        (4*1024*1024)
+#define MEM_SIZE                        (16*1024*1024)
 #define MEM_ALIGNMENT                   4
 #define PBUF_POOL_SIZE                  16384 
 #define PBUF_POOL_BUFSIZE               2048 
 #define MEMP_NUM_TCP_SEG                16384
+#define MEMP_NUM_TCP_PCB                1024
+#define MEMP_NUM_TCP_PCB_LISTEN         128
+#define MEMP_NUM_SYS_TIMEOUT            128
 #define TCP_OVERSIZE                    1460
 
 // --- 4. TCP/IP ---

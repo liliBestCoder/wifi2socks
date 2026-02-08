@@ -6,8 +6,6 @@
 class WinPkFilterDriver;
 extern WinPkFilterDriver* g_winpkfilter_driver;
 
-// Global LwIP lock
-extern std::recursive_mutex g_lwip_mtx;
 class DhcpServer;
 extern DhcpServer* g_dhcp_server_ptr;
 

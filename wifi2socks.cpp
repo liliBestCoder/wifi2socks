@@ -100,10 +100,6 @@ int main() {
     static WinPkFilterDriver pk_driver;
     set_winpkfilter_driver(&pk_driver);
     
-    WinPkFilterDriver::PacketHandler handler = [](const char* packet, size_t length, bool outbound) {
-        process_ethernet_frame(packet, length, outbound);
-    };
-
     WorkerPool::instance().init(8);
     lwip_init();
 
@@ -129,10 +125,13 @@ int main() {
     netif_set_link_up(&g_netif);
 
     if (!adapter_name.empty()) {
-        pk_driver.start(adapter_name, handler, 
-            []() { g_lwip_mtx.lock(); }, 
-            []() { g_lwip_mtx.unlock(); }
-        );
+        pk_driver.start_batch(adapter_name, [](std::vector<WinPkFilterDriver::Packet>&& packets) {
+            MainDispatcher::instance().queue_task([pkts = std::move(packets)]() {
+                for (const auto& p : pkts) {
+                    process_ethernet_frame(p.data.data(), p.data.size(), p.outbound);
+                }
+            });
+        });
     }
 
     struct tcp_pcb* pcb = tcp_new();
@@ -148,11 +147,9 @@ int main() {
         // Wait for tasks or 1ms timeout (to let sys_check_timeouts run)
         WaitForSingleObject(MainDispatcher::instance().get_event_handle(), 1);
 
+        // All LwIP calls happen here in the Main thread, no lock needed.
         MainDispatcher::instance().process_pending();
-        {
-            std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
-            sys_check_timeouts();
-        }
+        sys_check_timeouts();
         udp_check_timeouts();
 
         uint64_t now = GetTickCount64();

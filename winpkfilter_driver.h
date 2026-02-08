@@ -32,7 +32,17 @@ class WinPkFilterDriver {
 
 public:
 
+    struct Packet {
+
+        std::vector<char> data;
+
+        bool outbound;
+
+    };
+
     using PacketHandler = std::function<void(const char* packet, size_t length, bool outbound)>;
+
+    using BatchPacketHandler = std::function<void(std::vector<Packet>&& packets)>;
 
 
 
@@ -43,6 +53,8 @@ public:
 
 
     bool start(const std::string& adapter_name, PacketHandler handler, std::function<void()> on_before_batch = nullptr, std::function<void()> on_after_batch = nullptr);
+
+    bool start_batch(const std::string& adapter_name, BatchPacketHandler handler);
 
     void stop();
 
@@ -75,6 +87,8 @@ private:
     
 
     PacketHandler m_packet_handler;
+
+    BatchPacketHandler m_batch_handler;
 
     std::function<void()> m_on_before_batch;
 

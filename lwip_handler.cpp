@@ -26,7 +26,6 @@
 #include "lwip/prot/udp.h"
 #include "lwip/raw.h"
 
-std::recursive_mutex g_lwip_mtx;
 struct netif g_netif;
 uint8_t HOST_MAC[6] = { 0 }; 
 bool g_host_mac_known = false;

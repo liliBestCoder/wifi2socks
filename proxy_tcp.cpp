@@ -84,7 +84,6 @@ void try_send_upstream(TcpCtxPtr ctx);
 
 // Cleanup function running on Main Thread
 void final_cleanup_on_main(void* arg) {
-    std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
     TcpCtxPtr* ptr = (TcpCtxPtr*)arg;
     if (!ptr) return;
     
@@ -231,16 +230,14 @@ err_t tcp_client_sent(void* arg, struct tcp_pcb* tpcb, u16_t len) {
 void handle_proxy_read(TcpCtxPtr ctx) {
     if (ctx->closed) return;
     
-    thread_local std::vector<uint8_t> read_buf(262144);
-    
-    int r = recv(ctx->proxy_socket, (char*)read_buf.data(), (int)read_buf.size(), 0);
+    std::vector<uint8_t> data(262144);
+    int r = recv(ctx->proxy_socket, (char*)data.data(), (int)data.size(), 0);
     
     if (r > 0) {
+        data.resize(r);
         TrafficManager::instance().report_proxy_rx(r, ctx->is_direct);
-        std::vector<uint8_t> data(read_buf.begin(), read_buf.begin() + r);
         
         MainDispatcher::instance().queue_task([ctx, d = std::move(data)]() mutable {
-            std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
             if (ctx->client_pcb) {
                 ctx->tx_queue.push_back(std::move(d));
                 try_send_downstream(ctx);
@@ -251,7 +248,6 @@ void handle_proxy_read(TcpCtxPtr ctx) {
         ctx->proxy_socket = INVALID_SOCKET; 
         
         MainDispatcher::instance().queue_task([ctx]() {
-            std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
             if (ctx->closed) return;
             
             ctx->upstream_eof = true;
@@ -362,7 +358,6 @@ void handle_handshake_read(TcpCtxPtr ctx) {
                 if (payload_start < (size_t)r) {
                     std::vector<uint8_t> extra_data((uint8_t*)(buf + payload_start), (uint8_t*)(buf + r));
                     MainDispatcher::instance().queue_task([ctx, d = std::move(extra_data)]() mutable {
-                        std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
                         if (ctx->client_pcb) {
                             ctx->tx_queue.push_back(std::move(d));
                             try_send_downstream(ctx);
@@ -595,6 +590,8 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
 }
 
 err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
+    if (!newpcb) return ERR_MEM;
+
     uint16_t client_port = newpcb->remote_port;
     NatEntry target = NatTable::instance().get(newpcb->remote_ip.addr, client_port);
     if (target.original_dst_ip == 0) return ERR_ABRT;
