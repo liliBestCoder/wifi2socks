@@ -1,4 +1,5 @@
 #include "winpkfilter_driver.h"
+#include "app_config.h"
 #include "logger.h"
 #include <iostream>
 
@@ -22,7 +23,6 @@ std::vector<std::pair<std::string, std::string>> WinPkFilterDriver::get_adapters
     TCP_AdapterList adapters;
     if (api.GetTcpipBoundAdaptersInfo(&adapters)) {
         for (UINT i = 0; i < adapters.m_nAdapterCount; ++i) {
-            // Note: Common.h uses m_szAdapterNameList
             result.push_back({ (char*)adapters.m_szAdapterNameList[i], (char*)adapters.m_szAdapterNameList[i] });
         }
     }

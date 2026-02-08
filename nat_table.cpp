@@ -15,18 +15,14 @@ NatTable& NatTable::instance() {
     return instance;
 }
 
-void NatTable::set(uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint16_t dst_port, const WINDIVERT_ADDRESS* addr, const uint8_t* src_mac, const uint8_t* dst_mac) {
+void NatTable::set(uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint16_t dst_port, const uint8_t* src_mac, const uint8_t* dst_mac) {
     std::lock_guard<std::mutex> lock(m_mtx);
     NatEntry entry;
     entry.original_dst_ip = dst_ip;
     entry.original_dst_port = dst_port;
     entry.src_ip = src_ip;
     entry.src_port = src_port;
-    if (addr) {
-        entry.addr = *addr;
-    } else {
-        memset(&entry.addr, 0, sizeof(entry.addr));
-    }
+    
     if (src_mac) memcpy(entry.src_mac, src_mac, 6);
     else memset(entry.src_mac, 0, 6);
     if (dst_mac) memcpy(entry.dst_mac, dst_mac, 6);

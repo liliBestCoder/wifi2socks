@@ -11,17 +11,6 @@
 #include <vector>
 #include <mutex>
 
-// Combined flags not present in some versions of Common.h
-#ifndef MSTCP_FLAG_TUNNEL
-#define MSTCP_FLAG_TUNNEL (MSTCP_FLAG_SENT_TUNNEL | MSTCP_FLAG_RECV_TUNNEL)
-#endif
-#ifndef MSTCP_FLAG_LISTEN
-#define MSTCP_FLAG_LISTEN (MSTCP_FLAG_SENT_LISTEN | MSTCP_FLAG_RECV_LISTEN)
-#endif
-#ifndef MSTCP_FLAG_SENT_RECEIVE
-#define MSTCP_FLAG_SENT_RECEIVE (MSTCP_FLAG_SENT_TUNNEL | MSTCP_FLAG_RECV_TUNNEL)
-#endif
-
 // WinPkFilter SDK headers
 #include "Common.h"
 #include "ndisapi.h"

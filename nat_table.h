@@ -6,14 +6,12 @@
 #include <unordered_set>
 #include <string>
 #include <vector>
-#include "windivert.h"
 
 struct NatEntry {
     uint32_t original_dst_ip;
     uint16_t original_dst_port;
     uint32_t src_ip;
     uint16_t src_port;
-    WINDIVERT_ADDRESS addr;
     uint8_t src_mac[6];
     uint8_t dst_mac[6];
     uint64_t last_active;
@@ -24,7 +22,7 @@ class NatTable {
 public:
     static NatTable& instance();
     
-    void set(uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint16_t dst_port, const WINDIVERT_ADDRESS* addr, const uint8_t* src_mac = nullptr, const uint8_t* dst_mac = nullptr);
+    void set(uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint16_t dst_port, const uint8_t* src_mac = nullptr, const uint8_t* dst_mac = nullptr);
     NatEntry get(uint32_t src_ip, uint16_t src_port);
     NatEntry get_by_port(uint16_t local_src_port);
     
