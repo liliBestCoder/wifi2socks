@@ -138,7 +138,7 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
     inet_pton(AF_INET, g_config.tap_ip.c_str(), &server_ip_n);
     
     uint32_t server_ip_h = ntohl(server_ip_n);
-    uint32_t client_ip_h = (server_ip_h & 0xFFFFFF00) | 2; // Force .2
+    uint32_t client_ip_h = (server_ip_h & 0xFFFFFF00) | 3; // Force .2
     uint32_t client_ip_n = htonl(client_ip_h);
 
     if (dhcp_message_type == 1 || dhcp_message_type == 3) { 
