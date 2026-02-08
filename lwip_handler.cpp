@@ -97,13 +97,16 @@ void recalculate_udp_checksum(struct ip_hdr* ip, uint8_t* udp_base, int udp_len)
 
 err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
     if (!g_winpkfilter_driver) return ERR_IF;
+    
     static std::vector<uint8_t> buf;
     buf.resize(p->tot_len);
     pbuf_copy_partial(p, buf.data(), p->tot_len, 0);
 
-    if (buf.size() >= sizeof(struct eth_hdr) + 20) {
+    if (buf.size() >= sizeof(struct eth_hdr)) {
         struct eth_hdr* eth = (struct eth_hdr*)buf.data();
-        if (ntohs(eth->type) == ETHTYPE_IP) {
+        uint16_t type = ntohs(eth->type);
+        if (type == ETHTYPE_IP) {
+            LOG_DEBUG("[LwIP] linkoutput: Sending IP packet, len=%d", (int)buf.size());
             struct ip_hdr* ip = (struct ip_hdr*)(buf.data() + sizeof(struct eth_hdr));
             if (IPH_PROTO(ip) == IP_PROTO_TCP) {
                 uint8_t* tcp_base = (uint8_t*)ip + IPH_HL(ip) * 4;
@@ -120,8 +123,13 @@ err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
                     }
                 }
             }
+        } else if (type == ETHTYPE_ARP) {
+            LOG_DEBUG("[LwIP] linkoutput: Sending ARP packet, len=%d", (int)buf.size());
+        } else {
+            LOG_DEBUG("[LwIP] linkoutput: Sending packet type 0x%04X, len=%d", type, (int)buf.size());
         }
     }
+    
     g_winpkfilter_driver->send_to_adapter((const char*)buf.data(), buf.size());
     return ERR_OK;
 }
@@ -194,15 +202,19 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
     static std::vector<uint8_t> buf;
     buf.assign(packet, packet + length);
     struct eth_hdr* eth = (struct eth_hdr*)buf.data();
-    
-    // --- 修复：入站包必须将目标 MAC 改为 LwIP 接口的 MAC ---
-    memcpy(eth->dest.addr, g_netif.hwaddr, 6);
-
     uint16_t eth_type = ntohs(eth->type);
+
+    if (eth_type == ETHTYPE_ARP) {
+        LOG_DEBUG("[LwIP] Inbound ARP packet received");
+    }
+
     const uint8_t* smac = (const uint8_t*)&eth->src;
     const uint8_t* dmac = (const uint8_t*)&eth->dest;
 
     if (eth_type == ETHTYPE_IP) {
+        // --- 修复：入站 IP 包必须将目标 MAC 改为 LwIP 接口的 MAC ---
+        memcpy(eth->dest.addr, g_netif.hwaddr, 6);
+
         struct ip_hdr* ip = (struct ip_hdr*)(buf.data() + sizeof(struct eth_hdr));
         int ip_len = (int)buf.size() - (int)sizeof(struct eth_hdr);
         

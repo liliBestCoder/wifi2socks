@@ -117,10 +117,17 @@ int main() {
     netif_set_default(&g_netif);
     
     if (!adapter_name.empty()) {
-        pk_driver.get_adapter_mac(adapter_name, g_netif.hwaddr);
+        if (pk_driver.get_adapter_mac(adapter_name, g_netif.hwaddr)) {
+             LOG_INFO("[CORE] LwIP MAC set to %02X:%02X:%02X:%02X:%02X:%02X", 
+                 g_netif.hwaddr[0], g_netif.hwaddr[1], g_netif.hwaddr[2], 
+                 g_netif.hwaddr[3], g_netif.hwaddr[4], g_netif.hwaddr[5]);
+        } else {
+             LOG_ERROR("[CORE] Failed to find MAC for adapter %s", adapter_name.c_str());
+        }
     }
     
     netif_set_up(&g_netif);
+    netif_set_link_up(&g_netif);
 
     if (!adapter_name.empty()) {
         pk_driver.start(adapter_name, handler);
