@@ -4,13 +4,8 @@
 
 #pragma comment(lib, "WinDivert.lib")
 
-// Define missing constants for WinDivert 2.2+ if using an older header
-#ifndef WINDIVERT_LAYER_ETHERNET
-#define WINDIVERT_LAYER_ETHERNET 5
-#endif
-
 WinDivertDriver::WinDivertDriver(const std::string& filter)
-    : handle_(INVALID_HANDLE_VALUE), filter_(filter), running_(false), packet_buffer_(WINDIVERT_MTU_MAX) {}
+    : handle_(INVALID_HANDLE_VALUE), filter_(filter), running_(false), packet_buffer_(WINDIVERT_MTU_MAX), current_layer_(WINDIVERT_LAYER_NETWORK) {}
 
 WinDivertDriver::~WinDivertDriver() {
     stop();
@@ -18,8 +13,16 @@ WinDivertDriver::~WinDivertDriver() {
 
 bool WinDivertDriver::start(PacketHandler handler) {
     packet_handler_ = handler;
-    // 使用 WINDIVERT_LAYER_ETHERNET 以支持二层拦截，绕过 ICS
-    handle_ = WinDivertOpen(filter_.c_str(), (WINDIVERT_LAYER)WINDIVERT_LAYER_ETHERNET, 1000, 0);
+    // 尝试使用 WINDIVERT_LAYER_ETHERNET 以支持二层拦截，绕过 ICS
+    handle_ = WinDivertOpen(filter_.c_str(), WINDIVERT_LAYER_ETHERNET, 1000, 0);
+    current_layer_ = WINDIVERT_LAYER_ETHERNET;
+
+    if (handle_ == INVALID_HANDLE_VALUE && GetLastError() == 87) {
+        LOG_INFO("WINDIVERT_LAYER_ETHERNET not supported (Driver version too old?). Falling back to WINDIVERT_LAYER_NETWORK...");
+        handle_ = WinDivertOpen(filter_.c_str(), WINDIVERT_LAYER_NETWORK, 1000, 0);
+        current_layer_ = WINDIVERT_LAYER_NETWORK;
+    }
+
     if (handle_ == INVALID_HANDLE_VALUE) {
         LOG_INFO("Failed to open WinDivert handle. Error: %d. Make sure WinDivert.dll is in the same directory as the executable.", GetLastError());
         return false;

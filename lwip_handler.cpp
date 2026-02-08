@@ -128,19 +128,24 @@ err_t windivert_linkoutput(struct netif* netif, struct pbuf* p) {
         return ERR_OK; 
     }
 
-    // Prepend Ethernet Header
-    std::vector<uint8_t> eth_buf;
-    eth_buf.resize(sizeof(struct eth_hdr) + buf.size());
-    struct eth_hdr* eth = (struct eth_hdr*)eth_buf.data();
-    memcpy(&eth->dest, dst_mac, 6);
-    memcpy(&eth->src, src_mac, 6);
-    eth->type = ::htons(0x0800); // IPv4
-    memcpy(eth_buf.data() + sizeof(struct eth_hdr), buf.data(), buf.size());
-
     // The packet from LwIP is going out. Flip its direction.
     send_addr.Outbound = !send_addr.Outbound;
-    
-    g_windivert_driver->send((const char*)eth_buf.data(), eth_buf.size(), &send_addr);
+
+    if (g_windivert_driver->get_layer() == WINDIVERT_LAYER_ETHERNET) {
+        // Prepend Ethernet Header
+        std::vector<uint8_t> eth_buf;
+        eth_buf.resize(sizeof(struct eth_hdr) + buf.size());
+        struct eth_hdr* eth = (struct eth_hdr*)eth_buf.data();
+        memcpy(&eth->dest, dst_mac, 6);
+        memcpy(&eth->src, src_mac, 6);
+        eth->type = ::htons(0x0800); // IPv4
+        memcpy(eth_buf.data() + sizeof(struct eth_hdr), buf.data(), buf.size());
+        g_windivert_driver->send((const char*)eth_buf.data(), eth_buf.size(), &send_addr);
+    } else {
+        // Send raw IP packet
+        g_windivert_driver->send((const char*)buf.data(), buf.size(), &send_addr);
+    }
+
     return ERR_OK;
 }
 
@@ -216,13 +221,26 @@ err_t netif_init_cb(struct netif* netif) {
 }
 
 void process_ip_packet(const char* frame, int len, const void* addr) {
-    if (len < (int)sizeof(struct eth_hdr) + 20 || len > WINDIVERT_MTU_MAX) return;
+    const char* buf_const = nullptr;
+    int ip_len = 0;
+    const uint8_t* src_mac = nullptr;
+    const uint8_t* dst_mac = nullptr;
 
-    struct eth_hdr* eth = (struct eth_hdr*)frame;
-    if (ntohs(eth->type) != 0x0800) return; // Only handle IPv4
+    if (g_windivert_driver->get_layer() == WINDIVERT_LAYER_ETHERNET) {
+        if (len < (int)sizeof(struct eth_hdr) + 20) return;
+        struct eth_hdr* eth = (struct eth_hdr*)frame;
+        if (ntohs(eth->type) != 0x0800) return; // Only handle IPv4
+        buf_const = frame + sizeof(struct eth_hdr);
+        ip_len = len - (int)sizeof(struct eth_hdr);
+        src_mac = (const uint8_t*)&eth->src;
+        dst_mac = (const uint8_t*)&eth->dest;
+    } else {
+        if (len < 20) return;
+        buf_const = frame;
+        ip_len = len;
+    }
 
-    const char* buf_const = frame + sizeof(struct eth_hdr);
-    int ip_len = len - (int)sizeof(struct eth_hdr);
+    if (ip_len > WINDIVERT_MTU_MAX) return;
 
     // We need to modify the buffer for NAT, so we make a copy.
     char buf[WINDIVERT_MTU_MAX];
@@ -276,7 +294,7 @@ void process_ip_packet(const char* frame, int len, const void* addr) {
 
                 if (!is_fragment || is_first_fragment) {
                     // Store original destination for UDP, including MAC addresses
-                    NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, p_addr, (const uint8_t*)&eth->src, (const uint8_t*)&eth->dest);
+                    NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, p_addr, src_mac, dst_mac);
                 }
 
                 // Redirect all UDP to local IP to ensure LwIP processes it
@@ -295,7 +313,7 @@ void process_ip_packet(const char* frame, int len, const void* addr) {
             uint32_t dst_ip = ip->dest.addr;
 
             // Store MAC addresses for TCP too
-            NatTable::instance().set(ip->src.addr, ::ntohs(src_port), dst_ip, dst_port, p_addr, (const uint8_t*)&eth->src, (const uint8_t*)&eth->dest);
+            NatTable::instance().set(ip->src.addr, ::ntohs(src_port), dst_ip, dst_port, p_addr, src_mac, dst_mac);
 
             ip->dest.addr = lwip_ip.addr;
 
@@ -331,16 +349,19 @@ void process_ip_packet(const char* frame, int len, const void* addr) {
                         WINDIVERT_ADDRESS send_addr = *p_addr;
                         send_addr.Outbound = 0;
                         
-                        // Wrap in Ethernet header
-                        std::vector<uint8_t> eth_buf_icmp;
-                        eth_buf_icmp.resize(sizeof(struct eth_hdr) + ip_len_icmp);
-                        struct eth_hdr* eth_icmp = (struct eth_hdr*)eth_buf_icmp.data();
-                        memcpy(&eth_icmp->dest, &eth->src, 6);
-                        memcpy(&eth_icmp->src, &eth->dest, 6);
-                        eth_icmp->type = ::htons(0x0800);
-                        memcpy(eth_buf_icmp.data() + sizeof(struct eth_hdr), buf, ip_len_icmp);
-
-                        g_windivert_driver->send((const char*)eth_buf_icmp.data(), eth_buf_icmp.size(), &send_addr);
+                        if (g_windivert_driver->get_layer() == WINDIVERT_LAYER_ETHERNET) {
+                            // Wrap in Ethernet header
+                            std::vector<uint8_t> eth_buf_icmp;
+                            eth_buf_icmp.resize(sizeof(struct eth_hdr) + ip_len_icmp);
+                            struct eth_hdr* eth_icmp = (struct eth_hdr*)eth_buf_icmp.data();
+                            memcpy(&eth_icmp->dest, src_mac, 6);
+                            memcpy(&eth_icmp->src, dst_mac, 6);
+                            eth_icmp->type = ::htons(0x0800);
+                            memcpy(eth_buf_icmp.data() + sizeof(struct eth_hdr), buf, ip_len_icmp);
+                            g_windivert_driver->send((const char*)eth_buf_icmp.data(), eth_buf_icmp.size(), &send_addr);
+                        } else {
+                            g_windivert_driver->send((const char*)buf, ip_len_icmp, &send_addr);
+                        }
                     }
                     return; // Handled
                 }
