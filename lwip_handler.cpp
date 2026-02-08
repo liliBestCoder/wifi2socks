@@ -14,6 +14,9 @@
 #include <stdarg.h>
 #include <cstring>
 
+// Include LwIP ethernet protocol headers
+#include "lwip/prot/ethernet.h"
+
 std::recursive_mutex g_lwip_mtx;
 struct netif g_netif;
 uint8_t HOST_MAC[6] = { 0 }; 
@@ -72,17 +75,6 @@ void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len)
     *(uint16_t*)(tcp_base + 16) = (uint16_t)~sum;
 }
 
-#pragma pack(push, 1)
-struct eth_addr {
-    uint8_t addr[6];
-};
-struct eth_hdr {
-    struct eth_addr dest;
-    struct eth_addr src;
-    uint16_t type;
-};
-#pragma pack(pop)
-
 err_t windivert_linkoutput(struct netif* netif, struct pbuf* p) {
     if (!g_windivert_driver) return ERR_IF;
 
@@ -140,8 +132,8 @@ err_t windivert_linkoutput(struct netif* netif, struct pbuf* p) {
     std::vector<uint8_t> eth_buf;
     eth_buf.resize(sizeof(struct eth_hdr) + buf.size());
     struct eth_hdr* eth = (struct eth_hdr*)eth_buf.data();
-    memcpy(eth->dest.addr, dst_mac, 6);
-    memcpy(eth->src.addr, src_mac, 6);
+    memcpy(&eth->dest, dst_mac, 6);
+    memcpy(&eth->src, src_mac, 6);
     eth->type = ::htons(0x0800); // IPv4
     memcpy(eth_buf.data() + sizeof(struct eth_hdr), buf.data(), buf.size());
 
@@ -224,7 +216,7 @@ err_t netif_init_cb(struct netif* netif) {
 }
 
 void process_ip_packet(const char* frame, int len, const void* addr) {
-    if (len < sizeof(struct eth_hdr) + 20 || len > WINDIVERT_MTU_MAX) return;
+    if (len < (int)sizeof(struct eth_hdr) + 20 || len > WINDIVERT_MTU_MAX) return;
 
     struct eth_hdr* eth = (struct eth_hdr*)frame;
     if (ntohs(eth->type) != 0x0800) return; // Only handle IPv4
@@ -284,7 +276,7 @@ void process_ip_packet(const char* frame, int len, const void* addr) {
 
                 if (!is_fragment || is_first_fragment) {
                     // Store original destination for UDP, including MAC addresses
-                    NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, p_addr, eth->src.addr, eth->dest.addr);
+                    NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, p_addr, (const uint8_t*)&eth->src, (const uint8_t*)&eth->dest);
                 }
 
                 // Redirect all UDP to local IP to ensure LwIP processes it
@@ -303,7 +295,7 @@ void process_ip_packet(const char* frame, int len, const void* addr) {
             uint32_t dst_ip = ip->dest.addr;
 
             // Store MAC addresses for TCP too
-            NatTable::instance().set(ip->src.addr, ::ntohs(src_port), dst_ip, dst_port, p_addr, eth->src.addr, eth->dest.addr);
+            NatTable::instance().set(ip->src.addr, ::ntohs(src_port), dst_ip, dst_port, p_addr, (const uint8_t*)&eth->src, (const uint8_t*)&eth->dest);
 
             ip->dest.addr = lwip_ip.addr;
 
@@ -343,8 +335,8 @@ void process_ip_packet(const char* frame, int len, const void* addr) {
                         std::vector<uint8_t> eth_buf_icmp;
                         eth_buf_icmp.resize(sizeof(struct eth_hdr) + ip_len_icmp);
                         struct eth_hdr* eth_icmp = (struct eth_hdr*)eth_buf_icmp.data();
-                        memcpy(eth_icmp->dest.addr, eth->src.addr, 6);
-                        memcpy(eth_icmp->src.addr, eth->dest.addr, 6);
+                        memcpy(&eth_icmp->dest, &eth->src, 6);
+                        memcpy(&eth_icmp->src, &eth->dest, 6);
                         eth_icmp->type = ::htons(0x0800);
                         memcpy(eth_buf_icmp.data() + sizeof(struct eth_hdr), buf, ip_len_icmp);
 

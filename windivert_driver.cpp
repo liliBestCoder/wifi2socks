@@ -4,6 +4,11 @@
 
 #pragma comment(lib, "WinDivert.lib")
 
+// Define missing constants for WinDivert 2.2+ if using an older header
+#ifndef WINDIVERT_LAYER_ETHERNET
+#define WINDIVERT_LAYER_ETHERNET 5
+#endif
+
 WinDivertDriver::WinDivertDriver(const std::string& filter)
     : handle_(INVALID_HANDLE_VALUE), filter_(filter), running_(false), packet_buffer_(WINDIVERT_MTU_MAX) {}
 
