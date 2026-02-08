@@ -211,7 +211,7 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
 
 
 
-    struct pbuf* p = pbuf_alloc(PBUF_RAW, (uint16_t)length, PBUF_RAM);
+    struct pbuf* p = pbuf_alloc(PBUF_RAW, (uint16_t)length, PBUF_POOL);
 
     if (!p) {
 

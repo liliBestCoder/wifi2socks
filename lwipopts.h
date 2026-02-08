@@ -12,8 +12,9 @@
 #define LWIP_SEQUENTIAL_API             0
 
 // --- 3. MEMORY ---
-#define MEM_LIBC_MALLOC                 1
-#define MEMP_MEM_MALLOC                 1
+#define MEM_LIBC_MALLOC                 0
+#define MEMP_MEM_MALLOC                 0
+#define MEM_SIZE                        (4*1024*1024)
 #define MEM_ALIGNMENT                   4
 #define PBUF_POOL_SIZE                  16384 
 #define PBUF_POOL_BUFSIZE               2048 
