@@ -29,10 +29,6 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
-#ifdef _WINDOWS
-#include <WinIoctl.h>   // Compiling Win32 Applications Or DLL's
-#endif // _WINDOWS
-
 // The following definitions are used to customize the driver build
 // In you would like to redefine these for the custom build do that in the user_settings.h file
 #ifdef USER_NAMES

@@ -6,10 +6,12 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#include "lwip_handler.h"
-#include "app_config.h"
+#include <windows.h>
+
 #include "winpkfilter_driver.h"
 #include "nat_table.h"
+#include "lwip_handler.h"
+#include "app_config.h"
 #include "proxy_udp.h"
 #include "dhcp_server.h"
 #include <vector>
@@ -110,7 +112,6 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
     struct eth_hdr* eth = (struct eth_hdr*)packet;
     uint16_t eth_type = ntohs(eth->type);
     
-    // Explicitly define MAC pointers to avoid undeclared identifier errors
     const uint8_t* smac = (const uint8_t*)&eth->src;
     const uint8_t* dmac = (const uint8_t*)&eth->dest;
 
@@ -121,8 +122,8 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
         if (IPH_V(ip) == 4) {
             if (IPH_PROTO(ip) == IP_PROTO_UDP) {
                 uint8_t* udp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
-                uint16_t dst_port_h = ntohs(*(uint16_t*)(udp_ptr + 2));
                 uint16_t src_port_h = ntohs(*(uint16_t*)(udp_ptr + 0));
+                uint16_t dst_port_h = ntohs(*(uint16_t*)(udp_ptr + 2));
 
                 if (dst_port_h == 67 && g_dhcp_server_ptr) {
                     sockaddr_in client_sa;
@@ -133,14 +134,14 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
                     return; 
                 }
 
-                NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, nullptr, smac, dmac);
+                NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, smac, dmac);
             }
             else if (IPH_PROTO(ip) == IP_PROTO_TCP) {
                 uint8_t* tcp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
                 uint16_t src_port_h = ntohs(*(uint16_t*)(tcp_ptr + 0));
                 uint16_t dst_port_h = ntohs(*(uint16_t*)(tcp_ptr + 2));
                 
-                NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, nullptr, smac, dmac);
+                NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, smac, dmac);
             }
         }
     }
