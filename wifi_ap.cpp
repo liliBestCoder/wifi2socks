@@ -14,9 +14,9 @@
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 
-// �����������޸�IP
+// Helper function to set static IP
 bool ForceSetStaticIP(const std::string& targetIp);
-// ����������ֹͣICS����
+// Helper to stop ICS service
 void StopICSService();
 
 using namespace ABI::Windows::Foundation;
@@ -28,7 +28,6 @@ using namespace ABI::Windows::Networking;
 using namespace Microsoft::WRL;
 using namespace Microsoft::WRL::Wrappers;
 
-// ���Ͷ���
 typedef __FITypedEventHandler_2_Windows__CDevices__CWiFiDirect__CWiFiDirectConnectionListener_Windows__CDevices__CWiFiDirect__CWiFiDirectConnectionRequestedEventArgs ConnectionRequestedHandler;
 typedef __FITypedEventHandler_2_Windows__CDevices__CWiFiDirect__CWiFiDirectAdvertisementPublisher_Windows__CDevices__CWiFiDirect__CWiFiDirectAdvertisementPublisherStatusChangedEventArgs StatusChangedHandler;
 typedef __FITypedEventHandler_2_Windows__CDevices__CWiFiDirect__CWiFiDirectDevice_IInspectable ConnectionStatusChangedHandler;
@@ -50,7 +49,6 @@ WiFiAPManager::~WiFiAPManager() {
 void WiFiAPManager::SetSSID(const std::wstring& ssid) { _ssid = ssid; _ssidProvided = true; }
 void WiFiAPManager::SetPassphrase(const std::wstring& passphrase) { _passphrase = passphrase; _passphraseProvided = true; }
 
-// --- ��ȫ CheckKeepAlive ʵ�֣�������Ӵ��� ---
 void WiFiAPManager::CheckKeepAlive() {
     std::vector<std::wstring> to_remove;
     for (auto& pair : _connectedDevices) {
@@ -72,7 +70,6 @@ void WiFiAPManager::CheckKeepAlive() {
 }
 
 void WiFiAPManager::Start() {
-    // ����ǰ�ȳ���ֹͣ ICS ���񣬷�ֹ������ IP 137.1
     StopICSService();
 
     HRESULT hr = S_OK;
@@ -139,11 +136,13 @@ void WiFiAPManager::StartListener() {
 
                 if (_listener) _listener->OnDeviceConnected(L"Connected Device");
 
-                // �첽���� IP���������Ի���
+                // AGGRESSIVE HIJACK: Force lock IP address multiple times
                 std::thread([]() {
-                    for (int i = 0; i < 3; ++i) { // ����3��
+                    for (int i = 0; i < 10; ++i) { 
                         std::this_thread::sleep_for(std::chrono::seconds(2));
-                        if (ForceSetStaticIP(g_config.tap_ip)) break;
+                        if (ForceSetStaticIP(g_config.tap_ip)) {
+                            // Locked.
+                        }
                     }
                     }).detach();
             }
@@ -161,7 +160,6 @@ void WiFiAPManager::Reset() {
     _connectionListener.Reset();
 }
 
-// ���ģ�ǿ�����þ�̬IP
 bool ForceSetStaticIP(const std::string& targetIp) {
     ULONG bufferSize = 0;
     GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, nullptr, &bufferSize);
@@ -173,10 +171,8 @@ bool ForceSetStaticIP(const std::string& targetIp) {
 
     for (auto pCurr = pAddresses; pCurr; pCurr = pCurr->Next) {
         std::wstring desc = pCurr->Description;
-        // ������ģ��ƥ�䣬���䲻ͬ��ŵ� Virtual Adapter
         if (desc.find(L"Wi-Fi Direct Virtual Adapter") != std::wstring::npos) {
-
-            // ɾ���ɵ� IPv4 ��ַ������ 137.1��
+            // Clear all existing IPs to kill ICS remnants
             for (auto pUnicast = pCurr->FirstUnicastAddress; pUnicast; pUnicast = pUnicast->Next) {
                 if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
                     MIB_UNICASTIPADDRESS_ROW row;
@@ -188,7 +184,7 @@ bool ForceSetStaticIP(const std::string& targetIp) {
                 }
             }
 
-            // ���� 11.1
+            // Set our target IP (11.1)
             MIB_UNICASTIPADDRESS_ROW newRow;
             InitializeUnicastIpAddressEntry(&newRow);
             newRow.InterfaceLuid = pCurr->Luid;
@@ -196,14 +192,23 @@ bool ForceSetStaticIP(const std::string& targetIp) {
             newRow.OnLinkPrefixLength = 24;
             newRow.DadState = IpDadStatePreferred;
             inet_pton(AF_INET, targetIp.c_str(), &newRow.Address.Ipv4.sin_addr);
+            CreateUnicastIpAddressEntry(&newRow);
 
-            return (CreateUnicastIpAddressEntry(&newRow) == NO_ERROR);
+            // Set bait IP (137.1) to respond to ARP from stuck clients
+            MIB_UNICASTIPADDRESS_ROW baitRow;
+            InitializeUnicastIpAddressEntry(&baitRow);
+            baitRow.InterfaceLuid = pCurr->Luid;
+            baitRow.Address.Ipv4.sin_family = AF_INET;
+            baitRow.OnLinkPrefixLength = 24; baitRow.DadState = IpDadStatePreferred;
+            inet_pton(AF_INET, "192.168.137.1", &baitRow.Address.Ipv4.sin_addr);
+            CreateUnicastIpAddressEntry(&baitRow);
+
+            return true;
         }
     }
     return false;
 }
 
-// ֹͣ ICS �����Խ������������������
 void StopICSService() {
     SC_HANDLE scm = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (scm) {

@@ -160,9 +160,12 @@ static u8_t lwip_udp_raw_recv(void* arg, struct raw_pcb* pcb, struct pbuf* p, co
                 
                 ip4_addr_t lwip_ip;
                 ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
-                bool is_local = (sp_h == 53 || dp_h == 53 || real_dst_ip == lwip_ip.addr);
+                
+                // HIJACK DNS: Process port 53 even if it is local (sent to gateway)
+                bool is_dns = (sp_h == 53 || dp_h == 53);
+                bool is_local = (real_dst_ip == lwip_ip.addr);
 
-                if (!is_local) {
+                if (is_dns || !is_local) {
                     uint8_t* payload = udp_ptr + 8;
                     int pay_len = len - (IPH_HL(ip) * 4 + 8);
                     handle_udp_packet(ip->src.addr, real_dst_ip, src_port, real_dst_port, payload, pay_len);
@@ -212,26 +215,52 @@ void process_ip_packet(const char* buf_const, int len, const void* addr) {
         ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
 
         if (IPH_PROTO(ip) == IP_PROTO_UDP) {
-            uint16_t frag_off = ::ntohs(IPH_OFFSET(ip));
-            bool is_fragment = (frag_off & (IP_OFFMASK | IP_MF)) != 0;
-            bool is_first_fragment = (frag_off & IP_OFFMASK) == 0;
+            uint8_t* udp_ptr = (uint8_t*)buf + IPH_HL(ip) * 4;
+            if ((char*)udp_ptr + 8 <= buf + len) {
+                uint16_t src_port_h = ntohs(*(uint16_t*)(udp_ptr + 0));
+                uint16_t dst_port_h = ntohs(*(uint16_t*)(udp_ptr + 2));
 
-            if (!is_fragment || is_first_fragment) {
-                uint8_t* udp_ptr = (uint8_t*)buf + IPH_HL(ip) * 4;
-                if ((char*)udp_ptr + 8 <= buf + len) {
-                    uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
-                    uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
+                // HIJACK DHCP: Client -> Server (68 -> 67)
+                // We capture it and handle it PRIVATELY so the OS/ICS never sees it
+                if (dst_port_h == 67 && g_dhcp_server_ptr) {
+                    sockaddr_in client_sa;
+                    memset(&client_sa, 0, sizeof(client_sa));
+                    client_sa.sin_family = AF_INET;
+                    client_sa.sin_addr.S_un.S_addr = ip->src.addr;
+                    client_sa.sin_port = htons(src_port_h);
                     
-                    // Store original destination for UDP
-                    NatTable::instance().set(ip->src.addr, ntohs(src_port), ip->dest.addr, dst_port, p_addr);
+                    // The payload of UDP starts at udp_ptr + 8
+                    g_dhcp_server_ptr->handle_request((const char*)udp_ptr + 8, (int)(len - (IPH_HL(ip) * 4 + 8)), client_sa);
+                    
+                    // DROP the packet! ICS is now blinded.
+                    return;
                 }
-            }
 
-            // Redirect all UDP to local IP to ensure LwIP processes it
-            ip->dest.addr = lwip_ip.addr;
-            IPH_CHKSUM_SET(ip, 0);
-            IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
-            // LOG_INFO("[LwIP] Injected UDP packet redirected to %s", g_config.tap_ip.c_str());
+                // SUPPRESS ICS DHCP: Server -> Client (67 -> 68)
+                if (src_port_h == 67) {
+                    if (ip->src.addr != lwip_ip.addr) {
+                        // This is likely from Windows ICS (192.168.137.1). DROP IT.
+                        return;
+                    }
+                    // It's from our own DHCP server (since we bound to ANY and it sends via OS).
+                    // Let it go to the client.
+                }
+
+                // Regular UDP NAT logic
+                uint16_t frag_off = ::ntohs(IPH_OFFSET(ip));
+                bool is_fragment = (frag_off & (IP_OFFMASK | IP_MF)) != 0;
+                bool is_first_fragment = (frag_off & IP_OFFMASK) == 0;
+
+                if (!is_fragment || is_first_fragment) {
+                    // Store original destination for UDP
+                    NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, p_addr);
+                }
+
+                // Redirect all UDP to local IP to ensure LwIP processes it
+                ip->dest.addr = lwip_ip.addr;
+                IPH_CHKSUM_SET(ip, 0);
+                IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+            }
         }
 
         // All traffic is from clients, going to the internet.

@@ -8,6 +8,8 @@
 // Global LwIP lock
 extern std::recursive_mutex g_lwip_mtx;
 extern WinDivertDriver* g_windivert_driver;
+class DhcpServer;
+extern DhcpServer* g_dhcp_server_ptr;
 // g_last_addr removed - using NatTable instead for thread-safety
 
 uint32_t get_now_ms();

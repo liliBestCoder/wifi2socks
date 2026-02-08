@@ -13,9 +13,11 @@ public:
     bool start();
     void stop();
 
+    // Directly handle a request buffer (e.g. from WinDivert)
+    void handle_request(const char* buffer, int size, const sockaddr_in& client_addr);
+
 private:
     void run();
-    void handle_request(const char* buffer, int size, const sockaddr_in& client_addr);
 
     std::string listen_ip_;
     int listen_port_;
