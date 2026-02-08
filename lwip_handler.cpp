@@ -8,6 +8,7 @@
 #include "windivert_driver.h"
 #include "nat_table.h"
 #include "proxy_udp.h"
+#include "dhcp_server.h"
 #include <vector>
 #include <iostream>
 #include <stdarg.h>
