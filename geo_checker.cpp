@@ -47,7 +47,8 @@ void GeoChecker::load_data(const std::string& geoip_file, const std::string& geo
 }
 
 void GeoChecker::init(const std::string& geoip_file, const std::string& geosite_file) {
-   load_data(geoip_file, geosite_file);
+    if (m_load_thread.joinable()) m_load_thread.join();
+    m_load_thread = std::thread(&GeoChecker::load_data, this, geoip_file, geosite_file);
 }
 
 static bool read_file_to_buffer(const std::string& filepath, std::vector<char>& buffer) {
@@ -90,12 +91,14 @@ void GeoChecker::load_geoip(const std::string& filepath) {
             const auto& cidr = entry.cidr(j);
             if (cidr.ip().size() != 4) continue; 
 
-            uint32_t net_num = ntohl(*reinterpret_cast<const uint32_t*>(cidr.ip().data()));
+            uint32_t net_num = 0;
+            memcpy(&net_num, cidr.ip().data(), 4);
+            net_num = ntohl(net_num);
             uint32_t prefix = cidr.prefix();
-            if (prefix > 32) prefix = 32; // 安全防护
+            if (prefix > 32) prefix = 32; 
 
-            // 修复 UB：当 prefix=0 时，32-0=32，0xFFFFFFFF << 32 是未定义行为
             uint32_t mask = (prefix == 0) ? 0 : (0xFFFFFFFFu << (32 - prefix));
+            if (prefix == 32) mask = 0xFFFFFFFFu;
             
             GeoIPRange range;
             range.start_ip = net_num & mask;

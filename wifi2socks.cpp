@@ -108,11 +108,12 @@ int main() {
     TrafficManager::instance().start();
 
     // 0.5 Pre-load GeoIP/GeoSite
+    LOG_INFO("[CORE] Initializing GeoChecker...");
     try {
         GeoChecker::instance().init();
-        LOG_INFO("[CORE] GeoChecker loading in background...");
+        LOG_INFO("[CORE] GeoChecker initialization triggered.");
     } catch (const std::exception& e) {
-        LOG_ERROR("[CORE] Warning: GeoChecker failed to load: %s. IP/Domain bypass may not work.", e.what());
+        LOG_ERROR("[CORE] Warning: GeoChecker failed to initialize: %s", e.what());
     }
 
     // 1. Initialize WinPkFilter

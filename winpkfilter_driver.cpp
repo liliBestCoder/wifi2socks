@@ -1,7 +1,15 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <iphlpapi.h>
+#include <iostream>
+
 #include "winpkfilter_driver.h"
 #include "app_config.h"
 #include "logger.h"
-#include <iostream>
 
 #pragma comment(lib, "ndisapilib.lib")
 #pragma comment(lib, "iphlpapi.lib")
@@ -42,11 +50,22 @@ bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler han
         return false;
     }
 
+    LOG_INFO("Total adapters found by WinPkFilter: %u", adapters.m_nAdapterCount);
     bool found = false;
+    std::string target_lower = adapter_name;
+    std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
+
     for (UINT i = 0; i < adapters.m_nAdapterCount; ++i) {
-        if (adapter_name == (char*)adapters.m_szAdapterNameList[i]) {
+        std::string current_name = (char*)adapters.m_szAdapterNameList[i];
+        std::string current_lower = current_name;
+        std::transform(current_lower.begin(), current_lower.end(), current_lower.begin(), ::tolower);
+
+        LOG_INFO("Adapter [%u]: %s", i, current_name.c_str());
+
+        if (current_lower.find(target_lower) != std::string::npos || target_lower.find(current_lower) != std::string::npos) {
             m_adapter_handle = adapters.m_nAdapterHandle[i];
             found = true;
+            LOG_INFO("Matched adapter: %s", current_name.c_str());
             break;
         }
     }
@@ -118,6 +137,10 @@ void WinPkFilterDriver::run() {
         if (!m_running) break;
 
         while (m_ndis_api.ReadPacket(&request)) {
+            static uint64_t packet_count = 0;
+            if (++packet_count % 100 == 0) {
+                LOG_INFO("WinPkFilter: Captured 100 packets (Total: %llu)", packet_count);
+            }
             bool outbound = (buffer->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
             if (m_packet_handler) {
                 m_packet_handler((const char*)buffer->m_IBuffer, buffer->m_Length, outbound);
