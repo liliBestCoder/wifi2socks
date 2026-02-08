@@ -40,7 +40,7 @@ public:
     GeoChecker(); 
     ~GeoChecker();
 
-    // Async Init
+    // Sync Init
     void init(const std::string& geoip_file = "geoip.dat", const std::string& geosite_file = "geosite.dat");
     bool is_ready() const { return m_ready; }
 
