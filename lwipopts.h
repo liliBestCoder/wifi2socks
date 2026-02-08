@@ -18,12 +18,12 @@
 #define PBUF_POOL_SIZE                  16384 
 #define PBUF_POOL_BUFSIZE               2048 
 #define MEMP_NUM_TCP_SEG                16384
-#define TCP_OVERSIZE                    1300
+#define TCP_OVERSIZE                    1460
 
 // --- 4. TCP/IP ---
 #define LWIP_TCP                        1
 #define TCP_INITIAL_CWND                10
-#define TCP_MSS                         1300
+#define TCP_MSS                         1460
 #define TCP_WND                         (65535UL << 5)
 #define TCP_SND_BUF                     (4*1024*1024)
 #define TCP_SND_QUEUELEN                6552

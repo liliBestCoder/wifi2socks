@@ -54,4 +54,11 @@ private:
     PacketHandler m_packet_handler;
     std::thread m_worker_thread;
     bool m_running;
+
+    static const int BATCH_SIZE = 64;
+    PETH_M_REQUEST m_read_request;
+    PINTERMEDIATE_BUFFER m_read_buffers[BATCH_SIZE];
+    
+    INTERMEDIATE_BUFFER* m_send_buffer;
+    std::mutex m_send_mutex;
 };
