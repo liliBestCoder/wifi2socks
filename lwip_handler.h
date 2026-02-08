@@ -2,21 +2,20 @@
 #include <mutex>
 #include <cstdint>
 #include "lwip_includes.h"
-#include "windivert.h"
-#include "windivert_driver.h"
+
+class WinPkFilterDriver;
+extern WinPkFilterDriver* g_winpkfilter_driver;
 
 // Global LwIP lock
 extern std::recursive_mutex g_lwip_mtx;
-extern WinDivertDriver* g_windivert_driver;
 class DhcpServer;
 extern DhcpServer* g_dhcp_server_ptr;
-// g_last_addr removed - using NatTable instead for thread-safety
 
 uint32_t get_now_ms();
 void lwip_system_init();
 void lwip_periodic_handle();
-void process_ip_packet(const char* buf, int len, const void* addr);
-void set_windivert_driver(WinDivertDriver* driver);
+void process_ethernet_frame(const char* packet, size_t length, bool outbound);
+void set_winpkfilter_driver(WinPkFilterDriver* driver);
 
 // Helpers
 uint16_t ip_chksum_simple(void* dataptr, int len);

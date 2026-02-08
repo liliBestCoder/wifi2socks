@@ -84,8 +84,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y /d "$(ProjectDir)WinDivert.dll" "$(OutDir)"
-xcopy /y /d "$(ProjectDir)WinDivert64.sys" "$(OutDir)"</Command>
+      <Command></Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -104,8 +103,7 @@ xcopy /y /d "$(ProjectDir)WinDivert64.sys" "$(OutDir)"</Command>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y /d "$(ProjectDir)WinDivert.dll" "$(OutDir)"
-xcopy /y /d "$(ProjectDir)WinDivert64.sys" "$(OutDir)"</Command>
+      <Command></Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -122,8 +120,7 @@ xcopy /y /d "$(ProjectDir)WinDivert64.sys" "$(OutDir)"</Command>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y /d "$(ProjectDir)WinDivert.dll" "$(OutDir)"
-xcopy /y /d "$(ProjectDir)WinDivert64.sys" "$(OutDir)"</Command>
+      <Command></Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -142,8 +139,7 @@ xcopy /y /d "$(ProjectDir)WinDivert64.sys" "$(OutDir)"</Command>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y /d "$(ProjectDir)WinDivert.dll" "$(OutDir)"
-xcopy /y /d "$(ProjectDir)WinDivert64.sys" "$(OutDir)"</Command>
+      <Command></Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -159,7 +155,7 @@ xcopy /y /d "$(ProjectDir)WinDivert64.sys" "$(OutDir)"</Command>
     <ClCompile Include="geo_checker.cpp" />
     <ClCompile Include="tls_parser.cpp" />
     <ClCompile Include="dhcp_server.cpp" />
-    <ClCompile Include="windivert_driver.cpp" />
+    <ClCompile Include="winpkfilter_driver.cpp" />
     <ClCompile Include="proxy_tcp.cpp" />
     <ClCompile Include="proxy_udp.cpp" />
     <ClCompile Include="wifi_ap.cpp" />
@@ -211,7 +207,7 @@ xcopy /y /d "$(ProjectDir)WinDivert64.sys" "$(OutDir)"</Command>
     <ClInclude Include="nat_table.h" />
     <ClInclude Include="tls_parser.h" />
     <ClInclude Include="dhcp_server.h" />
-    <ClInclude Include="windivert_driver.h" />
+    <ClInclude Include="winpkfilter_driver.h" />
     <ClInclude Include="windivert.h" />
     <ClInclude Include="wintun.h" />
     <ClInclude Include="proxy_tcp.h" />

@@ -5,7 +5,7 @@
 #include <ws2tcpip.h>
 #include "lwip_handler.h"
 #include "app_config.h"
-#include "windivert_driver.h"
+#include "winpkfilter_driver.h"
 #include "nat_table.h"
 #include "proxy_udp.h"
 #include "dhcp_server.h"
@@ -16,16 +16,17 @@
 
 // Include LwIP ethernet protocol headers
 #include "lwip/prot/ethernet.h"
+#include "lwip/etharp.h"
 
 std::recursive_mutex g_lwip_mtx;
 struct netif g_netif;
 uint8_t HOST_MAC[6] = { 0 }; 
 bool g_host_mac_known = false;
 
-WinDivertDriver* g_windivert_driver = nullptr;
+WinPkFilterDriver* g_winpkfilter_driver = nullptr;
 
-void set_windivert_driver(WinDivertDriver* driver) {
-    g_windivert_driver = driver;
+void set_winpkfilter_driver(WinPkFilterDriver* driver) {
+    g_winpkfilter_driver = driver;
 }
 
 // --- Logging for LwIP ---
@@ -38,7 +39,6 @@ extern "C" void lwip_win32_platform_diag(const char *format, ...) {
     OutputDebugStringA(buf); va_end(ap);
 }
 
-// Fix LNK2019: unresolved external symbol lwip_strerr
 extern "C" const char* lwip_strerr(int8_t err) {
     return "LwIP_Error";
 }
@@ -53,14 +53,6 @@ uint16_t ip_chksum_simple(void* dataptr, int len) {
     return (uint16_t)~(acc);
 }
 
-uint32_t calculate_raw_sum(const void* data, int len) {
-    uint32_t sum = 0;
-    const uint16_t* ptr = (const uint16_t*)data;
-    while (len > 1) { sum += *ptr++; len -= 2; }
-    if (len > 0) { sum += (uint16_t)(*(const uint8_t*)ptr); }
-    return sum;
-}
-
 void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len) {
     *(uint16_t*)(tcp_base + 16) = 0;
     uint32_t sum = 0;
@@ -70,313 +62,105 @@ void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len)
     sum += ip_dst[0]; sum += ip_dst[1];
     sum += ::htons(IP_PROTO_TCP);
     sum += ::htons((uint16_t)tcp_len);
-    sum += calculate_raw_sum(tcp_base, tcp_len);
+    uint32_t raw_sum = 0;
+    uint16_t* ptr = (uint16_t*)tcp_base;
+    int l = tcp_len;
+    while (l > 1) { raw_sum += *ptr++; l -= 2; }
+    if (l > 0) { raw_sum += (uint16_t)(*(const uint8_t*)ptr); }
+    sum += raw_sum;
     while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
     *(uint16_t*)(tcp_base + 16) = (uint16_t)~sum;
 }
 
-err_t windivert_linkoutput(struct netif* netif, struct pbuf* p) {
-    if (!g_windivert_driver) return ERR_IF;
+err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
+    if (!g_winpkfilter_driver) return ERR_IF;
 
-    // Use a mutable buffer to perform NAT
+    // Use a temporary buffer to send
     static std::vector<uint8_t> buf;
-    buf.assign(p->tot_len, 0);
+    buf.resize(p->tot_len);
     pbuf_copy_partial(p, buf.data(), p->tot_len, 0);
 
-    WINDIVERT_ADDRESS send_addr = {0};
-    bool addr_found = false;
-    uint8_t dst_mac[6] = {0};
-    uint8_t src_mac[6] = {0};
-
-    if (buf.size() >= 20) {
-        struct ip_hdr* ip = (struct ip_hdr*)buf.data();
-        if (IPH_V(ip) == 4 && IPH_PROTO(ip) == IP_PROTO_TCP) {
-             ip4_addr_t lwip_ip;
-             ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
-             if (ip->src.addr == lwip_ip.addr) {
-                 uint8_t* tcp_base = buf.data() + IPH_HL(ip) * 4;
-                 uint16_t src_port = *(uint16_t*)tcp_base;
-                 uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
-                 
-                 if (src_port == ::htons(g_config.lwip_listen_port)) {
-                     // Since this is a reply, the "original source" is the current destination
-                     NatEntry target = NatTable::instance().get(ip->dest.addr, ::ntohs(dst_port));
-                     
-                     if (target.original_dst_ip != 0) {
-                         ip->src.addr = target.original_dst_ip;
-                         *(uint16_t*)tcp_base = target.original_dst_port;
-                         
-                         IPH_CHKSUM_SET(ip, 0);
-                         IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
-                         
-                         uint16_t ip_len = ::ntohs(IPH_LEN(ip));
-                         int tcp_len = ip_len - IPH_HL(ip) * 4;
-                         recalculate_tcp_checksum(ip, tcp_base, tcp_len);
-
-                         send_addr = target.addr;
-                         memcpy(dst_mac, target.src_mac, 6); // Dest MAC is client's MAC
-                         memcpy(src_mac, target.dst_mac, 6); // Src MAC is gateway's MAC
-                         addr_found = true;
-                     }
-                 }
-             }
-        }
-    }
-
-    if (!addr_found) {
-        // Fallback or non-TCP traffic? 
-        return ERR_OK; 
-    }
-
-    // The packet from LwIP is going out. Flip its direction.
-    send_addr.Outbound = !send_addr.Outbound;
-
-    if (g_windivert_driver->get_layer() == WINDIVERT_LAYER_ETHERNET) {
-        // Prepend Ethernet Header
-        std::vector<uint8_t> eth_buf;
-        eth_buf.resize(sizeof(struct eth_hdr) + buf.size());
-        struct eth_hdr* eth = (struct eth_hdr*)eth_buf.data();
-        memcpy(&eth->dest, dst_mac, 6);
-        memcpy(&eth->src, src_mac, 6);
-        eth->type = ::htons(0x0800); // IPv4
-        memcpy(eth_buf.data() + sizeof(struct eth_hdr), buf.data(), buf.size());
-        g_windivert_driver->send((const char*)eth_buf.data(), eth_buf.size(), &send_addr);
-    } else {
-        // Send raw IP packet
-        g_windivert_driver->send((const char*)buf.data(), buf.size(), &send_addr);
+    // Since we are work in Ethernet layer, LwIP already constructed the Ethernet header
+    // if configured correctly.
+    if (!g_winpkfilter_driver->send_to_adapter((const char*)buf.data(), buf.size())) {
+        return ERR_IF;
     }
 
     return ERR_OK;
-}
-
-err_t windivert_netif_output(struct netif* netif, struct pbuf* p, const ip4_addr_t* ipaddr) {
-    return netif->linkoutput(netif, p);
-}
-
-// --- Reassembled UDP Handling ---
-static u8_t lwip_udp_raw_recv(void* arg, struct raw_pcb* pcb, struct pbuf* p, const ip_addr_t* addr) {
-    if (p != NULL) {
-        struct ip_hdr* ip = (struct ip_hdr*)p->payload;
-        if (IPH_PROTO(ip) == IP_PROTO_UDP) {
-            uint8_t* buf = (uint8_t*)p->payload;
-            int len = p->tot_len;
-            uint8_t* udp_ptr = buf + IPH_HL(ip) * 4;
-            
-            if (len >= IPH_HL(ip) * 4 + 8) {
-                uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
-                uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
-                
-                // Recover original destination from NAT table
-                NatEntry target = NatTable::instance().get(ip->src.addr, ntohs(src_port));
-                uint32_t real_dst_ip = ip->dest.addr;
-                uint16_t real_dst_port = dst_port;
-
-                if (target.original_dst_ip != 0) {
-                    real_dst_ip = target.original_dst_ip;
-                    real_dst_port = target.original_dst_port;
-                }
-
-                // Check if it's local traffic that should be bypassed
-                uint16_t sp_h = ::ntohs(src_port);
-                uint16_t dp_h = ::ntohs(real_dst_port);
-                
-                ip4_addr_t lwip_ip;
-                ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
-                
-                // HIJACK DNS: Process port 53 even if it is local (sent to gateway)
-                bool is_dns = (sp_h == 53 || dp_h == 53);
-                bool is_local = (real_dst_ip == lwip_ip.addr);
-
-                if (is_dns || !is_local) {
-                    uint8_t* payload = udp_ptr + 8;
-                    int pay_len = len - (IPH_HL(ip) * 4 + 8);
-                    handle_udp_packet(ip->src.addr, real_dst_ip, src_port, real_dst_port, payload, pay_len);
-                }
-            }
-        }
-        pbuf_free(p);
-        return 1; // Consumed
-    }
-    return 0;
 }
 
 err_t netif_init_cb(struct netif* netif) {
-    netif->linkoutput = windivert_linkoutput;
-    netif->output = windivert_netif_output;
+    netif->linkoutput = winpkfilter_linkoutput;
+    netif->output = etharp_output; // Use standard ARP output
     netif->mtu = 1500;
-    netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_LINK_UP | NETIF_FLAG_UP;
-    netif->hwaddr_len = 0; // Keep as L3 interface for simplicity
-
-    // Register a raw PCB to catch reassembled UDP fragments
-    struct raw_pcb* pcb = raw_new(IP_PROTO_UDP);
-    if (pcb) {
-        raw_bind(pcb, IP_ADDR_ANY);
-        raw_recv(pcb, lwip_udp_raw_recv, NULL);
-        LOG_INFO("[LwIP] Registered raw_pcb for protocol %d", IP_PROTO_UDP);
-    } else {
-        LOG_ERROR("[LwIP] Failed to create raw_pcb for UDP");
-    }
+    netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_LINK_UP | NETIF_FLAG_UP | NETIF_FLAG_ETHERNET;
+    
+    // Set MAC address (faked or real WiFi AP MAC)
+    netif->hwaddr_len = 6;
+    // For WiFi AP, we should probably match the AP's MAC or use a dummy one
+    // Clients will talk to this MAC.
+    memset(netif->hwaddr, 0x02, 6); // Locally administered address
 
     return ERR_OK;
 }
 
-void process_ip_packet(const char* frame, int len, const void* addr) {
-    const char* buf_const = nullptr;
-    int ip_len = 0;
-    const uint8_t* src_mac = nullptr;
-    const uint8_t* dst_mac = nullptr;
+void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
+    if (length < sizeof(struct eth_hdr) || length > 1514) return;
 
-    if (g_windivert_driver->get_layer() == WINDIVERT_LAYER_ETHERNET) {
-        if (len < (int)sizeof(struct eth_hdr) + 20) return;
-        struct eth_hdr* eth = (struct eth_hdr*)frame;
-        if (ntohs(eth->type) != 0x0800) return; // Only handle IPv4
-        buf_const = frame + sizeof(struct eth_hdr);
-        ip_len = len - (int)sizeof(struct eth_hdr);
-        src_mac = (const uint8_t*)&eth->src;
-        dst_mac = (const uint8_t*)&eth->dest;
-    } else {
-        if (len < 20) return;
-        buf_const = frame;
-        ip_len = len;
+    // In TUNNEL mode:
+    // outbound == true: Packet from local stack (MSTCP) going to adapter.
+    // outbound == false: Packet from adapter (Wire) going to local stack.
+
+    if (outbound) {
+        // We generally ignore packets from local OS unless we want to proxy them too.
+        // For WiFi AP, ICS might be sending packets here.
+        return;
     }
 
-    if (ip_len > WINDIVERT_MTU_MAX) return;
+    // Packet from client (Wire)
+    struct eth_hdr* eth = (struct eth_hdr*)packet;
+    uint16_t eth_type = ntohs(eth->type);
 
-    // We need to modify the buffer for NAT, so we make a copy.
-    char buf[WINDIVERT_MTU_MAX];
-    memcpy(buf, buf_const, ip_len);
-    
-    const WINDIVERT_ADDRESS* p_addr = static_cast<const WINDIVERT_ADDRESS*>(addr);
+    if (eth_type == ETHTYPE_IP) {
+        struct ip_hdr* ip = (struct ip_hdr*)(packet + sizeof(struct eth_hdr));
+        int ip_len = length - sizeof(struct eth_hdr);
 
-    struct ip_hdr* ip = (struct ip_hdr*)buf;
-    if (IPH_V(ip) == 4) {
-        if (ntohs(IPH_LEN(ip)) > ip_len) return;
-
-        ip4_addr_t lwip_ip;
-        ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
-
-        if (IPH_PROTO(ip) == IP_PROTO_UDP) {
-            uint8_t* udp_ptr = (uint8_t*)buf + IPH_HL(ip) * 4;
-            if ((char*)udp_ptr + 8 <= buf + ip_len) {
+        if (IPH_V(ip) == 4) {
+            if (IPH_PROTO(ip) == IP_PROTO_UDP) {
+                uint8_t* udp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
                 uint16_t src_port_h = ntohs(*(uint16_t*)(udp_ptr + 0));
                 uint16_t dst_port_h = ntohs(*(uint16_t*)(udp_ptr + 2));
 
-                // HIJACK DHCP: Client -> Server (68 -> 67)
-                // We capture it and handle it PRIVATELY so the OS/ICS never sees it
+                // HIJACK DHCP
                 if (dst_port_h == 67 && g_dhcp_server_ptr) {
                     sockaddr_in client_sa;
                     memset(&client_sa, 0, sizeof(client_sa));
                     client_sa.sin_family = AF_INET;
                     client_sa.sin_addr.S_un.S_addr = ip->src.addr;
-                    client_sa.sin_port = htons(src_port_h);
-                    
-                    // The payload of UDP starts at udp_ptr + 8
-                    g_dhcp_server_ptr->handle_request((const char*)udp_ptr + 8, (int)(ip_len - (IPH_HL(ip) * 4 + 8)), client_sa);
-                    
-                    // DROP the packet! ICS is now blinded.
-                    return;
+                    g_dhcp_server_ptr->handle_request((const char*)udp_ptr + 8, ip_len - (IPH_HL(ip) * 4 + 8), client_sa);
+                    return; // DROP
                 }
 
-                // SUPPRESS ICS DHCP: Server -> Client (67 -> 68)
-                if (src_port_h == 67) {
-                    if (ip->src.addr != lwip_ip.addr) {
-                        // This is likely from Windows ICS (192.168.137.1). DROP IT.
-                        return;
-                    }
-                    // It's from our own DHCP server (since we bound to ANY and it sends via OS).
-                    // Let it go to the client.
-                }
-
-                // Regular UDP NAT logic
-                uint16_t frag_off = ::ntohs(IPH_OFFSET(ip));
-                bool is_fragment = (frag_off & (IP_OFFMASK | IP_MF)) != 0;
-                bool is_first_fragment = (frag_off & IP_OFFMASK) == 0;
-
-                if (!is_fragment || is_first_fragment) {
-                    // Store original destination for UDP, including MAC addresses
-                    NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, p_addr, src_mac, dst_mac);
-                }
-
-                // Redirect all UDP to local IP to ensure LwIP processes it
-                ip->dest.addr = lwip_ip.addr;
-                IPH_CHKSUM_SET(ip, 0);
-                IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+                // Store MAC addresses for UDP NAT
+                NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, nullptr, src_mac, dst_mac);
             }
-        }
-
-        // All traffic is from clients, going to the internet.
-        // TCP traffic needs to be redirected to the LwIP listening port.
-        if (IPH_PROTO(ip) == IP_PROTO_TCP) {
-            uint8_t* tcp_base = (uint8_t*)buf + IPH_HL(ip) * 4;
-            uint16_t src_port = *(uint16_t*)(tcp_base); 
-            uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
-            uint32_t dst_ip = ip->dest.addr;
-
-            // Store MAC addresses for TCP too
-            NatTable::instance().set(ip->src.addr, ::ntohs(src_port), dst_ip, dst_port, p_addr, src_mac, dst_mac);
-
-            ip->dest.addr = lwip_ip.addr;
-
-            *(uint16_t*)(tcp_base + 2) = ::htons(g_config.lwip_listen_port);
-
-            IPH_CHKSUM_SET(ip, 0);
-            IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
-            
-            // LwIP is configured to ignore TCP checksums (CHECKSUM_CHECK_TCP 0)
-        }
-
-        // ICMP (Ping) processing
-        if (IPH_PROTO(ip) == IP_PROTO_ICMP) {
-            uint8_t* icmp_base = (uint8_t*)buf + IPH_HL(ip) * 4;
-            if (icmp_base[0] == 8) { // Echo Request
+            else if (IPH_PROTO(ip) == IP_PROTO_TCP) {
+                uint8_t* tcp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
+                uint16_t src_port_h = ntohs(*(uint16_t*)(tcp_ptr + 0));
+                uint16_t dst_port_h = ntohs(*(uint16_t*)(tcp_ptr + 2));
                 
-                // If the ping is for our gateway, reply directly.
-                if (ip->dest.addr == lwip_ip.addr) {
-                    uint32_t tmp_ip = ip->src.addr;
-                    ip->src.addr = ip->dest.addr;
-                    ip->dest.addr = tmp_ip;
-                    icmp_base[0] = 0; // Echo Reply
-                    
-                    IPH_CHKSUM_SET(ip, 0);
-                    IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
-
-                    int ip_len_icmp = ::ntohs(IPH_LEN(ip));
-                    int icmp_len = ip_len_icmp - IPH_HL(ip) * 4;
-                    *(uint16_t*)(icmp_base + 2) = 0;
-                    *(uint16_t*)(icmp_base + 2) = ip_chksum_simple(icmp_base, icmp_len);
-
-                    if (g_windivert_driver) {
-                        WINDIVERT_ADDRESS send_addr = *p_addr;
-                        send_addr.Outbound = 0;
-                        
-                        if (g_windivert_driver->get_layer() == WINDIVERT_LAYER_ETHERNET) {
-                            // Wrap in Ethernet header
-                            std::vector<uint8_t> eth_buf_icmp;
-                            eth_buf_icmp.resize(sizeof(struct eth_hdr) + ip_len_icmp);
-                            struct eth_hdr* eth_icmp = (struct eth_hdr*)eth_buf_icmp.data();
-                            memcpy(&eth_icmp->dest, src_mac, 6);
-                            memcpy(&eth_icmp->src, dst_mac, 6);
-                            eth_icmp->type = ::htons(0x0800);
-                            memcpy(eth_buf_icmp.data() + sizeof(struct eth_hdr), buf, ip_len_icmp);
-                            g_windivert_driver->send((const char*)eth_buf_icmp.data(), eth_buf_icmp.size(), &send_addr);
-                        } else {
-                            g_windivert_driver->send((const char*)buf, ip_len_icmp, &send_addr);
-                        }
-                    }
-                    return; // Handled
-                }
+                // Store MAC addresses for TCP NAT
+                NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, nullptr, src_mac, dst_mac);
             }
         }
-        
-        // For all other traffic (UDP, and TCP to be processed by LwIP)
-        struct pbuf* p = pbuf_alloc(PBUF_RAW, ip_len, PBUF_POOL);
-        if (p) {
-            pbuf_take(p, buf, ip_len);
-            err_t input_err = g_netif.input(p, &g_netif);
-            if (input_err != ERR_OK) {
-                LOG_ERROR("[LwIP] netif.input failed with error %d", (int)input_err);
-                pbuf_free(p);
-            }
+    }
+
+    // Pass everything else (ARP, IP) to LwIP
+    struct pbuf* p = pbuf_alloc(PBUF_RAW, (uint16_t)length, PBUF_POOL);
+    if (p) {
+        pbuf_take(p, packet, (uint16_t)length);
+        if (g_netif.input(p, &g_netif) != ERR_OK) {
+            pbuf_free(p);
         }
     }
 }

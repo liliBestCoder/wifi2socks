@@ -5,14 +5,17 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <winioctl.h>
+#include <iphlpapi.h>
 #pragma comment(lib, "Ws2_32.lib")
 #pragma comment(lib, "Mswsock.lib")
+#pragma comment(lib, "iphlpapi.lib")
+
 #include "app_config.h"
 
 // Global Log Level
 LogLevel g_log_level = LOG_LEVEL_INFO;
 
-#include "windivert_driver.h"
+#include "winpkfilter_driver.h"
 #include "dhcp_server.h"
 #include "worker.h"
 #include "lwip/etharp.h"
@@ -35,6 +38,32 @@ LogLevel g_log_level = LOG_LEVEL_INFO;
 
 // Global Instances for Hijacking
 DhcpServer* g_dhcp_server_ptr = nullptr;
+
+// Helper to find adapter name by IP address
+std::string find_adapter_by_ip(const std::string& target_ip) {
+    PIP_ADAPTER_ADDRESSES pAddresses = nullptr;
+    ULONG outBufLen = 15000;
+    pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(outBufLen);
+    
+    if (GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, pAddresses, &outBufLen) == ERROR_SUCCESS) {
+        for (PIP_ADAPTER_ADDRESSES pCurrAddresses = pAddresses; pCurrAddresses != nullptr; pCurrAddresses = pCurrAddresses->Next) {
+            for (PIP_ADAPTER_UNICAST_ADDRESS pUnicast = pCurrAddresses->FirstUnicastAddress; pUnicast != nullptr; pUnicast = pUnicast->Next) {
+                if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
+                    sockaddr_in* sa_in = (sockaddr_in*)pUnicast->Address.lpSockaddr;
+                    char ip_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &(sa_in->sin_addr), ip_str, INET_ADDRSTRLEN);
+                    if (target_ip == ip_str) {
+                        std::string name = pCurrAddresses->AdapterName;
+                        free(pAddresses);
+                        return "\\DEVICE\\TCPIP_" + name;
+                    }
+                }
+            }
+        }
+    }
+    if (pAddresses) free(pAddresses);
+    return "";
+}
 
 // Main Entry Point
 int main() {
@@ -86,26 +115,22 @@ int main() {
         LOG_ERROR("[CORE] Warning: GeoChecker failed to load: %s. IP/Domain bypass may not work.", e.what());
     }
 
-    // 1. Initialize WinDivert
-    // ULTIMATE HIJACK FILTER: 
-    // 1. Intercept ALL DHCP (67,68)
-    // 2. Intercept our subnet (11.x)
-    // 3. Intercept Windows default subnet (137.x) to rescue "stuck" clients
-    std::string base_ip = g_config.tap_ip;
-    size_t last_dot = base_ip.find_last_of('.');
-    std::string subnet = base_ip.substr(0, last_dot);
+    // 1. Initialize WinPkFilter
+    std::string adapter_name = find_adapter_by_ip(g_config.tap_ip);
+    if (adapter_name.empty()) {
+        LOG_ERROR("[CORE] Could not find NDIS adapter with IP %s. Please ensure WiFi AP is active.", g_config.tap_ip.c_str());
+        // We'll try a fallback or just wait? For now, we need this to work.
+    }
+
+    static WinPkFilterDriver pk_driver;
+    set_winpkfilter_driver(&pk_driver);
     
-    std::string filter = "(udp.DstPort == 67 or udp.SrcPort == 67 or udp.DstPort == 68 or udp.SrcPort == 68) or "
-                         "(ip and ((ip.SrcAddr >= " + subnet + ".0 and ip.SrcAddr <= " + subnet + ".255) or "
-                         "(ip.SrcAddr >= 192.168.137.0 and ip.SrcAddr <= 192.168.137.255)) "
-                         "and not tcp.SrcPort == 8080)";
-    
-    static WinDivertDriver divert(filter);
-    set_windivert_driver(&divert);
-    WinDivertDriver::PacketHandler handler = [](const char* packet, size_t length, const WINDIVERT_ADDRESS* addr) {
+    WinPkFilterDriver::PacketHandler handler = [](const char* packet, size_t length, bool outbound) {
         std::lock_guard<std::recursive_mutex> lock(g_lwip_mtx);
-        TrafficManager::instance().report_tap_tx(length); // Use same traffic counter
-        process_ip_packet(packet, (int)length, addr);
+        if (!outbound) {
+            TrafficManager::instance().report_tap_tx(length);
+        }
+        process_ethernet_frame(packet, length, outbound);
     };
 
     // 2. Initialize Worker Pool
@@ -117,15 +142,25 @@ int main() {
 
     ip4_addr_t ip, mask, gw;
     ip4addr_aton(g_config.tap_ip.c_str(), &ip);
-    ip4addr_aton("255.255.0.0", &mask); // Cover hijack subnets (11.x & 137.x)
+    ip4addr_aton(g_config.tap_netmask.c_str(), &mask); 
     ip4addr_aton("0.0.0.0", &gw); 
 
-    netif_add(&g_netif, &gw, &mask, &ip, NULL, netif_init_cb, ip_input);
+    netif_add(&g_netif, &gw, &mask, &ip, NULL, netif_init_cb, ethernet_input);
     netif_set_default(&g_netif);
+    
+    // Set actual MAC address if possible
+    if (!adapter_name.empty()) {
+        if (pk_driver.get_adapter_mac(adapter_name, g_netif.hwaddr)) {
+            LOG_INFO("[CORE] Set netif MAC to actual adapter MAC.");
+        }
+    }
+    
     netif_set_up(&g_netif);
 
-    // Start WinDivert capture AFTER LwIP is ready
-    divert.start(handler);
+    // Start WinPkFilter capture AFTER LwIP is ready
+    if (!adapter_name.empty()) {
+        pk_driver.start(adapter_name, handler);
+    }
 
     // 5. Setup TCP Listener (Transparent Proxy)
     struct tcp_pcb* pcb = tcp_new();
