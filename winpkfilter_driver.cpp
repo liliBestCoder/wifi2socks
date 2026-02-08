@@ -4,6 +4,7 @@
 #include <iostream>
 
 #pragma comment(lib, "ndisapilib.lib")
+#pragma comment(lib, "iphlpapi.lib")
 
 WinPkFilterDriver::WinPkFilterDriver()
     : m_adapter_handle(nullptr), m_wait_event(nullptr), m_running(false) {
@@ -108,8 +109,6 @@ void WinPkFilterDriver::stop() {
 
 void WinPkFilterDriver::run() {
     ETH_REQUEST request;
-    // VERY IMPORTANT: Allocate the buffer on the heap or ensure enough stack space.
-    // The INTERMEDIATE_BUFFER must match the one in Common.h EXACTLY.
     auto buffer = std::make_unique<INTERMEDIATE_BUFFER>();
     request.hAdapterHandle = m_adapter_handle;
     request.EthPacket.Buffer = buffer.get();
@@ -130,7 +129,8 @@ void WinPkFilterDriver::run() {
 bool WinPkFilterDriver::get_adapter_mac(const std::string& adapter_name, uint8_t* mac) {
     PIP_ADAPTER_ADDRESSES pAddresses = nullptr;
     ULONG outBufLen = 15000;
-    pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(outBufLen);
+    pAddresses = (PIP_ADAPTER_ADDRESSES)malloc(outBufLen);
+    if (!pAddresses) return false;
     
     std::string guid = adapter_name;
     size_t pos = guid.find("{");
