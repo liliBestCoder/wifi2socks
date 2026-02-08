@@ -12,7 +12,7 @@
 
 #include "app_config.h"
 
-LogLevel g_log_level = LOG_LEVEL_INFO;
+LogLevel g_log_level = LOG_LEVEL_DEBUG;
 
 #include "winpkfilter_driver.h"
 #include "dhcp_server.h"

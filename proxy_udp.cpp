@@ -315,6 +315,11 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
     uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
     Worker* w = WorkerPool::instance().get_worker(hash);
     if (!w) w = WorkerPool::instance().get_next_worker();
+    
+    char dst_str[16];
+    inet_ntop(AF_INET, &dst_ip, dst_str, sizeof(dst_str));
+    LOG_DEBUG("[UDP] Forwarding to %s:%d", dst_str, ntohs(dst_port));
+
     std::vector<uint8_t> data(payload, payload + len);
     w->queue_task([src_ip, dst_ip, src_port, dst_port, data = std::move(data), w]() {
         UdpKey key = { src_ip, dst_ip, src_port, dst_port };
@@ -344,6 +349,13 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
 
 void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
     uint16_t dport_h = ::ntohs(dst_port);
+    uint16_t sport_h = ::ntohs(src_port);
+    
+    char src_str[16], dst_str[16];
+    inet_ntop(AF_INET, &src_ip, src_str, sizeof(src_str));
+    inet_ntop(AF_INET, &dst_ip, dst_str, sizeof(dst_str));
+    LOG_DEBUG("[UDP] handle_udp_packet: %s:%d -> %s:%d (len=%d)", src_str, sport_h, dst_str, dport_h, len);
+
     if (dport_h == 5353 || dport_h == 5355 || dport_h == 137 || dport_h == 138 || dport_h == 1900) return;
     RouteAction ip_action = RuleManager::instance().match_ip(::ntohl(dst_ip));
     if (ip_action == RouteAction::BLOCK) return;

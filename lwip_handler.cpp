@@ -136,6 +136,12 @@ static u8_t lwip_udp_raw_recv(void* arg, struct raw_pcb* pcb, struct pbuf* p, co
             if (len >= IPH_HL(ip) * 4 + 8) {
                 uint16_t src_port = *(uint16_t*)(udp_ptr + 0);
                 uint16_t dst_port = *(uint16_t*)(udp_ptr + 2);
+                
+                char src_str[16], dst_str[16];
+                ip4addr_ntoa_r((const ip4_addr_t*)&ip->src.addr, src_str, sizeof(src_str));
+                ip4addr_ntoa_r((const ip4_addr_t*)&ip->dest.addr, dst_str, sizeof(dst_str));
+                LOG_DEBUG("[LwIP] raw_recv UDP: %s:%d -> %s:%d", src_str, ntohs(src_port), dst_str, ntohs(dst_port));
+
                 NatEntry target = NatTable::instance().get(ip->src.addr, ntohs(src_port));
                 uint32_t real_dst_ip = ip->dest.addr;
                 uint16_t real_dst_port = dst_port;
@@ -197,7 +203,12 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
     const uint8_t* dmac = (const uint8_t*)&eth->dest;
 
     if (eth_type == ETHTYPE_IP) {
-        struct ip_hdr* ip = (struct ip_hdr*)(packet + sizeof(struct eth_hdr));
+        struct ip_hdr* ip = (struct ip_hdr*)(buf.data() + sizeof(struct eth_hdr));
+        if (IPH_PROTO(ip) == IP_PROTO_UDP) {
+             LOG_DEBUG("[LwIP] Inbound UDP packet received, len=%d", (int)length);
+        }
+    }
+
         int ip_len = (int)buf.size() - (int)sizeof(struct eth_hdr);
         if (IPH_V(ip) == 4) {
             ip4_addr_t lwip_ip; ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
@@ -213,6 +224,11 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
                     return; 
                 }
                 // --- REDIRECT UDP ---
+                char src_ip_str[16], dst_ip_str[16];
+                ip4addr_ntoa_r((const ip4_addr_t*)&ip->src.addr, src_ip_str, sizeof(src_ip_str));
+                ip4addr_ntoa_r((const ip4_addr_t*)&ip->dest.addr, dst_ip_str, sizeof(dst_ip_str));
+                LOG_DEBUG("[UDP] Redirecting %s:%d -> %s:%d to LwIP", src_ip_str, sp_h, dst_ip_str, dp_h);
+
                 NatTable::instance().set(ip->src.addr, sp_h, ip->dest.addr, dp_h, smac, dmac);
                 ip->dest.addr = lwip_ip.addr;
                 IPH_CHKSUM_SET(ip, 0); IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
@@ -235,6 +251,10 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
     if (p) {
         pbuf_take(p, buf.data(), (uint16_t)buf.size());
         err_t err = g_netif.input(p, &g_netif);
-        if (err != ERR_OK) printf("[LwIP] packet rejected: %d\n", err);
+        if (err != ERR_OK) {
+            LOG_ERROR("[LwIP] packet rejected by g_netif.input: %d", err);
+        }
+    } else {
+        LOG_ERROR("[LwIP] pbuf_alloc failed for packet size %d", (int)buf.size());
     }
 }
