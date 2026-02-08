@@ -22,6 +22,7 @@
 // Include LwIP ethernet protocol headers
 #include "lwip/prot/ethernet.h"
 #include "lwip/etharp.h"
+#include "lwip/prot/tcp.h"
 
 std::recursive_mutex g_lwip_mtx;
 struct netif g_netif;
@@ -84,10 +85,31 @@ err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
     buf.resize(p->tot_len);
     pbuf_copy_partial(p, buf.data(), p->tot_len, 0);
 
+    if (buf.size() >= sizeof(struct eth_hdr) + 20) {
+        struct eth_hdr* eth = (struct eth_hdr*)buf.data();
+        if (ntohs(eth->type) == ETHTYPE_IP) {
+            struct ip_hdr* ip = (struct ip_hdr*)(buf.data() + sizeof(struct eth_hdr));
+            if (IPH_PROTO(ip) == IP_PROTO_TCP) {
+                uint8_t* tcp_base = (uint8_t*)ip + IPH_HL(ip) * 4;
+                uint16_t src_port = *(uint16_t*)tcp_base;
+                uint16_t dst_port = *(uint16_t*)(tcp_base + 2);
+                if (src_port == htons(g_config.lwip_listen_port)) {
+                    NatEntry entry = NatTable::instance().get(ip->dest.addr, ntohs(dst_port));
+                    if (entry.original_dst_ip != 0) {
+                        ip->src.addr = entry.original_dst_ip;
+                        *(uint16_t*)tcp_base = htons(entry.original_dst_port);
+                        IPH_CHKSUM_SET(ip, 0);
+                        IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+                        recalculate_tcp_checksum(ip, tcp_base, ntohs(IPH_LEN(ip)) - IPH_HL(ip) * 4);
+                    }
+                }
+            }
+        }
+    }
+
     if (!g_winpkfilter_driver->send_to_adapter((const char*)buf.data(), buf.size())) {
         return ERR_IF;
     }
-
     return ERR_OK;
 }
 
@@ -98,85 +120,79 @@ err_t netif_init_cb(struct netif* netif) {
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_LINK_UP | NETIF_FLAG_UP | NETIF_FLAG_ETHERNET;
     netif->hwaddr_len = 6;
     memset(netif->hwaddr, 0x02, 6); 
-
     return ERR_OK;
 }
 
 void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
     if (length < sizeof(struct eth_hdr) || length > 9014) return;
 
-    struct eth_hdr* eth = (struct eth_hdr*)packet;
-    uint16_t eth_type = ntohs(eth->type);
-
     if (outbound) {
-        // Packet from local MSTCP going to Adapter
-        if (eth_type == ETHTYPE_IP) {
+        struct eth_hdr* eth = (struct eth_hdr*)packet;
+        if (ntohs(eth->type) == ETHTYPE_IP) {
             struct ip_hdr* ip = (struct ip_hdr*)(packet + sizeof(struct eth_hdr));
             if (IPH_PROTO(ip) == IP_PROTO_UDP) {
                 uint8_t* udp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
                 uint16_t src_port_h = ntohs(*(uint16_t*)(udp_ptr + 0));
-                
-                // Block Windows ICS DHCP responses (Source Port 67)
-                // BUT only if they are not from our process? 
-                // WinPkFilter intercepts ALL packets.
-                // We'll let it pass if it's NOT a DHCP response, 
-                // OR if we want to allow our own process to send.
                 if (src_port_h == 67) {
-                    // Check if the source IP is our configured gateway
                     ip4_addr_t lwip_ip;
                     ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
-                    if (ip->src.addr != lwip_ip.addr) {
-                        // Likely ICS (192.168.137.1). BLOCK IT.
-                        return;
-                    }
+                    if (ip->src.addr != lwip_ip.addr) return; 
                 }
             }
         }
-        // Let other outbound traffic pass through to the wire
-        if (g_winpkfilter_driver) {
-            g_winpkfilter_driver->send_to_adapter(packet, length);
-        }
+        if (g_winpkfilter_driver) g_winpkfilter_driver->send_to_adapter(packet, length);
         return;
     }
 
-    // --- Inbound (From Client/Wire) ---
+    static std::vector<uint8_t> buf;
+    buf.assign(packet, packet + length);
+    struct eth_hdr* eth = (struct eth_hdr*)buf.data();
+    uint16_t eth_type = ntohs(eth->type);
     const uint8_t* smac = (const uint8_t*)&eth->src;
     const uint8_t* dmac = (const uint8_t*)&eth->dest;
 
     if (eth_type == ETHTYPE_IP) {
-        struct ip_hdr* ip = (struct ip_hdr*)(packet + sizeof(struct eth_hdr));
-        int ip_payload_len = (int)length - (int)sizeof(struct eth_hdr);
-
+        struct ip_hdr* ip = (struct ip_hdr*)(buf.data() + sizeof(struct eth_hdr));
+        int ip_len = (int)buf.size() - (int)sizeof(struct eth_hdr);
         if (IPH_V(ip) == 4) {
+            ip4_addr_t lwip_ip;
+            ip4addr_aton(g_config.tap_ip.c_str(), &lwip_ip);
+
             if (IPH_PROTO(ip) == IP_PROTO_UDP) {
                 uint8_t* udp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
-                uint16_t dst_port_h = ntohs(*(uint16_t*)(udp_ptr + 2));
                 uint16_t src_port_h = ntohs(*(uint16_t*)(udp_ptr + 0));
-
+                uint16_t dst_port_h = ntohs(*(uint16_t*)(udp_ptr + 2));
                 if (dst_port_h == 67 && g_dhcp_server_ptr) {
                     sockaddr_in client_sa;
                     memset(&client_sa, 0, sizeof(client_sa));
                     client_sa.sin_family = AF_INET;
                     client_sa.sin_addr.S_un.S_addr = ip->src.addr;
-                    g_dhcp_server_ptr->handle_request((const char*)udp_ptr + 8, ip_payload_len - (IPH_HL(ip) * 4 + 8), client_sa);
-                    return; // Consumed, block from Windows
+                    g_dhcp_server_ptr->handle_request((const char*)udp_ptr + 8, ip_len - (IPH_HL(ip) * 4 + 8), client_sa);
+                    return; 
                 }
-
+                // --- REDIRECT UDP ---
                 NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, smac, dmac);
+                ip->dest.addr = lwip_ip.addr;
+                IPH_CHKSUM_SET(ip, 0);
+                IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
             }
             else if (IPH_PROTO(ip) == IP_PROTO_TCP) {
-                uint8_t* tcp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
-                uint16_t src_port_h = ntohs(*(uint16_t*)(tcp_ptr + 0));
-                uint16_t dst_port_h = ntohs(*(uint16_t*)(tcp_ptr + 2));
+                uint8_t* tcp_base = (uint8_t*)ip + IPH_HL(ip) * 4;
+                uint16_t src_port_h = ntohs(*(uint16_t*)(tcp_base + 0));
+                uint16_t dst_port_h = ntohs(*(uint16_t*)(tcp_base + 2));
                 NatTable::instance().set(ip->src.addr, src_port_h, ip->dest.addr, dst_port_h, smac, dmac);
+                ip->dest.addr = lwip_ip.addr;
+                *(uint16_t*)(tcp_base + 2) = htons(g_config.lwip_listen_port);
+                IPH_CHKSUM_SET(ip, 0);
+                IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+                recalculate_tcp_checksum(ip, tcp_base, ip_len - IPH_HL(ip) * 4);
             }
         }
     }
 
-    // Pass client traffic to LwIP
-    struct pbuf* p = pbuf_alloc(PBUF_RAW, (uint16_t)length, PBUF_POOL);
+    struct pbuf* p = pbuf_alloc(PBUF_RAW, (uint16_t)buf.size(), PBUF_POOL);
     if (p) {
-        pbuf_take(p, packet, (uint16_t)length);
+        pbuf_take(p, buf.data(), (uint16_t)buf.size());
         if (g_netif.input(p, &g_netif) != ERR_OK) {
             pbuf_free(p);
         }

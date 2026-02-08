@@ -164,15 +164,19 @@ void inject_udp_reply(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint1
     if (!g_winpkfilter_driver) return;
     NatEntry entry = NatTable::instance().get(dst_ip, ::ntohs(dst_port));
     if (entry.original_dst_ip == 0) return;
+
     uint8_t packet[2048];
     int eth_len = (int)sizeof(struct eth_hdr);
     if (eth_len + 20 + 8 + len > sizeof(packet)) return;
+
     struct eth_hdr* eth = (struct eth_hdr*)packet;
     uint8_t* ip_hdr = packet + eth_len;
     uint8_t* udp_hdr = ip_hdr + 20;
+
     memcpy(&eth->dest, entry.src_mac, 6);
     memcpy(&eth->src, entry.dst_mac, 6);
     eth->type = htons(0x0800/*IP*/);
+
     memset(ip_hdr, 0, 20);
     ip_hdr[0] = 0x45; ip_hdr[9] = 17; ip_hdr[8] = 64;
     *(uint16_t*)(ip_hdr + 2) = ::htons((uint16_t)(20 + 8 + len));
@@ -180,13 +184,14 @@ void inject_udp_reply(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint1
     *(uint32_t*)(ip_hdr + 12) = src_ip; 
     *(uint32_t*)(ip_hdr + 16) = dst_ip; 
     *(uint16_t*)(ip_hdr + 10) = ip_chksum_simple(ip_hdr, 20);
+
     *(uint16_t*)(udp_hdr + 0) = src_port; 
-    *(uint16_t*)(udp_hdr + 2) = src_port; // Source port from client perspective
     *(uint16_t*)(udp_hdr + 2) = dst_port; 
     *(uint16_t*)(udp_hdr + 4) = ::htons((uint16_t)(8 + len));
     *(uint16_t*)(udp_hdr + 6) = 0;
     memcpy(udp_hdr + 8, payload, len);
     *(uint16_t*)(udp_hdr + 6) = calculate_udp_checksum(src_ip, dst_ip, udp_hdr, 8 + len);
+
     g_winpkfilter_driver->send_to_adapter((const char*)packet, eth_len + 20 + 8 + len);
 }
 
