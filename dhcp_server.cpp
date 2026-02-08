@@ -69,7 +69,7 @@ bool DhcpServer::start() {
     server_addr.sin_port = htons(listen_port_);
 
     if (bind(sock_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        LOG_ERROR("Failed to bind DHCP socket to %s:%d. Error: %d\n", g_config.tap_ip.c_str(), listen_port_, WSAGetLastError());
+        LOG_ERROR("Failed to bind DHCP socket to %s:%d. Error: %d", g_config.tap_ip.c_str(), listen_port_, WSAGetLastError());
         closesocket(sock_);
         WSACleanup();
         return false;

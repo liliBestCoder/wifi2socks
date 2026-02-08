@@ -58,7 +58,7 @@ void SimpleHttpServer::start(uint16_t port) {
     }
 
     m_thread = std::thread(&SimpleHttpServer::worker_loop, this);
-    LOG_INFO("[HTTP] API Server listening on port %d\n", port);
+    LOG_INFO("[HTTP] API Server listening on port %d", port);
 }
 
 void SimpleHttpServer::stop() {

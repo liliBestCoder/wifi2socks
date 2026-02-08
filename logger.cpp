@@ -52,11 +52,17 @@ void AsyncLogger::log(const char* fmt, ...) {
 
     va_list args;
     va_start(args, fmt);
-    int len = vsnprintf(tmp + time_len, sizeof(tmp) - time_len, fmt, args);
+    int len = vsnprintf(tmp + time_len, sizeof(tmp) - time_len - 2, fmt, args); // Leave space for \n\0
     va_end(args);
 
-    if (len <= 0) return;
+    if (len < 0) return;
     len += time_len;
+
+    // Force newline
+    if (len > 0 && tmp[len - 1] != '\n') {
+        tmp[len++] = '\n';
+        tmp[len] = '\0';
+    }
 
     {
         std::lock_guard<std::mutex> lock(m_mtx);

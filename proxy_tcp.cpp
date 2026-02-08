@@ -283,7 +283,7 @@ void handle_proxy_write(TcpCtxPtr ctx, int bytes) {
 
     if (bytes <= 0) {
         if (bytes < 0) { 
-             LOG_INFO("[TCP] Async write failed: %d. Closing.\n", bytes);
+             LOG_INFO("[TCP] Async write failed: %d. Closing.", bytes);
              close_tcp_ctx(ctx);
         }
         return;
@@ -376,11 +376,11 @@ void handle_handshake_read(TcpCtxPtr ctx) {
                 uint32_t cip = ctx->client_ip;
                 uint32_t dip = ctx->target.original_dst_ip;
                 if (ctx->detected_domain.empty()) {
-                    LOG_INFO("[TCP] Proxy %d.%d.%d.%d:%-5d -> %d.%d.%d.%d:%d\n",
+                    LOG_INFO("[TCP] Proxy %d.%d.%d.%d:%-5d -> %d.%d.%d.%d:%d",
                         cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ntohs(ctx->client_port),
                         dip & 0xFF, (dip >> 8) & 0xFF, (dip >> 16) & 0xFF, (dip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
                 } else {
-                    LOG_INFO("[TCP] Proxy %d.%d.%d.%d:%-5d -> %s:%d\n",
+                    LOG_INFO("[TCP] Proxy %d.%d.%d.%d:%-5d -> %s:%d",
                         cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ntohs(ctx->client_port),
                         ctx->detected_domain.c_str(), ntohs(ctx->target.original_dst_port));
                 }
@@ -444,11 +444,11 @@ void handle_proxy_connect(TcpCtxPtr ctx) {
         uint32_t cip = ctx->client_ip;
         uint32_t dip = ctx->target.original_dst_ip;
         if (ctx->detected_domain.empty()) {
-            LOG_INFO("[TCP] Direct %d.%d.%d.%d:%-5d -> %d.%d.%d.%d:%d\n",
+            LOG_INFO("[TCP] Direct %d.%d.%d.%d:%-5d -> %d.%d.%d.%d:%d",
                 cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ntohs(ctx->client_port),
                 dip & 0xFF, (dip >> 8) & 0xFF, (dip >> 16) & 0xFF, (dip >> 24) & 0xFF, ntohs(ctx->target.original_dst_port));
         } else {
-            LOG_INFO("[TCP] Direct %d.%d.%d.%d:%-5d -> %s:%d\n",
+            LOG_INFO("[TCP] Direct %d.%d.%d.%d:%-5d -> %s:%d",
                 cip & 0xFF, (cip >> 8) & 0xFF, (cip >> 16) & 0xFF, (cip >> 24) & 0xFF, ntohs(ctx->client_port),
                 ctx->detected_domain.c_str(), ntohs(ctx->target.original_dst_port));
         }
