@@ -326,8 +326,8 @@ std::vector<uint8_t> build_dns_query(uint16_t id, const std::string& domain) {
         size_t next_dot = domain.find('.', pos);
         std::string label = (next_dot == std::string::npos) ? domain.substr(pos) : domain.substr(pos, next_dot - pos);
         pos = (next_dot == std::string::npos) ? domain.length() : next_dot + 1;
-        resp.push_back((uint8_t)(std::min)((size_t)63, label.length()));
-        for (size_t i=0; i<(std::min)((size_t)63, label.length()); ++i) resp.push_back(label[i]);
+        req.push_back((uint8_t)(std::min)((size_t)63, label.length()));
+        for (size_t i=0; i<(std::min)((size_t)63, label.length()); ++i) req.push_back(label[i]);
     }
     req.push_back(0); req.push_back(0x00); req.push_back(0x01); req.push_back(0x00); req.push_back(0x01);
     return req;
