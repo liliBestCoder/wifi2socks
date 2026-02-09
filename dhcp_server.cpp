@@ -214,7 +214,7 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
     if (dhcp_message_type == 1) { 
         yiaddr_h = find_available_ip(mac);
         if (yiaddr_h == 0) {
-            LOG_WARN("No available IP addresses to offer.");
+            LOG_ERROR("No available IP addresses to offer.");
             return;
         }
     // --- DHCPREQUEST ---
