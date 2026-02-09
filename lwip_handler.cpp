@@ -124,9 +124,9 @@ err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
                     if (entry.original_dst_ip != 0) {
                         ip->src.addr = entry.original_dst_ip;
                         *(uint16_t*)tcp_base = htons(entry.original_dst_port);
-                        //IPH_CHKSUM_SET(ip, 0);
-                        //IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
-                        //recalculate_tcp_checksum(ip, tcp_base, ntohs(IPH_LEN(ip)) - IPH_HL(ip) * 4);
+                        IPH_CHKSUM_SET(ip, 0);
+                        IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+                        recalculate_tcp_checksum(ip, tcp_base, ntohs(IPH_LEN(ip)) - IPH_HL(ip) * 4);
                     }
                 }
             }
