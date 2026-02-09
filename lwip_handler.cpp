@@ -25,6 +25,7 @@
 #include "lwip/prot/tcp.h"
 #include "lwip/prot/udp.h"
 #include "lwip/raw.h"
+#include "lwip/ip_addr.h"
 
 struct netif g_netif;
 uint8_t HOST_MAC[6] = { 0 }; 
@@ -33,6 +34,8 @@ bool g_host_mac_known = false;
 static std::vector<WinPkFilterDriver::Packet> g_outbound_batch;
 
 WinPkFilterDriver* g_winpkfilter_driver = nullptr;
+
+void forge_and_send_204_response(struct eth_hdr* req_eth, struct ip_hdr* req_ip, struct tcp_hdr* req_tcp);
 
 void set_winpkfilter_driver(WinPkFilterDriver* driver) {
     g_winpkfilter_driver = driver;
@@ -296,18 +299,32 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
             }
 
             else if (IPH_PROTO(ip) == IP_PROTO_TCP) {
+                struct tcp_hdr* tcp_ptr = (struct tcp_hdr*)((uint8_t*)ip + IPH_HL(ip) * 4);
+                uint16_t dp_h = ntohs(tcp_ptr->dest);
 
-                uint8_t* tcp_ptr = (uint8_t*)ip + IPH_HL(ip) * 4;
+                if (dp_h == 80) {
+                    ip4_addr_t gw_addr;
+                    ip4addr_aton(g_config.tap_gateway.c_str(), &gw_addr);
 
-                uint16_t sp_h = ntohs(*(uint16_t*)(tcp_ptr + 0));
+                    char* http_payload = (char*)tcp_ptr + TCPH_HDRLEN(tcp_ptr) * 4;
+                    int http_payload_len = ntohs(ip->_len) - (IPH_HL(ip) * 4) - (TCPH_HDRLEN(tcp_ptr) * 4);
 
-                uint16_t dp_h = ntohs(*(uint16_t*)(tcp_ptr + 2));
+                    if (http_payload_len > 4) {
+                        bool is_generate_204 = strncmp(http_payload, "GET /generate_204", 17) == 0;
+                        bool is_gateway_req = (ip->dest.addr == gw_addr.addr);
 
+                        if (is_generate_204 || is_gateway_req) {
+                            forge_and_send_204_response(eth, ip, tcp_ptr);
+                            pbuf_free(p);
+                            return;
+                        }
+                    }
+                }
+
+                uint16_t sp_h = ntohs(tcp_ptr->src);
                 NatTable::instance().set(ip->src.addr, sp_h, ip->dest.addr, dp_h, (const uint8_t*)&eth->src, (const uint8_t*)&eth->dest);
-
                 ip->dest.addr = lwip_ip.addr;
-
-                *(uint16_t*)(tcp_ptr + 2) = htons(g_config.lwip_listen_port);
+                tcp_ptr->dest = htons(g_config.lwip_listen_port);
 
                                 //IPH_CHKSUM_SET(ip, 0); IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
 
@@ -327,4 +344,57 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
 
     }
 
+}
+
+void forge_and_send_204_response(struct eth_hdr* req_eth, struct ip_hdr* req_ip, struct tcp_hdr* req_tcp) {
+    const char* response_payload = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+    int response_payload_len = (int)strlen(response_payload);
+    int req_tcp_payload_len = ntohs(req_ip->_len) - (IPH_HL(req_ip) * 4) - (TCPH_HDRLEN(req_tcp) * 4);
+
+    int total_len = sizeof(struct eth_hdr) + sizeof(struct ip_hdr) + sizeof(struct tcp_hdr) + response_payload_len;
+
+    std::vector<char> buffer(total_len);
+
+    // 1. Ethernet Header
+    struct eth_hdr* eth = (struct eth_hdr*)buffer.data();
+    memcpy(eth->dest.addr, req_eth->src.addr, 6);
+    memcpy(eth->src.addr, req_eth->dest.addr, 6);
+    eth->type = req_eth->type;
+
+    // 2. IP Header
+    struct ip_hdr* ip = (struct ip_hdr*)(buffer.data() + sizeof(struct eth_hdr));
+    IPH_VHL_SET(ip, 4, 5);
+    IPH_TOS_SET(ip, 0);
+    IPH_LEN_SET(ip, htons(total_len - sizeof(struct eth_hdr)));
+    IPH_ID_SET(ip, 0);
+    IPH_OFFSET_SET(ip, 0);
+    IPH_TTL_SET(ip, 64);
+    IPH_PROTO_SET(ip, IP_PROTO_TCP);
+    ip->src.addr = req_ip->dest.addr;
+    ip->dest.addr = req_ip->src.addr;
+    IPH_CHKSUM_SET(ip, 0);
+    IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, sizeof(struct ip_hdr)));
+
+    // 3. TCP Header
+    struct tcp_hdr* tcp = (struct tcp_hdr*)(buffer.data() + sizeof(struct eth_hdr) + sizeof(struct ip_hdr));
+    tcp->src = req_tcp->dest;
+    tcp->dest = req_tcp->src;
+    tcp->seqno = req_tcp->ackno;
+    tcp->ackno = htonl(ntohl(req_tcp->seqno) + req_tcp_payload_len);
+    TCPH_HDRLEN_SET(tcp, 5);
+    TCPH_FLAGS_SET(tcp, TCP_FIN | TCP_ACK | TCP_PSH);
+    tcp->wnd = htons(TCP_WND);
+    tcp->chksum = 0;
+    tcp->urgp = 0;
+
+    // 4. Payload
+    memcpy(buffer.data() + sizeof(struct eth_hdr) + sizeof(struct ip_hdr) + sizeof(struct tcp_hdr), response_payload, response_payload_len);
+
+    // 5. TCP Checksum
+    recalculate_tcp_checksum(ip, (uint8_t*)tcp, sizeof(struct tcp_hdr) + response_payload_len);
+
+    // 6. Send
+    if (g_winpkfilter_driver) {
+        g_winpkfilter_driver->send_to_adapter(buffer.data(), buffer.size());
+    }
 }
