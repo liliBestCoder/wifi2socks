@@ -58,7 +58,7 @@ struct UdpSession {
     }
 };
 
-std::string parse_dns_qname(const uint8_t*& payload, int len, int* qname_len);
+std::string parse_dns_qname(const uint8_t* payload, int len, int* qname_len);
 
 void parse_and_log_dns_response(const uint8_t* payload, int len, const char* mode) {
     if (len < 12) return; 
