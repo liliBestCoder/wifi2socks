@@ -162,20 +162,11 @@ void Worker::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> 
 }
 
 void Worker::remove_socket(SOCKET s, std::function<void()> on_done) {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    m_task_queue.push_back([this, s, on_done]() {
-        auto it = m_sockets.find(s);
-        if (it != m_sockets.end()) {
-            SocketContext* ctx = it->second;
-            ctx->on_read = nullptr;
-            ctx->on_write = nullptr;
-            ctx->on_close = nullptr;
-            m_sockets.erase(it);
-            release_context(ctx); 
-        }
-        if (on_done) on_done();
-    });
-    PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
+    auto* io_ctx = new IO_CONTEXT();
+    io_ctx->type = IO_REMOVE;
+    io_ctx->sock = s;
+    io_ctx->on_done = on_done;
+    PostQueuedCompletionStatus(m_iocp, 0, (ULONG_PTR)this, &io_ctx->overlapped);
 }
 
 void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect) {
@@ -290,8 +281,26 @@ void Worker::loop() {
         BOOL ret = GetQueuedCompletionStatus(m_iocp, &bytesTransferred, &completionKey, &overlapped, 10);
 
         if (overlapped != NULL) {
-            SocketContext* ctx = (SocketContext*)completionKey;
             IO_CONTEXT* ioCtx = (IO_CONTEXT*)overlapped;
+
+            if (ioCtx->type == IO_REMOVE) {
+                auto it = m_sockets.find(ioCtx->sock);
+                if (it != m_sockets.end()) {
+                    SocketContext* ctx = it->second;
+                    ctx->on_read = nullptr;
+                    ctx->on_write = nullptr;
+                    ctx->on_close = nullptr;
+                    m_sockets.erase(it);
+                    release_context(ctx);
+                }
+                if (ioCtx->on_done) {
+                    ioCtx->on_done();
+                }
+                delete ioCtx;
+                continue;
+            }
+            
+            SocketContext* ctx = (SocketContext*)completionKey;
 
             if (!ctx || ctx->magic != SocketContext::MAGIC_VAL) continue;
 

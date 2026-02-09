@@ -18,13 +18,16 @@
 enum IO_TYPE {
     IO_READ,    // Zero-byte read completed
     IO_WRITE,   // Async Write completed
-    IO_CONNECT  // ConnectEx completed
+    IO_CONNECT,  // ConnectEx completed
+    IO_REMOVE
 };
 
 // Extended OVERLAPPED to hold context
 struct IO_CONTEXT {
     OVERLAPPED overlapped;
     IO_TYPE type;
+    SOCKET sock;
+    std::function<void()> on_done;
 };
 
 struct SocketContext {
