@@ -107,7 +107,7 @@ void recalculate_udp_checksum(struct ip_hdr* ip, uint8_t* udp_base, int udp_len)
 err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
     if (!g_winpkfilter_driver) return ERR_IF;
     
-    static std::vector<uint8_t> buf;
+    static std::vector<char> buf;
     buf.resize(p->tot_len);
     pbuf_copy_partial(p, buf.data(), p->tot_len, 0);
 
