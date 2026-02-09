@@ -306,8 +306,11 @@ void Worker::loop() {
                     ctx->on_remove_done = ioCtx->on_done;
                     m_sockets.erase(it); // Remove from map so no new IO starts
                     
+                    // Force close to cancel all pending overlapped IO
+                    closesocket(ctx->sock);
+                    
+                    // If no IO was pending, delete immediately
                     if (ctx->pending_io == 0) {
-                        closesocket(ctx->sock);
                         if (ctx->on_remove_done) ctx->on_remove_done();
                         delete ctx;
                     }
@@ -375,7 +378,6 @@ void Worker::loop() {
             // SCHEME A: FINAL CLEANUP
             // If the connection was marked for closing AND all pending IO have returned
             if (ctx->closing && ctx->pending_io == 0) {
-                closesocket(ctx->sock);
                 if (ctx->on_remove_done) ctx->on_remove_done();
                 delete ctx;
             }

@@ -16,9 +16,9 @@
 #define MEMP_MEM_MALLOC                 0
 #define MEM_SIZE                        (128*1024*1024)
 #define MEM_ALIGNMENT                   4
-#define PBUF_POOL_SIZE                  65536 
+#define PBUF_POOL_SIZE                  32768 
 #define PBUF_POOL_BUFSIZE               2048 
-#define MEMP_NUM_TCP_SEG                131072
+#define MEMP_NUM_TCP_SEG                65535
 #define MEMP_NUM_TCP_PCB                4096
 #define MEMP_NUM_TCP_PCB_LISTEN         256
 #define MEMP_NUM_SYS_TIMEOUT            256

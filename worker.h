@@ -58,7 +58,7 @@ struct SocketContext {
     sockaddr_in remote_addr;
     int remote_addr_len;
     
-    int pending_io;        // Number of outstanding overlapped operations
+    std::atomic<int> pending_io;        // Number of outstanding overlapped operations
 
     SocketContext() : pending_io(0), closing(false) {
         magic = MAGIC_VAL;
