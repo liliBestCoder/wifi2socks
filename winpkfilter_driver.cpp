@@ -112,6 +112,9 @@ bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler han
     mode.hAdapterHandle = m_adapter_handle;
     if (!m_ndis_api.SetAdapterMode(&mode)) return false;
 
+    // Increase driver internal buffer to 8MB
+    m_ndis_api.SetAdapterBuffer(m_adapter_handle, 8 * 1024 * 1024);
+
     m_running = true;
     m_worker_thread = std::thread(&WinPkFilterDriver::run, this);
     return true;
@@ -170,6 +173,9 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
         LOG_ERROR("[Driver] Failed to set adapter mode.");
         return false;
     }
+
+    // Increase driver internal buffer to 8MB
+    m_ndis_api.SetAdapterBuffer(m_adapter_handle, 8 * 1024 * 1024);
 
     m_running = true;
     m_worker_thread = std::thread(&WinPkFilterDriver::run, this);

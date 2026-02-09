@@ -107,11 +107,10 @@ void recalculate_udp_checksum(struct ip_hdr* ip, uint8_t* udp_base, int udp_len)
 err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
     if (!g_winpkfilter_driver) return ERR_IF;
     
-    static std::vector<char> buf;
-    buf.resize(p->tot_len);
+    std::vector<char> buf(p->tot_len);
     pbuf_copy_partial(p, buf.data(), p->tot_len, 0);
 
-    if (buf.size() >= sizeof(struct eth_hdr)) {
+    if (p->tot_len >= sizeof(struct eth_hdr)) {
         struct eth_hdr* eth = (struct eth_hdr*)buf.data();
         uint16_t type = ntohs(eth->type);
         if (type == ETHTYPE_IP) {

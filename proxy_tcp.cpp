@@ -221,34 +221,48 @@ err_t tcp_client_sent(void* arg, struct tcp_pcb* tpcb, u16_t len) {
 void handle_proxy_read(TcpCtxPtr ctx) {
     if (ctx->closed) return;
     
-    std::vector<uint8_t> data(524288);
-    int r = recv(ctx->proxy_socket, (char*)data.data(), (int)data.size(), 0);
-    
-    if (r > 0) {
-        data.resize(r);
-        TrafficManager::instance().report_proxy_rx(r, ctx->is_direct);
-        
-        MainDispatcher::instance().queue_task([ctx, d = std::move(data)]() mutable {
+    std::vector<uint8_t> batched_data;
+    batched_data.reserve(256 * 1024); 
+
+    char buf[65536];
+    bool socket_closed = false;
+
+    while (true) {
+        int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
+        if (r > 0) {
+            TrafficManager::instance().report_proxy_rx(r, ctx->is_direct);
+            batched_data.insert(batched_data.end(), (uint8_t*)buf, (uint8_t*)buf + r);
+            if (batched_data.size() >= 256 * 1024) break; 
+        } else if (r == 0) {
+            socket_closed = true;
+            break;
+        } else {
+            int err = WSAGetLastError();
+            if (err != WSAEWOULDBLOCK) {
+                close_tcp_ctx(ctx);
+            }
+            break;
+        }
+    }
+
+    if (!batched_data.empty()) {
+        MainDispatcher::instance().queue_task([ctx, d = std::move(batched_data)]() mutable {
             if (ctx->client_pcb) {
                 ctx->tx_queue.push_back(std::move(d));
                 try_send_downstream(ctx);
             }
         });
-    } else if (r == 0) {
+    }
+
+    if (socket_closed) {
         ctx->worker->remove_socket(ctx->proxy_socket, nullptr); 
         ctx->proxy_socket = INVALID_SOCKET; 
         
         MainDispatcher::instance().queue_task([ctx]() {
             if (ctx->closed) return;
-            
             ctx->upstream_eof = true;
             try_send_downstream(ctx);
         });
-        
-    } else {
-        if (WSAGetLastError() != WSAEWOULDBLOCK) {
-            close_tcp_ctx(ctx);
-        }
     }
 }
 

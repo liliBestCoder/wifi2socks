@@ -82,7 +82,7 @@ private:
     std::thread m_worker_thread;
     bool m_running;
 
-    static const int BATCH_SIZE = 64;
+    static const int BATCH_SIZE = 512;
     PETH_M_REQUEST m_read_request;
     PINTERMEDIATE_BUFFER m_read_buffers[BATCH_SIZE];
     

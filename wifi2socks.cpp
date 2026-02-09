@@ -71,6 +71,10 @@ int main() {
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
 
+    // Increase process and thread priority for better performance
+    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+
     Microsoft::WRL::Wrappers::RoInitializeWrapper initialize(RO_INIT_MULTITHREADED);
     if (FAILED(initialize)) return 1;
 
@@ -162,9 +166,6 @@ int main() {
     uint64_t last_cleanup = 0;
     uint64_t last_keepalive = 0;
     while (true) {
-        // Wait for tasks or 1ms timeout (to let sys_check_timeouts run)
-        WaitForSingleObject(MainDispatcher::instance().get_event_handle(), 1);
-
         // All LwIP calls happen here in the Main thread, no lock needed.
         MainDispatcher::instance().process_pending();
         sys_check_timeouts();
@@ -183,6 +184,10 @@ int main() {
             WiFiAPManager::instance().CheckKeepAlive();
             last_keepalive = now;
         }
+
+        // Wait for tasks or 1ms timeout. 
+        // If process_pending swapped many tasks, we loop again immediately instead of waiting.
+        WaitForSingleObject(MainDispatcher::instance().get_event_handle(), 1);
     }
     return 0;
 }
