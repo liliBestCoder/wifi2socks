@@ -104,17 +104,8 @@ void final_cleanup_on_main(void* arg) {
 void internal_close_on_worker(TcpCtxPtr ctx) {
     if (ctx->proxy_socket != INVALID_SOCKET) {
         ctx->worker->remove_socket(ctx->proxy_socket, [ctx]() {
-            // For direct connections, try to release the socket back to the pool
-            if (ctx->is_direct) {
-                uint32_t ip = ctx->target.original_dst_ip;
-                uint16_t port = ctx->target.original_dst_port;
-                std::string dest = std::to_string(ip & 0xFF) + "." + std::to_string((ip >> 8) & 0xFF) + "."
-                                 + std::to_string((ip >> 16) & 0xFF) + "." + std::to_string((ip >> 24) & 0xFF)
-                                 + ":" + std::to_string(port);
-                ConnectionPool::instance().release(dest, ctx->proxy_socket);
-            } else {
-                closesocket(ctx->proxy_socket);
-            }
+            // Note: Worker now handles closesocket(ctx->proxy_socket) automatically
+            // when pending_io reached zero.
             
             void* arg = ctx->lwip_arg;
             if (arg) {
