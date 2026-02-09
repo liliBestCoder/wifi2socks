@@ -289,9 +289,9 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
 
                 ip->dest.addr = lwip_ip.addr;
 
-                IPH_CHKSUM_SET(ip, 0); IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+                                //IPH_CHKSUM_SET(ip, 0); IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
 
-                recalculate_udp_checksum(ip, udp_ptr, ip_len - IPH_HL(ip) * 4);
+                                //recalculate_udp_checksum(ip, udp_ptr, ip_len - IPH_HL(ip) * 4);
 
             }
 
@@ -309,9 +309,9 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
 
                 *(uint16_t*)(tcp_ptr + 2) = htons(g_config.lwip_listen_port);
 
-                IPH_CHKSUM_SET(ip, 0); IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+                                //IPH_CHKSUM_SET(ip, 0); IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
 
-                recalculate_tcp_checksum(ip, tcp_ptr, ip_len - IPH_HL(ip) * 4);
+                                //recalculate_tcp_checksum(ip, tcp_ptr, ip_len - IPH_HL(ip) * 4);
 
             }
 
