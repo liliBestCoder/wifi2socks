@@ -10,6 +10,7 @@
 #include <cstring>
 #include <cstdint>
 #include <vector>
+#include <algorithm>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -35,10 +36,23 @@ struct DHCP_Message {
 #pragma pack(pop) 
 
 DhcpServer::DhcpServer(const std::string& listen_ip, int listen_port)
-    : listen_ip_(listen_ip), listen_port_(listen_port), sock_(INVALID_SOCKET), running_(false) {}
+    : listen_ip_(listen_ip), listen_port_(listen_port), sock_(INVALID_SOCKET), 
+      running_(false), lease_duration_(std::chrono::hours(24)) {}
 
 DhcpServer::~DhcpServer() {
     stop();
+}
+
+void DhcpServer::init_pool() {
+    uint32_t server_ip_n;
+    inet_pton(AF_INET, g_config.tap_ip.c_str(), &server_ip_n);
+    uint32_t server_ip_h = ntohl(server_ip_n);
+    
+    // Create a pool of 100 addresses, e.g., from .100 to .199
+    uint32_t subnet = server_ip_h & 0xFFFFFF00;
+    for (uint32_t i = 100; i < 200; ++i) {
+        ip_pool_.push_back(subnet | i);
+    }
 }
 
 bool DhcpServer::start() {
@@ -47,6 +61,8 @@ bool DhcpServer::start() {
         LOG_ERROR("WSAStartup failed");
         return false;
     }
+
+    init_pool();
 
     sock_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock_ == INVALID_SOCKET) {
@@ -111,6 +127,63 @@ void DhcpServer::run() {
     }
 }
 
+std::vector<uint8_t> DhcpServer::get_mac_address(const char* buffer) {
+    auto* msg = (DHCP_Message*)buffer;
+    return std::vector<uint8_t>(msg->chaddr, msg->chaddr + msg->hlen);
+}
+
+uint32_t DhcpServer::get_requested_ip(const char* buffer) {
+    auto* msg = (DHCP_Message*)buffer;
+    uint8_t* options = msg->options + 4;
+    int option_len_rem = sizeof(msg->options) - 4;
+    while (option_len_rem > 0 && *options != 255) {
+        uint8_t opt_code = *options++;
+        uint8_t opt_len = *options++;
+        option_len_rem -= 2;
+        if (opt_code == 50 && opt_len == 4) { // Option 50: Requested IP Address
+            uint32_t requested_ip;
+            memcpy(&requested_ip, options, 4);
+            return requested_ip;
+        }
+        options += opt_len;
+        option_len_rem -= opt_len;
+    }
+    return 0;
+}
+
+uint32_t DhcpServer::find_available_ip(const std::vector<uint8_t>& mac) {
+    std::lock_guard<std::mutex> lock(mtx_);
+    auto now = std::chrono::steady_clock::now();
+
+    // 1. Check if this MAC already has a lease
+    auto it = leases_.find(mac);
+    if (it != leases_.end()) {
+        it->second.expires = now + lease_duration_;
+        return it->second.ip;
+    }
+
+    // 2. Try to find a free IP from the pool
+    if (!ip_pool_.empty()) {
+        uint32_t ip_h = ip_pool_.back();
+        ip_pool_.pop_back();
+        leases_[mac] = { ip_h, now + lease_duration_ };
+        return ip_h;
+    }
+
+    // 3. If pool is empty, try to reclaim an expired lease
+    for (auto& pair : leases_) {
+        if (pair.second.expires < now) {
+            uint32_t expired_ip_h = pair.second.ip;
+            leases_.erase(pair.first);
+            leases_[mac] = { expired_ip_h, now + lease_duration_ };
+            return expired_ip_h;
+        }
+    }
+
+    return 0; // No IP available
+}
+
+
 void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in& client_addr) {
     if (size < 240) return;
     auto* msg = (DHCP_Message*)buffer;
@@ -126,70 +199,113 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
         uint8_t opt_code = *options++;
         uint8_t opt_len = *options++;
         option_len_rem -= 2;
-        if (opt_code == 53) {
+        if (opt_code == 53) { // DHCP Message Type
             dhcp_message_type = *options;
         }
         options += opt_len;
         option_len_rem -= opt_len;
     }
 
-    // Standard IP calculation using ntohl/htonl to avoid endian issues
+    uint32_t yiaddr_h = 0;
+    auto mac = get_mac_address(buffer);
+    if (mac.empty()) return;
+    
+    // --- DHCPDISCOVER ---
+    if (dhcp_message_type == 1) { 
+        yiaddr_h = find_available_ip(mac);
+        if (yiaddr_h == 0) {
+            LOG_WARN("No available IP addresses to offer.");
+            return;
+        }
+    // --- DHCPREQUEST ---
+    } else if (dhcp_message_type == 3) {
+        uint32_t requested_ip_n = get_requested_ip(buffer);
+        if (requested_ip_n != 0) { // Client requests a specific IP
+             yiaddr_h = ntohl(requested_ip_n);
+        } else { // Client is renewing, ciaddr should be used
+             yiaddr_h = ntohl(msg->ciaddr);
+        }
+
+        std::lock_guard<std::mutex> lock(mtx_);
+        auto it = leases_.find(mac);
+        if (it != leases_.end() && it->second.ip == yiaddr_h) {
+            // This is our client, renew the lease
+            it->second.expires = std::chrono::steady_clock::now() + lease_duration_;
+        } else {
+             // Potentially a new client requesting an IP that might be in our pool
+             // Or a client with a very old lease. We re-assign it.
+             auto pool_it = std::find(ip_pool_.begin(), ip_pool_.end(), yiaddr_h);
+             if (pool_it != ip_pool_.end()) {
+                 ip_pool_.erase(pool_it);
+             }
+             leases_[mac] = { yiaddr_h, std::chrono::steady_clock::now() + lease_duration_ };
+        }
+    } else {
+        return; // We don't handle other types for now
+    }
+    
+    if (yiaddr_h == 0) return;
+
+    DHCP_Message resp_msg = {0};
+    resp_msg.op = 2; // BOOTREPLY
+    resp_msg.htype = msg->htype;
+    resp_msg.hlen = msg->hlen;
+    resp_msg.xid = msg->xid;
+    resp_msg.flags = msg->flags;
+    memcpy(resp_msg.chaddr, msg->chaddr, 16);
+    
+    uint32_t yiaddr_n = htonl(yiaddr_h);
+    resp_msg.yiaddr = yiaddr_n;
+
     uint32_t server_ip_n;
     inet_pton(AF_INET, g_config.tap_ip.c_str(), &server_ip_n);
+    resp_msg.siaddr = server_ip_n;
+
+    uint8_t* resp_options = resp_msg.options;
+    memcpy(resp_options, "\x63\x82\x53\x63", 4); 
+    resp_options += 4;
+
+    // Option 53: DHCP Message Type
+    *resp_options++ = 53; *resp_options++ = 1; 
+    *resp_options++ = (dhcp_message_type == 1) ? 2 /*OFFER*/ : 5 /*ACK*/; 
+
+    // Option 1: Subnet Mask
+    *resp_options++ = 1; *resp_options++ = 4;
+    inet_pton(AF_INET, "255.255.255.0", resp_options); resp_options += 4;
+
+    // Option 3: Router
+    *resp_options++ = 3; *resp_options++ = 4;
+    memcpy(resp_options, &server_ip_n, 4); resp_options += 4;
+
+    // Option 6: DNS Server
+    *resp_options++ = 6; *resp_options++ = 4;
+    memcpy(resp_options, &server_ip_n, 4); resp_options += 4;
+
+    // Option 54: Server Identifier
+    *resp_options++ = 54; *resp_options++ = 4;
+    memcpy(resp_options, &server_ip_n, 4); resp_options += 4;
+
+    // Option 51: IP Address Lease Time
+    *resp_options++ = 51; *resp_options++ = 4;
+    uint32_t lease_time_n = htonl((uint32_t)lease_duration_.count());
+    memcpy(resp_options, &lease_time_n, 4); resp_options += 4;
     
-    uint32_t server_ip_h = ntohl(server_ip_n);
-    uint32_t client_ip_h = (server_ip_h & 0xFFFFFF00) | 3; // Force .2
-    uint32_t client_ip_n = htonl(client_ip_h);
+    // Option 255: End
+    *resp_options++ = 255; 
 
-    if (dhcp_message_type == 1 || dhcp_message_type == 3) { 
-        bool is_discover = (dhcp_message_type == 1);
-        
-        DHCP_Message resp_msg = {0};
-        resp_msg.op = 2; 
-        resp_msg.htype = msg->htype;
-        resp_msg.hlen = msg->hlen;
-        resp_msg.xid = msg->xid;
-        resp_msg.flags = msg->flags;
-        memcpy(resp_msg.chaddr, msg->chaddr, 16);
-        
-        resp_msg.yiaddr = client_ip_n;
-        resp_msg.siaddr = server_ip_n;
-
-        uint8_t* resp_options = resp_msg.options;
-        memcpy(resp_options, "\x63\x82\x53\x63", 4); 
-        resp_options += 4;
-
-        *resp_options++ = 53; *resp_options++ = 1; 
-        *resp_options++ = is_discover ? 2 : 5; 
-
-        *resp_options++ = 1; *resp_options++ = 4; // Mask
-        inet_pton(AF_INET, "255.255.255.0", resp_options); resp_options += 4;
-
-        *resp_options++ = 3; *resp_options++ = 4; // Router
-        memcpy(resp_options, &server_ip_n, 4); resp_options += 4;
-
-        *resp_options++ = 6; *resp_options++ = 4; // DNS
-        memcpy(resp_options, &server_ip_n, 4); resp_options += 4;
-
-        *resp_options++ = 54; *resp_options++ = 4; // Server ID
-        memcpy(resp_options, &server_ip_n, 4); resp_options += 4;
-
-        *resp_options++ = 51; *resp_options++ = 4; // Lease
-        uint32_t lease_time = htonl(86400); memcpy(resp_options, &lease_time, 4); resp_options += 4;
-
-        *resp_options++ = 255; 
-
-        sockaddr_in broadcast_addr;
-        broadcast_addr.sin_family = AF_INET;
-        broadcast_addr.sin_port = htons(68);
-        broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
-        
-        sendto(sock_, (char*)&resp_msg, sizeof(resp_msg), 0, (sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
-        
-        char cip_str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &client_ip_n, cip_str, INET_ADDRSTRLEN);
-        LOG_INFO("DHCP %s: Assigned %s via Gateway %s to %02x:%02x:%02x:%02x:%02x:%02x", 
-            is_discover ? "OFFER" : "ACK", cip_str, g_config.tap_ip.c_str(),
-            msg->chaddr[0], msg->chaddr[1], msg->chaddr[2], msg->chaddr[3], msg->chaddr[4], msg->chaddr[5]);
-    }
+    sockaddr_in broadcast_addr;
+    broadcast_addr.sin_family = AF_INET;
+    broadcast_addr.sin_port = htons(68);
+    broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
+    
+    sendto(sock_, (char*)&resp_msg, sizeof(resp_msg), 0, (sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
+    
+    char cip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &yiaddr_n, cip_str, INET_ADDRSTRLEN);
+    
+    LOG_INFO("DHCP %s: Assigned %s to %02x:%02x:%02x:%02x:%02x:%02x for %lld seconds", 
+        (dhcp_message_type == 1) ? "OFFER" : "ACK", 
+        cip_str,
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+        lease_duration_.count());
 }
