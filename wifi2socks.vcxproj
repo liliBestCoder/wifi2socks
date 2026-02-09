@@ -222,7 +222,7 @@
     <ClInclude Include="winpkfilter_driver.h" />
     <ClInclude Include="ndisapi.h" />
     <ClInclude Include="Common.h" />
-    <ClInclude Include="wintun.h" />
+
     <ClInclude Include="proxy_tcp.h" />
     <ClInclude Include="proxy_udp.h" />
     <ClInclude Include="wifi_ap.h" />
