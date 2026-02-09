@@ -228,7 +228,7 @@ void send_ip_packet_to_client(uint8_t* ip_packet, int ip_len) {
 }
 
 void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* addr) {
-    if (sess->magic != UdpSession::MAGIC_VAL || sess->state == UdpSession::CLOSED) return; 
+    if (!sess || sess->magic != UdpSession::MAGIC_VAL || sess->state == UdpSession::CLOSED) return; 
     
     if (len > 0 && data && addr) {
         TrafficManager::instance().report_proxy_rx(len, true);
@@ -341,7 +341,7 @@ void send_dns_over_tcp(UdpSession* sess, const std::vector<uint8_t>& payload) {
 }
 
 void handle_socks5_tcp_read(UdpSession* sess) {
-    if (sess->magic != UdpSession::MAGIC_VAL || sess->state == UdpSession::CLOSED) return; 
+    if (!sess || sess->magic != UdpSession::MAGIC_VAL || sess->state == UdpSession::CLOSED) return; 
     char buf[4096];
     int r = recv(sess->tcp_sock, buf, sizeof(buf), 0);
     if (r > 0) {
@@ -550,9 +550,10 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                     clean_domain = full_domain.substr(0, full_domain.length() - suflen); stripped = true; break; 
                 }
             }
+            uint16_t id = *(uint16_t*)payload;
             uint32_t cached_ip = DnsCache::instance().get(clean_domain);
             if (cached_ip != 0) {
-                send_dns_response(src_ip, dst_ip, src_port, dst_port, *(uint16_t*)payload, full_domain, cached_ip); return;
+                send_dns_response(src_ip, dst_ip, src_port, dst_port, id, full_domain, cached_ip); return;
             }
             bool domestic = (dom_action == RouteAction::DIRECT) || (dom_action == RouteAction::PASS && (GeoChecker::instance().is_cn_domain(clean_domain) || GeoChecker::instance().is_tencent_domain(clean_domain)));
             if (domestic) {
@@ -562,7 +563,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                 uint32_t google_dns = inet_addr("8.8.8.8");
                 std::vector<uint8_t> query_packet; const uint8_t* p_data = payload; int p_len = len;
                 if (stripped) {
-                    query_packet = build_dns_query(*(uint16_t*)payload, clean_domain);
+                    query_packet = build_dns_query(id, clean_domain);
                     p_data = query_packet.data(); p_len = (int)query_packet.size();
                 }
                 uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
@@ -586,7 +587,7 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                         proxy_addr.sin_family = AF_INET; inet_pton(AF_INET, g_config.proxy_ip.c_str(), &proxy_addr.sin_addr);
                         proxy_addr.sin_port = htons(g_config.proxy_port);
                         sess->worker->connect_async(sess->tcp_sock, proxy_addr, [sess]() {
-                            if (sess->magic != UdpSession::MAGIC_VAL || sess->state == UdpSession::CLOSED) return;
+                            if (!sess || sess->magic != UdpSession::MAGIC_VAL || sess->state == UdpSession::CLOSED) return;
                             uint8_t req_auth[] = { 0x05, 0x01, 0x00 };
                             send(sess->tcp_sock, (const char*)req_auth, sizeof(req_auth), 0);
                             sess->state = UdpSession::HANDSHAKE_AUTH;

@@ -53,10 +53,7 @@ void Worker::retain_context(SocketContext* ctx) {
 }
 
 void Worker::release_context(SocketContext* ctx) {
-    if (ctx && --ctx->ref_count <= 0) {
-        ctx->magic = 0xDEADBEEF;
-        delete ctx;
-    }
+    if (ctx) ctx->ref_count--;
 }
 
 void Worker::post_read(SocketContext* ctx) {
@@ -116,7 +113,8 @@ void Worker::post_write(SocketContext* ctx, char* buf, int len) {
         if (WSAGetLastError() != WSA_IO_PENDING) {
             ctx->write_pending = false;
             release_context(ctx);
-            if (ctx->on_write) ctx->on_write(-1);
+            auto on_write = ctx->on_write;
+            if (on_write) on_write(-1);
         } else {
             ctx->write_pending = true;
         }
@@ -141,7 +139,7 @@ void Worker::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> 
             ctx->read_io.sock = s;
             ctx->write_io.sock = s;
             ctx->connect_io.sock = s;
-            retain_context(ctx);
+            retain_context(ctx); // Ref = 1 (for map)
             m_sockets[s] = ctx;
             new_association = true;
         }
@@ -196,7 +194,7 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
             };
         }
         
-        retain_context(ctx);
+        retain_context(ctx); // Ref = 1 (for map)
         m_sockets[s] = ctx;
 
         CreateIoCompletionPort((HANDLE)s, m_iocp, (ULONG_PTR)ctx, 0);
@@ -204,17 +202,18 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
         memset(&ctx->connect_io.overlapped, 0, sizeof(OVERLAPPED));
         ctx->connect_io.type = IO_CONNECT;
         
-        retain_context(ctx);
+        retain_context(ctx); // Ref = 2 (for connect)
 
         if (m_lpfnConnectEx) {
             BOOL ret = m_lpfnConnectEx(s, (sockaddr*)&addr, sizeof(addr), NULL, 0, NULL, &ctx->connect_io.overlapped);
             if (!ret && WSAGetLastError() != ERROR_IO_PENDING) {
-                release_context(ctx);
+                release_context(ctx); // Release connect ref
                 auto it = m_sockets.find(s);
                 if (it != m_sockets.end() && it->second == ctx) {
                     m_sockets.erase(it);
-                    release_context(ctx);
+                    release_context(ctx); // Release map ref
                 }
+                if (ctx->ref_count <= 0) delete ctx;
             }
         } else {
              release_context(ctx);
@@ -223,6 +222,7 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
                  m_sockets.erase(it);
                  release_context(ctx);
              }
+             if (ctx->ref_count <= 0) delete ctx;
         }
     });
     PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
@@ -308,7 +308,8 @@ void Worker::loop() {
                         ctx->on_close = nullptr;
                     }
                     m_sockets.erase(it);
-                    release_context(ctx);
+                    release_context(ctx); // Release map ref
+                    if (ctx->ref_count <= 0) delete ctx;
                 }
                 if (ioCtx->on_done) {
                     ioCtx->on_done();
@@ -319,50 +320,73 @@ void Worker::loop() {
             
             SocketContext* ctx = (SocketContext*)completionKey;
 
-            // CRITICAL SAFETY CHECK:
-            // Verify the context is still active in the current worker's map before calling any callbacks.
-            // This prevents use-after-free of session objects captured in callbacks.
-            auto it = m_sockets.find(ctx->sock);
-            if (it == m_sockets.end() || it->second != ctx || ctx->magic != SocketContext::MAGIC_VAL) {
-                release_context(ctx);
+            // SAFETY: Key must be a SocketContext
+            if (!ctx || ctx->magic != SocketContext::MAGIC_VAL) {
                 continue;
             }
+
+            // SCHEME A: Verify context is still in map. 
+            // If it's gone, it means remove_socket erases it. We just release this I/O's ref.
+            auto it = m_sockets.find(ctx->sock);
+            if (it == m_sockets.end() || it->second != ctx) {
+                release_context(ctx);
+                if (ctx->ref_count <= 0) delete ctx;
+                continue;
+            }
+
+            // Retain context during callback to prevent mid-callback deletion
+            retain_context(ctx);
 
             try {
                 if (ret) {
                     if (ioCtx->type == IO_READ) {
                         ctx->read_pending = false;
-                        if (ctx->on_read) {
+                        auto on_read = ctx->on_read; // Copy before call
+                        if (on_read) {
                             if (ctx->is_udp) {
-                                ctx->on_read(ctx->buffer, (int)bytesTransferred, &ctx->remote_addr);
+                                on_read(ctx->buffer, (int)bytesTransferred, &ctx->remote_addr);
                             } else {
-                                ctx->on_read(nullptr, 0, nullptr);
+                                on_read(nullptr, 0, nullptr);
                             }
                         }
-                        if (m_sockets.find(ctx->sock) != m_sockets.end() && !ctx->paused) {
+                        // Check again after callback
+                        auto it_read = m_sockets.find(ctx->sock);
+                        if (it_read != m_sockets.end() && it_read->second == ctx && !ctx->paused) {
                             post_read(ctx);
                         }
                     } else if (ioCtx->type == IO_CONNECT) {
                         setsockopt(ctx->sock, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
-                        if (ctx->on_write) ctx->on_write(0); 
+                        auto on_write = ctx->on_write;
+                        if (on_write) on_write(0); 
                     } else if (ioCtx->type == IO_WRITE) {
                         ctx->write_pending = false;
-                        if (ctx->on_write) ctx->on_write((int)bytesTransferred);
+                        auto on_write = ctx->on_write;
+                        if (on_write) on_write((int)bytesTransferred);
                     }
                 } else {
                     if (ioCtx->type == IO_READ) {
                         ctx->read_pending = false;
-                        if (ctx->on_read) ctx->on_read(nullptr, 0, nullptr);
+                        auto on_read = ctx->on_read;
+                        if (on_read) on_read(nullptr, 0, nullptr);
                     } else if (ioCtx->type == IO_CONNECT) {
-                        if (ctx->on_write) ctx->on_write(-1); 
+                        auto on_write = ctx->on_write;
+                        if (on_write) on_write(-1); 
                     } else if (ioCtx->type == IO_WRITE) {
                         ctx->write_pending = false;
-                        if (ctx->on_write) ctx->on_write(-1); 
+                        auto on_write = ctx->on_write;
+                        if (on_write) on_write(-1); 
                     }
                 }
             } catch (...) {}
             
-            release_context(ctx);
+            release_context(ctx); // Release the temporary retain
+            release_context(ctx); // Release the original I/O retain
+            
+            // FINAL DELETE check in worker loop
+            if (ctx->ref_count <= 0) {
+                ctx->magic = 0xDEADBEEF;
+                delete ctx;
+            }
         }
     }
 }
