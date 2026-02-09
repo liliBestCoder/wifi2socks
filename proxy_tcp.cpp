@@ -3,6 +3,7 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include "lwip/ip_addr.h"
 #include "proxy_tcp.h"
 #include "worker.h"
 #include "nat_table.h"
@@ -555,6 +556,24 @@ err_t tcp_client_recv(void* arg, struct tcp_pcb* tpcb, struct pbuf* p, err_t err
         tcp_recved(tpcb, p->tot_len);
         
         if (ctx->state == TcpCtx::PRE_CONNECT) {
+            // Captive Portal Check
+            if (ctx->target.original_dst_port == 80 && ctx->sni_buffer.size() > 10) {
+                ip4_addr_t gw_addr;
+                ip4addr_aton(g_config.tap_gateway.c_str(), &gw_addr);
+                bool is_generate_204 = strncmp((char*)ctx->sni_buffer.data(), "GET /generate_204", 17) == 0;
+                bool is_gateway_req = (ctx->target.original_dst_ip == gw_addr.addr);
+
+                if (is_generate_204 || is_gateway_req) {
+                    LOG_INFO("[TCP] Captive portal request detected. Sending 204 response.");
+                    const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+                    tcp_write(tpcb, response, (u16_t)strlen(response), TCP_WRITE_FLAG_COPY);
+                    tcp_output(tpcb);
+                    tcp_close(tpcb);
+                    pbuf_free(p);
+                    return ERR_OK;
+                }
+            }
+
             bool ready = false;
             if (ctx->sni_buffer.size() >= 5 && ctx->sni_buffer[0] == 0x16) {
                 uint16_t tls_len = ((uint16_t)ctx->sni_buffer[3] << 8) | ctx->sni_buffer[4];
