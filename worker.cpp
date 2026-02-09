@@ -210,7 +210,6 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
             BOOL ret = m_lpfnConnectEx(s, (sockaddr*)&addr, sizeof(addr), NULL, 0, NULL, &ctx->connect_io.overlapped);
             if (!ret && WSAGetLastError() != ERROR_IO_PENDING) {
                 release_context(ctx);
-                // Also remove from map if it fails immediately
                 auto it = m_sockets.find(s);
                 if (it != m_sockets.end() && it->second == ctx) {
                     m_sockets.erase(it);
@@ -320,7 +319,14 @@ void Worker::loop() {
             
             SocketContext* ctx = (SocketContext*)completionKey;
 
-            if (!ctx || ctx->magic != SocketContext::MAGIC_VAL) continue;
+            // CRITICAL SAFETY CHECK:
+            // Verify the context is still active in the current worker's map before calling any callbacks.
+            // This prevents use-after-free of session objects captured in callbacks.
+            auto it = m_sockets.find(ctx->sock);
+            if (it == m_sockets.end() || it->second != ctx || ctx->magic != SocketContext::MAGIC_VAL) {
+                release_context(ctx);
+                continue;
+            }
 
             try {
                 if (ret) {
