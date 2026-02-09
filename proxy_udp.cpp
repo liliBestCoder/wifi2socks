@@ -26,7 +26,16 @@ static std::atomic<uint16_t> g_udp_ip_id(1000);
 struct UdpKey {
     uint32_t src_ip, dst_ip;
     uint16_t src_port, dst_port;
-    bool operator<(const UdpKey& o) const { return memcmp(this, &o, sizeof(UdpKey)) < 0; }
+
+    UdpKey(uint32_t sip, uint32_t dip, uint16_t sp, uint16_t dp)
+        : src_ip(sip), dst_ip(dip), src_port(sp), dst_port(dp) {}
+
+    bool operator<(const UdpKey& o) const {
+        if (src_ip != o.src_ip) return src_ip < o.src_ip;
+        if (dst_ip != o.dst_ip) return dst_ip < o.dst_ip;
+        if (src_port != o.src_port) return src_port < o.src_port;
+        return dst_port < o.dst_port;
+    }
 };
 
 struct UdpSession {
@@ -58,6 +67,8 @@ struct UdpSession {
     UdpSession() : tcp_sock(INVALID_SOCKET), udp_sock(INVALID_SOCKET), worker(NULL), state(CONNECTING), is_dns_tcp(false) { 
         last_active = GetTickCount64(); 
         tcp_rx_buffer.reserve(4096);
+        proxy_target_ip = 0;
+        proxy_target_port = 0;
     }
 };
 
@@ -130,10 +141,12 @@ void parse_and_log_dns_response(const uint8_t* payload, int len, const char* mod
 thread_local std::map<UdpKey, UdpSession*> t_udp_sessions;
 
 void close_udp_session_internal(UdpSession* sess) {
-    if (!sess) return; 
+    if (!sess || sess->state == UdpSession::CLOSED) return; 
     
-    UdpKey key = { sess->src_ip, sess->original_dst_ip, sess->src_port, sess->original_dst_port };
+    UdpKey key(sess->src_ip, sess->original_dst_ip, sess->src_port, sess->original_dst_port);
     t_udp_sessions.erase(key);
+
+    sess->state = UdpSession::CLOSED;
 
     if (sess->worker) {
         auto worker = sess->worker;
@@ -142,7 +155,6 @@ void close_udp_session_internal(UdpSession* sess) {
         
         sess->tcp_sock = INVALID_SOCKET;
         sess->udp_sock = INVALID_SOCKET;
-        sess->state = UdpSession::CLOSED;
 
         worker->queue_task([worker, s1, s2, sess]() {
             if (s1 != INVALID_SOCKET) {
@@ -556,14 +568,17 @@ void udp_check_timeouts() {
     WorkerPool::instance().for_each_worker([](Worker* w) {
         w->queue_task([]() {
             uint64_t now = GetTickCount64();
-            std::vector<UdpSession*> stale_sessions;
+            std::vector<UdpKey> stale_keys;
             for (auto& pair : t_udp_sessions) {
                 if (now - pair.second->last_active > 300000) { 
-                    stale_sessions.push_back(pair.second);
+                    stale_keys.push_back(pair.first);
                 }
             }
-            for (auto* sess : stale_sessions) {
-                close_udp_session_internal(sess);
+            for (const auto& key : stale_keys) {
+                auto it = t_udp_sessions.find(key);
+                if (it != t_udp_sessions.end()) {
+                    close_udp_session_internal(it->second);
+                }
             }
         });
     });
@@ -578,7 +593,7 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
     std::vector<uint8_t> data(payload, payload + len);
 
     w->queue_task([src_ip, dst_ip, src_port, dst_port, data = std::move(data), w]() {
-        UdpKey key = { src_ip, dst_ip, src_port, dst_port };
+        UdpKey key(src_ip, dst_ip, src_port, dst_port);
         UdpSession* sess = nullptr;
         auto it = t_udp_sessions.find(key);
         
@@ -758,13 +773,13 @@ void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
                     p_len = (int)query_packet.size();
                 }
 
-                uint32_t hash = src_port ^ dport_h ^ src_ip ^ dst_ip;
+                uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
                 Worker* w = WorkerPool::instance().get_worker(hash);
                 if (!w) w = WorkerPool::instance().get_next_worker();
                 std::vector<uint8_t> data(p_data, p_data + p_len);
                 
                 w->queue_task([src_ip, dst_ip, src_port, dst_port, google_dns, data = std::move(data), w, full_domain, clean_domain]() {
-                    UdpKey key = { src_ip, dst_ip, src_port, dst_port };
+                    UdpKey key(src_ip, dst_ip, src_port, dst_port);
                     UdpSession* sess = nullptr;
                     auto it = t_udp_sessions.find(key);
 
