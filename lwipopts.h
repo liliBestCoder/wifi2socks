@@ -31,7 +31,7 @@
 #define TCP_WND                         (1024*1024*4)
 #define TCP_SND_BUF                     (1024*1024*8)
 #define TCP_SND_QUEUELEN                16384
-#define TCP_SNDLOWAT                    (64*1024)
+#define TCP_SNDLOWAT                    (32*1024)
 #define LWIP_WND_SCALE                  1
 #define TCP_RCV_SCALE                   7
 
