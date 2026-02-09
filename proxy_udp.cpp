@@ -2,7 +2,7 @@
 
 #include "proxy_udp.h"
 #include "worker.h"
-#include "tun_driver.h"
+#include "winpkfilter_driver.h"
 #include "app_config.h"
 #include "traffic_manager.h"
 #include "lwip_handler.h"
@@ -15,6 +15,9 @@
 #include <deque>
 #include <algorithm>
 #include <atomic>
+
+// Include LwIP ethernet protocol headers for eth_hdr
+#include "lwip/prot/ethernet.h"
 
 // Global IP ID counter for outbound UDP
 static std::atomic<uint16_t> g_udp_ip_id(1000);
@@ -68,33 +71,33 @@ void parse_and_log_dns_response(const uint8_t* payload, int len, const char* mod
     
     if ((flags & 0x8000) && an_count > 0) { 
         uint16_t qd_count = ntohs(*(uint16_t*)(payload + 4));
-        int pos = 12;
+        int pos = 12;\
         
         std::string domain;
-        if (qd_count > 0) {
-            int qname_len = 0;
-            domain = parse_dns_qname(payload, len, &qname_len);
-            for(int i=0; i<qd_count; i++) {
-                if (i > 0) { 
-                     while(pos < len) {
-                        uint8_t n = payload[pos];
-                        if(n==0) { pos++; break; }
-                        if((n&0xC0)==0xC0) { pos+=2; break; }
-                        pos += n+1;
-                    }
-                } else {
-                    if (!domain.empty() && qname_len > 0) pos += qname_len;
-                    else { 
-                         while(pos < len) {
-                            uint8_t n = payload[pos];
-                            if(n==0) { pos++; break; }
-                            if((n&0xC0)==0xC0) { pos+=2; break; }
-                            pos += n+1;
-                        }
-                    }
-                }
-                pos += 4; 
-            }
+        if (qd_count > 0) {\
+            int qname_len = 0;\
+            domain = parse_dns_qname(payload, len, &qname_len);\
+            for(int i=0; i<qd_count; i++) {\
+                if (i > 0) { \
+                     while(pos < len) {\
+                        uint8_t n = payload[pos];\
+                        if(n==0) { pos++; break; }\
+                        if((n&0xC0)==0xC0) { pos+=2; break; }\
+                        pos += n+1;\
+                    }\
+                } else {\
+                    if (!domain.empty() && qname_len > 0) pos += qname_len;\
+                    else { \
+                         while(pos < len) {\
+                            uint8_t n = payload[pos];\
+                            if(n==0) { pos++; break; }\
+                            if((n&0xC0)==0xC0) { pos+=2; break; }\
+                            pos += n+1;\
+                        }\
+                    }\
+                }\
+                pos += 4; \
+            }\
         }
         for(int i=0; i<an_count; i++) {
             if(pos >= len) break;
@@ -162,13 +165,10 @@ uint16_t calculate_udp_checksum(uint32_t src_ip, uint32_t dst_ip, uint8_t* udp_p
     uint32_t sum = 0;
     
     // 1. Pseudo Header
-    // Src IP
     sum += (src_ip & 0xFFFF);
     sum += (src_ip >> 16);
-    // Dst IP
     sum += (dst_ip & 0xFFFF);
     sum += (dst_ip >> 16);
-    // Protocol (17 for UDP) + UDP Length
     sum += htons(17);
     sum += htons((uint16_t)udp_len);
 
@@ -181,9 +181,6 @@ uint16_t calculate_udp_checksum(uint32_t src_ip, uint32_t dst_ip, uint8_t* udp_p
     }
 
     if (len > 0) {
-        // Handle odd byte - Little Endian machine treating byte stream
-        // Standard says pad with zero byte at end.
-        // Reading one byte as uint16 in LE gives 0x00XX.
         sum += (uint16_t)(*(const uint8_t*)ptr);
     }
 
@@ -192,19 +189,36 @@ uint16_t calculate_udp_checksum(uint32_t src_ip, uint32_t dst_ip, uint8_t* udp_p
     return (uint16_t)~sum;
 }
 
+// Helper to send IP packet back to client via WinpkFilter
+void send_ip_packet_to_client(uint8_t* ip_packet, int ip_len) {
+    if (!g_winpkfilter_driver) return;
+
+    // Dest IP is the client IP (offset 16 in IPv4 header)
+    uint32_t client_ip = *(uint32_t*)(ip_packet + 16);
+    // Dest port is the client port (offset 2 in UDP header, which is offset 22 in IP packet)
+    uint16_t client_port = *(uint16_t*)(ip_packet + 22);
+
+    NatEntry entry = NatTable::instance().get(client_ip, ntohs(client_port));
+    if (entry.original_dst_ip == 0) return;
+
+    uint8_t eth_frame[2048];
+    int eth_hdr_len = sizeof(struct eth_hdr);
+    if (eth_hdr_len + ip_len > sizeof(eth_frame)) return;
+
+    struct eth_hdr* eth = (struct eth_hdr*)eth_frame;
+    memcpy(&eth->dest, entry.src_mac, 6);
+    memcpy(&eth->src, entry.dst_mac, 6);
+    eth->type = htons(0x0800); // IPv4
+
+    memcpy(eth_frame + eth_hdr_len, ip_packet, ip_len);
+    g_winpkfilter_driver->send_to_adapter((const char*)eth_frame, eth_hdr_len + ip_len);
+}
+
 void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* addr) {
     if (sess->state == UdpSession::CLOSED) return; 
     
     if (len > 0 && data && addr) {
         TrafficManager::instance().report_proxy_rx(len, true); // Direct
-
-        // Log incoming packet (Debug) - Disabled for performance
-        /*
-        uint32_t src_ip_net = addr->sin_addr.S_un.S_addr;
-        LOG_DEBUG("[UDP] Recv %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
-           src_ip_net & 0xFF, (src_ip_net >> 8) & 0xFF, (src_ip_net >> 16) & 0xFF, (src_ip_net >> 24) & 0xFF, ntohs(addr->sin_port),
-           sess->src_ip & 0xFF, (sess->src_ip >> 8) & 0xFF, (sess->src_ip >> 16) & 0xFF, (sess->src_ip >> 24) & 0xFF, ntohs(sess->src_port));
-        */
         
         uint8_t packet[4096];
         if (20 + 8 + len > sizeof(packet)) return; 
@@ -226,25 +240,17 @@ void handle_udp_direct_read(UdpSession* sess, char* data, int len, sockaddr_in* 
         *(uint16_t*)(udp_hdr + 0) = sess->original_dst_port; 
         *(uint16_t*)(udp_hdr + 2) = sess->src_port;          
         *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + len));
-        *(uint16_t*)(udp_hdr + 6) = 0; // Checksum placeholder
+        *(uint16_t*)(udp_hdr + 6) = 0; 
         
         memcpy(udp_hdr + 8, data, len);
+        *(uint16_t*)(udp_hdr + 6) = calculate_udp_checksum(sess->original_dst_ip, sess->src_ip, udp_hdr, 8 + len);
 
-        // Calculate and Fill UDP Checksum
-        *(uint16_t*)(udp_hdr + 6) = calculate_udp_checksum(
-            sess->original_dst_ip, 
-            sess->src_ip, 
-            udp_hdr, 
-            8 + len
-        );
-
-        // Try Log DNS Response for Direct UDP
         if (sess->original_dst_port == htons(53)) {
             parse_and_log_dns_response((const uint8_t*)data, len, "Direct (UDP)");
         }
         
         sess->last_active = GetTickCount64();
-        TunDriver::instance().send_async(packet, 20 + 8 + len);
+        send_ip_packet_to_client(packet, 20 + 8 + len);
     }
 }
 
@@ -253,15 +259,13 @@ void send_dns_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     std::vector<uint8_t> resp;
     resp.reserve(512);
     
-    // Header
     resp.push_back(id & 0xFF); resp.push_back((id >> 8) & 0xFF);
-    resp.push_back(0x81); resp.push_back(0x80); // Std Response
-    resp.push_back(0x00); resp.push_back(0x01); // QD=1
-    resp.push_back(0x00); resp.push_back(0x01); // AN=1
+    resp.push_back(0x81); resp.push_back(0x80); 
+    resp.push_back(0x00); resp.push_back(0x01); 
+    resp.push_back(0x00); resp.push_back(0x01); 
     resp.push_back(0x00); resp.push_back(0x00);
     resp.push_back(0x00); resp.push_back(0x00);
     
-    // Question Section
     size_t pos = 0;
     while (pos < domain.length()) {
         size_t next_dot = domain.find('.', pos);
@@ -282,7 +286,6 @@ void send_dns_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     resp.push_back(0x00); resp.push_back(0x01); // A
     resp.push_back(0x00); resp.push_back(0x01); // IN
     
-    // Answer Section
     resp.push_back(0xC0); resp.push_back(0x0C); // Pointer to Name
     resp.push_back(0x00); resp.push_back(0x01); // A
     resp.push_back(0x00); resp.push_back(0x01); // IN
@@ -294,53 +297,6 @@ void send_dns_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint
     resp.push_back((ip_addr >> 16) & 0xFF);
     resp.push_back((ip_addr >> 24) & 0xFF);
     
-    // Send
-    uint8_t packet[2048];
-    if (20 + 8 + resp.size() > 2048) return;
-    uint8_t* ip_hdr = packet;
-    uint8_t* udp_hdr = ip_hdr + 20;
-    
-    memset(ip_hdr, 0, 20);
-    ip_hdr[0] = 0x45; ip_hdr[9] = 17; ip_hdr[8] = 64;
-    *(uint16_t*)(ip_hdr + 2) = htons((uint16_t)(20 + 8 + resp.size()));
-    *(uint16_t*)(ip_hdr + 4) = htons(g_udp_ip_id.fetch_add(1));
-    *(uint32_t*)(ip_hdr + 12) = dst_ip; // Original Dst (DNS Server) acts as Src
-    *(uint32_t*)(ip_hdr + 16) = src_ip; // Client IP
-    *(uint16_t*)(ip_hdr + 10) = ip_chksum_simple(ip_hdr, 20);
-
-    *(uint16_t*)(udp_hdr + 0) = dst_port; 
-    *(uint16_t*)(udp_hdr + 2) = src_port; 
-    *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + resp.size()));
-    *(uint16_t*)(udp_hdr + 6) = 0;
-    memcpy(udp_hdr + 8, resp.data(), resp.size());
-    *(uint16_t*)(udp_hdr + 6) = calculate_udp_checksum(dst_ip, src_ip, udp_hdr, 8 + (int)resp.size());
-    TunDriver::instance().send_async(packet, 20 + 8 + (int)resp.size());
-}
-
-// Helper to build an empty DNS Response (e.g. for AAAA blocking)
-void send_dns_empty_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, uint16_t id, const uint8_t* query_payload, int query_len) {
-    // Basic strict check
-    if (query_len > 1024) return;
-
-    std::vector<uint8_t> resp;
-    resp.reserve(query_len + 16);
-    
-    // Header
-    resp.push_back(id & 0xFF); resp.push_back((id >> 8) & 0xFF);
-    resp.push_back(0x81); resp.push_back(0x80); // Std Response, No Error
-    resp.push_back(0x00); resp.push_back(0x01); // QD=1
-    resp.push_back(0x00); resp.push_back(0x00); // AN=0 (No Answers)
-    resp.push_back(0x00); resp.push_back(0x00);
-    resp.push_back(0x00); resp.push_back(0x00);
-    
-    // Copy Question Section from request (skip header 12 bytes)
-    if (query_len > 12) {
-        const uint8_t* q_ptr = query_payload + 12;
-        int q_len = query_len - 12;
-        for(int i=0; i<q_len; i++) resp.push_back(q_ptr[i]);
-    }
-
-    // Send
     uint8_t packet[2048];
     if (20 + 8 + resp.size() > 2048) return;
     uint8_t* ip_hdr = packet;
@@ -360,14 +316,55 @@ void send_dns_empty_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port
     *(uint16_t*)(udp_hdr + 6) = 0;
     memcpy(udp_hdr + 8, resp.data(), resp.size());
     *(uint16_t*)(udp_hdr + 6) = calculate_udp_checksum(dst_ip, src_ip, udp_hdr, 8 + (int)resp.size());
-    TunDriver::instance().send_async(packet, 20 + 8 + (int)resp.size());
+    
+    send_ip_packet_to_client(packet, 20 + 8 + (int)resp.size());
+}
+
+// Helper to build an empty DNS Response (e.g. for AAAA blocking)
+void send_dns_empty_response(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, uint16_t id, const uint8_t* query_payload, int query_len) {
+    if (query_len > 1024) return;
+    std::vector<uint8_t> resp;
+    resp.reserve(query_len + 16);
+    
+    resp.push_back(id & 0xFF); resp.push_back((id >> 8) & 0xFF);
+    resp.push_back(0x81); resp.push_back(0x80); 
+    resp.push_back(0x00); resp.push_back(0x01); 
+    resp.push_back(0x00); resp.push_back(0x00); 
+    resp.push_back(0x00); resp.push_back(0x00);
+    resp.push_back(0x00); resp.push_back(0x00);
+    
+    if (query_len > 12) {
+        const uint8_t* q_ptr = query_payload + 12;
+        int q_len = query_len - 12;
+        for(int i=0; i<q_len; i++) resp.push_back(q_ptr[i]);
+    }
+
+    uint8_t packet[2048];
+    if (20 + 8 + resp.size() > 2048) return;
+    uint8_t* ip_hdr = packet;
+    uint8_t* udp_hdr = ip_hdr + 20;
+    
+    memset(ip_hdr, 0, 20);
+    ip_hdr[0] = 0x45; ip_hdr[9] = 17; ip_hdr[8] = 64;
+    *(uint16_t*)(ip_hdr + 2) = htons((uint16_t)(20 + 8 + resp.size()));
+    *(uint16_t*)(ip_hdr + 4) = htons(g_udp_ip_id.fetch_add(1));
+    *(uint32_t*)(ip_hdr + 12) = dst_ip; 
+    *(uint32_t*)(ip_hdr + 16) = src_ip; 
+    *(uint16_t*)(ip_hdr + 10) = ip_chksum_simple(ip_hdr, 20);
+
+    *(uint16_t*)(udp_hdr + 0) = dst_port; 
+    *(uint16_t*)(udp_hdr + 2) = src_port; 
+    *(uint16_t*)(udp_hdr + 4) = htons((uint16_t)(8 + resp.size()));
+    *(uint16_t*)(udp_hdr + 6) = 0;
+    memcpy(udp_hdr + 8, resp.data(), resp.size());
+    *(uint16_t*)(udp_hdr + 6) = calculate_udp_checksum(dst_ip, src_ip, udp_hdr, 8 + (int)resp.size());
+    
+    send_ip_packet_to_client(packet, 20 + 8 + (int)resp.size());
 }
 
 
 void send_dns_over_tcp(UdpSession* sess, const std::vector<uint8_t>& payload) {
     if (sess->state != UdpSession::ESTABLISHED) return;
-
-    // DNS-over-TCP: 2 bytes Length + Payload
     if (payload.size() > 65535) return;
     
     uint16_t len = htons((uint16_t)payload.size());
@@ -398,9 +395,8 @@ void handle_socks5_tcp_read(UdpSession* sess) {
 
         if (sess->state == UdpSession::HANDSHAKE_AUTH) {
             if (r >= 2 && buf[0] == 0x05 && buf[1] == 0x00) {
-                // Auth OK. Connect to Target (DNS Server).
                 std::vector<uint8_t> req;
-                req.push_back(0x05); req.push_back(0x01); req.push_back(0x00); req.push_back(0x01); // IPv4
+                req.push_back(0x05); req.push_back(0x01); req.push_back(0x00); req.push_back(0x01); 
                 
                 uint32_t ip = sess->proxy_target_ip; 
                 req.push_back(ip & 0xFF); req.push_back((ip >> 8) & 0xFF);
@@ -410,7 +406,7 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                 req.push_back(port & 0xFF); req.push_back((port >> 8) & 0xFF);
                 
                 int sent = send(sess->tcp_sock, (const char*)req.data(), (int)req.size(), 0);
-                if (sent > 0) TrafficManager::instance().report_proxy_tx(sent, false); // Proxy
+                if (sent > 0) TrafficManager::instance().report_proxy_tx(sent, false); 
                 
                 sess->state = UdpSession::HANDSHAKE_CONNECT;
             } else {
@@ -418,7 +414,6 @@ void handle_socks5_tcp_read(UdpSession* sess) {
             }
         } else if (sess->state == UdpSession::HANDSHAKE_CONNECT) {
             if (r >= 4 && buf[0] == 0x05 && buf[1] == 0x00) {
-                // Connected
                 sess->state = UdpSession::ESTABLISHED;
                 
                 int header_len = (buf[3] == 0x01) ? 10 : ((buf[3] == 0x04) ? 22 : (7 + buf[4]));
@@ -441,21 +436,10 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                 if (sess->tcp_rx_buffer.size() >= (size_t)2 + pkt_len) {
                     
                     uint8_t* payload = sess->tcp_rx_buffer.data() + 2;
-                    
-                    // Parse Response to get IP and TTL
                     uint16_t id = *(uint16_t*)payload;
                     
-                    // Parse and Log (updates cache internally)
                     parse_and_log_dns_response(payload, pkt_len, "Proxy (TCP)");
 
-                    // Re-parse just to get IP for send_dns_response construction?
-                    // Actually we need the IP to construct the UDP response. 
-                    // But wait, parse_and_log_dns_response does NOT return the IP.
-                    // We need to keep the original logic for constructing the response, 
-                    // OR modify the helper to return the IP.
-                    // For minimal risk, I will KEEP the original parsing logic for response construction,
-                    // but REMOVE the logging and cache update from it, since helper does it.
-                    
                     uint16_t flags = ntohs(*(uint16_t*)(payload + 2));
                     uint16_t an_count = ntohs(*(uint16_t*)(payload + 6));
                     
@@ -487,11 +471,8 @@ void handle_socks5_tcp_read(UdpSession* sess) {
                             
                             if (type == 1 && rdlen == 4 && pos + 4 <= pkt_len) {
                                 uint32_t ip = *(uint32_t*)(payload + pos);
-                                
-                                // REWRITE Response
                                 std::string target_domain = sess->original_domain_with_suffix.empty() ? sess->clean_domain : sess->original_domain_with_suffix;
                                 send_dns_response(sess->src_ip, sess->original_dst_ip, sess->src_port, sess->original_dst_port, id, target_domain, ip);
-
                                 goto next_packet;
                             }
                             pos += rdlen;
@@ -524,7 +505,6 @@ std::string parse_dns_qname(const uint8_t* payload, int len, int* qname_len) {
             break; 
         }
         if ((n & 0xC0) == 0xC0) return ""; 
-        
         if (pos + n + 1 > len) return "";
         
         if (!domain.empty()) domain += ".";
@@ -542,9 +522,9 @@ std::vector<uint8_t> build_dns_query(uint16_t id, const std::string& domain) {
     req.reserve(64);
     
     req.push_back(id & 0xFF); req.push_back((id >> 8) & 0xFF);
-    req.push_back(0x01); req.push_back(0x00); // Flags: Std Query, Recurse
-    req.push_back(0x00); req.push_back(0x01); // QD=1
-    req.push_back(0x00); req.push_back(0x00); // AN=0
+    req.push_back(0x01); req.push_back(0x00); 
+    req.push_back(0x00); req.push_back(0x01); 
+    req.push_back(0x00); req.push_back(0x00); 
     req.push_back(0x00); req.push_back(0x00); 
     req.push_back(0x00); req.push_back(0x00); 
     
@@ -578,7 +558,7 @@ void udp_check_timeouts() {
             uint64_t now = GetTickCount64();
             std::vector<UdpSession*> stale_sessions;
             for (auto& pair : t_udp_sessions) {
-                if (now - pair.second->last_active > 300000) { // 300s (5min) timeout
+                if (now - pair.second->last_active > 300000) { 
                     stale_sessions.push_back(pair.second);
                 }
             }
@@ -591,95 +571,87 @@ void udp_check_timeouts() {
 
 // Helper: Forward UDP packet directly
 void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
-    /*
-     LOG_DEBUG("[UDP] Forward %d bytes: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d\n", len,
-        src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
-        dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
-    */
-    uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
-    Worker* w = WorkerPool::instance().get_worker(hash);
-    if (!w) w = WorkerPool::instance().get_next_worker();
+    uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;\
+    Worker* w = WorkerPool::instance().get_worker(hash);\
+    if (!w) w = WorkerPool::instance().get_next_worker();\
 
-    std::vector<uint8_t> data(payload, payload + len);
+    std::vector<uint8_t> data(payload, payload + len);\
 
-    w->queue_task([src_ip, dst_ip, src_port, dst_port, data = std::move(data), w]() {
-        UdpKey key = { src_ip, dst_ip, src_port, dst_port };
-        UdpSession* sess = nullptr;
-        auto it = t_udp_sessions.find(key);
-        
-        if (it != t_udp_sessions.end()) {
-            sess = it->second;
-        } else {
-            LOG_INFO("[UDP] Direct %d.%d.%d.%d:%-5d -> %d.%d.%d.%d:%d\n",
-                src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),
-                dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));
+    w->queue_task([src_ip, dst_ip, src_port, dst_port, data = std::move(data), w]() {\
+        UdpKey key = { src_ip, dst_ip, src_port, dst_port };\
+        UdpSession* sess = nullptr;\
+        auto it = t_udp_sessions.find(key);\
+        \
+        if (it != t_udp_sessions.end()) {\
+            sess = it->second;\
+        } else {\
+            LOG_INFO("[UDP] Direct %d.%d.%d.%d:%-5d -> %d.%d.%d.%d:%d\n",\
+                src_ip & 0xFF, (src_ip >> 8) & 0xFF, (src_ip >> 16) & 0xFF, (src_ip >> 24) & 0xFF, ntohs(src_port),\
+                dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF, ntohs(dst_port));\
 
-            sess = new UdpSession();
-            sess->src_ip = src_ip; 
-            sess->original_dst_ip = dst_ip; 
-            sess->src_port = src_port; 
-            sess->original_dst_port = dst_port;
-            sess->worker = w;
-            sess->is_dns_tcp = false;
-            
-            sess->udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
-            if (sess->udp_sock == INVALID_SOCKET) { 
-                delete sess; 
-                return; 
-            }
+            sess = new UdpSession();\
+            sess->src_ip = src_ip; \
+            sess->original_dst_ip = dst_ip; \
+            sess->src_port = src_port; \
+            sess->original_dst_port = dst_port;\
+            sess->worker = w;\
+            sess->is_dns_tcp = false;\
+            \
+            sess->udp_sock = socket(AF_INET, SOCK_DGRAM, 0);\
+            if (sess->udp_sock == INVALID_SOCKET) { \
+                delete sess; \
+                return; \
+            }\
 
-            // Optimization 1: Bind to local port for Symmetric NAT behavior (STUN friendliness)
-            sockaddr_in local_addr;
-            memset(&local_addr, 0, sizeof(local_addr));
-            local_addr.sin_family = AF_INET;
-            local_addr.sin_addr.S_un.S_addr = INADDR_ANY;
-            local_addr.sin_port = 0; // Let OS assign random port directly (User Request)
-            if (bind(sess->udp_sock, (sockaddr*)&local_addr, sizeof(local_addr)) != 0) {
-                closesocket(sess->udp_sock);
-                delete sess;
-                return;
-            }
+            sockaddr_in local_addr;\
+            memset(&local_addr, 0, sizeof(local_addr));\
+            local_addr.sin_family = AF_INET;\
+            local_addr.sin_addr.S_un.S_addr = INADDR_ANY;\
+            local_addr.sin_port = 0;\
+            if (bind(sess->udp_sock, (sockaddr*)&local_addr, sizeof(local_addr)) != 0) {\
+                closesocket(sess->udp_sock);\
+                delete sess;\
+                return;\
+            }\
 
-            u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);
+            u_long mode = 1; ioctlsocket(sess->udp_sock, FIONBIO, &mode);\
 
-            // Fix: Disable WSAECONNRESET to prevent UDP socket from dying on ICMP errors
-            #ifndef SIO_UDP_CONNRESET
-            #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
-            #endif
-            BOOL bNewBehavior = FALSE;
-            DWORD dwBytesReturned = 0;
-            WSAIoctl(sess->udp_sock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);
+            #ifndef SIO_UDP_CONNRESET\
+            #define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)\
+            #endif\
+            BOOL bNewBehavior = FALSE;\
+            DWORD dwBytesReturned = 0;\
+            WSAIoctl(sess->udp_sock, SIO_UDP_CONNRESET, &bNewBehavior, sizeof(bNewBehavior), NULL, 0, &dwBytesReturned, NULL, NULL);\
 
-            // Optimization 2: Increase UDP Buffer for Video/Streaming (Correct 1MB)
-            int buf_size = 1024 * 1024; 
-            setsockopt(sess->udp_sock, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
-            setsockopt(sess->udp_sock, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
-            
-            t_udp_sessions[key] = sess;
-            
-            sess->worker->add_socket(
-                sess->udp_sock,
-                [sess](char* data, int len, sockaddr_in* addr) { handle_udp_direct_read(sess, data, len, addr); },
-                nullptr,
-                [sess]() { close_udp_session_internal(sess); },
-                true // IS_UDP = true
-            );
-            
-            sess->state = UdpSession::ESTABLISHED;
-        }
-        
-        if (sess && sess->state != UdpSession::CLOSED) {
-            sess->last_active = GetTickCount64();
-            
-            sockaddr_in dest_addr;
-            memset(&dest_addr, 0, sizeof(dest_addr));
-            dest_addr.sin_family = AF_INET;
-            dest_addr.sin_addr.S_un.S_addr = dst_ip;
-            dest_addr.sin_port = dst_port; 
-            
-            int sent = sendto(sess->udp_sock, (const char*)data.data(), (int)data.size(), 0, (sockaddr*)&dest_addr, sizeof(dest_addr));
-            if (sent > 0) TrafficManager::instance().report_proxy_tx(sent, true); // Direct
-        }
+            int buf_size = 1024 * 1024; \
+            setsockopt(sess->udp_sock, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));\
+            setsockopt(sess->udp_sock, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));\
+            \
+            t_udp_sessions[key] = sess;\
+            \
+            sess->worker->add_socket(\
+                sess->udp_sock,\
+                [sess](char* data, int len, sockaddr_in* addr) { handle_udp_direct_read(sess, data, len, addr); },\
+                nullptr,\
+                [sess]() { close_udp_session_internal(sess); },\
+                true \
+            );\
+            \
+            sess->state = UdpSession::ESTABLISHED;\
+        }\
+        \
+        if (sess && sess->state != UdpSession::CLOSED) {\
+            sess->last_active = GetTickCount64();\
+            \
+            sockaddr_in dest_addr;\
+            memset(&dest_addr, 0, sizeof(dest_addr));\
+            dest_addr.sin_family = AF_INET;\
+            dest_addr.sin_addr.S_un.S_addr = dst_ip;\
+            dest_addr.sin_port = dst_port; \
+            \
+            int sent = sendto(sess->udp_sock, (const char*)data.data(), (int)data.size(), 0, (sockaddr*)&dest_addr, sizeof(dest_addr));\
+            if (sent > 0) TrafficManager::instance().report_proxy_tx(sent, true); \
+        }\
     });
 }
 
@@ -688,168 +660,156 @@ void forward_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uin
 void handle_udp_packet(uint32_t src_ip, uint32_t dst_ip, uint16_t src_port, uint16_t dst_port, const uint8_t* payload, int len) {
     uint16_t dport_h = ntohs(dst_port);
 
-    // 0. Drop Noisy Protocols (mDNS, NetBIOS, SSDP) - Check FIRST
-    if (dport_h == 5353 ||  // mDNS
-        dport_h == 5355 ||  // LLMNR
-        dport_h == 137 ||   // NetBIOS Name Service
-        dport_h == 138 ||   // NetBIOS Datagram Service
-        dport_h == 1900 // SSDP (UPnP)
-    ) {  
-        return; // Drop immediately
+    if (dport_h == 5353 || dport_h == 5355 || dport_h == 137 || dport_h == 138 || dport_h == 1900) {  
+        return; 
     }
 
-    // 1. Rule Check (Highest Priority)
     RouteAction ip_action = RuleManager::instance().match_ip(ntohl(dst_ip));
-    if (ip_action == RouteAction::BLOCK) return;
-    if (ip_action == RouteAction::DIRECT) {
-        forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);
-        return;
+    if (ip_action == RouteAction::BLOCK) return;\
+    if (ip_action == RouteAction::DIRECT) {\
+        forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);\
+        return;\
     }
 
-    // 2. UDP 443 (QUIC) Optimization
     if (dst_port == htons(443)) {
-        bool cn = GeoChecker::instance().is_cn_ip(ntohl(dst_ip));
-        if (!cn) {
-            LOG_INFO("[UDP] Blocked Google QUIC: %d.%d.%d.%d:443\n", 
-                dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF);
-            return;
-        }
-        forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);
-        return;
+        bool cn = GeoChecker::instance().is_cn_ip(ntohl(dst_ip));\
+        if (!cn) {\
+            LOG_INFO("[UDP] Blocked Google QUIC: %d.%d.%d.%d:443\n", \
+                dst_ip & 0xFF, (dst_ip >> 8) & 0xFF, (dst_ip >> 16) & 0xFF, (dst_ip >> 24) & 0xFF);\
+            return;\
+        }\
+        forward_udp_packet(src_ip, dst_ip, src_port, dst_port, payload, len);\
+        return;\
     }
 
-    // 3. UDP 53 (DNS) Optimization
     if (dst_port == htons(53)) {
-        int qname_len = 0;
-        std::string full_domain = parse_dns_qname(payload, len, &qname_len);
-        
-        if (!full_domain.empty()) {
-            // NCSI Hijacking to make Windows/Phone happy immediately
-            if (full_domain.find("msftncsi") != std::string::npos || 
-                full_domain.find("msftconnecttest") != std::string::npos ||
-                full_domain.find("connectivitycheck") != std::string::npos) {
-                
-                uint16_t id = *(uint16_t*)payload;
-                // Resolve to a typical MS NCSI IP or any valid IP to satisfy the check
-                uint32_t ncsi_ip = inet_addr("131.107.255.255");
-                send_dns_response(src_ip, dst_ip, src_port, dst_port, id, full_domain, ncsi_ip);
-                LOG_INFO("[DNS] Hijacked NCSI check for: %s\n", full_domain.c_str());
-                return;
+        int qname_len = 0;\
+        std::string full_domain = parse_dns_qname(payload, len, &qname_len);\
+        \
+        if (!full_domain.empty()) {\
+            if (full_domain.find("msftncsi") != std::string::npos || \
+                full_domain.find("msftconnecttest") != std::string::npos ||\
+                full_domain.find("connectivitycheck") != std::string::npos) {\
+                \
+                uint16_t id = *(uint16_t*)payload;\
+                uint32_t ncsi_ip = inet_addr("131.107.255.255");\
+                send_dns_response(src_ip, dst_ip, src_port, dst_port, id, full_domain, ncsi_ip);\
+                LOG_INFO("[DNS] Hijacked NCSI check for: %s\n", full_domain.c_str());\
+                return;\
             }
 
-            // Rule Check for Domain
-            RouteAction dom_action = RuleManager::instance().match_domain(full_domain);
-            if (dom_action == RouteAction::BLOCK) {
-                uint16_t id = *(uint16_t*)payload;
-                send_dns_empty_response(src_ip, dst_ip, src_port, dst_port, id, payload, len);
-                return;
+            RouteAction dom_action = RuleManager::instance().match_domain(full_domain);\
+            if (dom_action == RouteAction::BLOCK) {\
+                uint16_t id = *(uint16_t*)payload;\
+                send_dns_empty_response(src_ip, dst_ip, src_port, dst_port, id, payload, len);\
+                return;\
             }
 
-            if (12 + qname_len + 2 <= len) {
-                uint16_t qtype = ntohs(*(uint16_t*)(payload + 12 + qname_len));
-                if (qtype == 28) { // AAAA (IPv6) 
-                    uint16_t id = *(uint16_t*)payload;
-                    send_dns_empty_response(src_ip, dst_ip, src_port, dst_port, id, payload, len);
-                    return; 
-                }
+            if (12 + qname_len + 2 <= len) {\
+                uint16_t qtype = ntohs(*(uint16_t*)(payload + 12 + qname_len));\
+                if (qtype == 28) { \
+                    uint16_t id = *(uint16_t*)payload;\
+                    send_dns_empty_response(src_ip, dst_ip, src_port, dst_port, id, payload, len);\
+                    return; \
+                }\
             }
 
-            std::string clean_domain = full_domain;
-            std::string temp = full_domain;
-            std::transform(temp.begin(), temp.end(), temp.begin(), [](unsigned char c){ return std::tolower(c); });
-            const char* suffixes[] = { ".mshome.net", ".lan", ".local", ".localdomain" };
-            bool stripped = false;
-            for (const char* suf : suffixes) {
-                size_t suflen = strlen(suf);
-                if (temp.length() > suflen && temp.compare(temp.length() - suflen, suflen, suf) == 0) {
-                    clean_domain = full_domain.substr(0, full_domain.length() - suflen);
-                    stripped = true;
-                    break; 
-                }
+            std::string clean_domain = full_domain;\
+            std::string temp = full_domain;\
+            std::transform(temp.begin(), temp.end(), temp.begin(), [](unsigned char c){ return std::tolower(c); });\
+            const char* suffixes[] = { ".mshome.net", ".lan", ".local", ".localdomain" };\
+            bool stripped = false;\
+            for (const char* suf : suffixes) {\
+                size_t suflen = strlen(suf);\
+                if (temp.length() > suflen && temp.compare(temp.length() - suflen, suflen, suf) == 0) {\
+                    clean_domain = full_domain.substr(0, full_domain.length() - suflen);\
+                    stripped = true;\
+                    break; \
+                }\
             }
             
-            uint16_t id = *(uint16_t*)payload;
-            uint32_t cached_ip = DnsCache::instance().get(clean_domain);
-            if (cached_ip != 0) {
-                send_dns_response(src_ip, dst_ip, src_port, dst_port, id, full_domain, cached_ip);
-                return;
+            uint16_t id = *(uint16_t*)payload;\
+            uint32_t cached_ip = DnsCache::instance().get(clean_domain);\
+            if (cached_ip != 0) {\
+                send_dns_response(src_ip, dst_ip, src_port, dst_port, id, full_domain, cached_ip);\
+                return;\
             }
 
-            bool domestic = (dom_action == RouteAction::DIRECT) || 
-                            (dom_action == RouteAction::PASS && (GeoChecker::instance().is_cn_domain(clean_domain) || GeoChecker::instance().is_tencent_domain(clean_domain)));
-            
-            if (domestic) {
-                uint32_t ali_dns;
-                uint8_t ali_ip[4] = {223, 5, 5, 5};
-                memcpy(&ali_dns, ali_ip, 4);
-                forward_udp_packet(src_ip, ali_dns, src_port, dst_port, payload, len);
-                return;
-            } else { 
-                uint32_t google_dns;
-                uint8_t google_ip[4] = {8, 8, 8, 8};
-                memcpy(&google_dns, google_ip, 4);
+            bool domestic = (dom_action == RouteAction::DIRECT) || \
+                            (dom_action == RouteAction::PASS && (GeoChecker::instance().is_cn_domain(clean_domain) || GeoChecker::instance().is_tencent_domain(clean_domain)));\
+            \
+            if (domestic) {\
+                uint32_t ali_dns;\
+                uint8_t ali_ip[4] = {223, 5, 5, 5};\
+                memcpy(&ali_dns, ali_ip, 4);\
+                forward_udp_packet(src_ip, ali_dns, src_port, dst_port, payload, len);\
+                return;\
+            } else { \
+                uint32_t google_dns;\
+                uint8_t google_ip[4] = {8, 8, 8, 8};\
+                memcpy(&google_dns, google_ip, 4);\
 
-                std::vector<uint8_t> query_packet;
-                const uint8_t* p_data = payload;
-                int p_len = len;
-                if (stripped) {
-                    query_packet = build_dns_query(id, clean_domain);
-                    p_data = query_packet.data();
-                    p_len = (int)query_packet.size();
-                }
+                std::vector<uint8_t> query_packet;\
+                const uint8_t* p_data = payload;\
+                int p_len = len;\
+                if (stripped) {\
+                    query_packet = build_dns_query(id, clean_domain);\
+                    p_data = query_packet.data();\
+                    p_len = (int)query_packet.size();\
+                }\
 
-                uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;
-                Worker* w = WorkerPool::instance().get_worker(hash);
-                if (!w) w = WorkerPool::instance().get_next_worker();
-                std::vector<uint8_t> data(p_data, p_data + p_len);
-                
-                w->queue_task([src_ip, dst_ip, src_port, dst_port, google_dns, data = std::move(data), w, full_domain, clean_domain]() {
-                    UdpKey key = { src_ip, dst_ip, src_port, dst_port };
-                    UdpSession* sess = nullptr;
-                    auto it = t_udp_sessions.find(key);
+                uint32_t hash = src_port ^ dst_port ^ src_ip ^ dst_ip;\
+                Worker* w = WorkerPool::instance().get_worker(hash);\
+                if (!w) w = WorkerPool::instance().get_next_worker();\
+                std::vector<uint8_t> data(p_data, p_data + p_len);\
+                \
+                w->queue_task([src_ip, dst_ip, src_port, dst_port, google_dns, data = std::move(data), w, full_domain, clean_domain]() {\
+                    UdpKey key = { src_ip, dst_ip, src_port, dst_port };\
+                    UdpSession* sess = nullptr;\
+                    auto it = t_udp_sessions.find(key);\
 
-                    if (it == t_udp_sessions.end()) {
-                        sess = new UdpSession();
-                        sess->src_ip = src_ip; sess->original_dst_ip = dst_ip; 
-                        sess->src_port = src_port; sess->original_dst_port = dst_port;
-                        sess->proxy_target_ip = google_dns;
-                        sess->proxy_target_port = htons(53);
-                        sess->worker = w; sess->is_dns_tcp = true;
-                        sess->original_domain_with_suffix = full_domain;
-                        sess->clean_domain = clean_domain;
+                    if (it == t_udp_sessions.end()) {\
+                        sess = new UdpSession();\
+                        sess->src_ip = src_ip; sess->original_dst_ip = dst_ip; \
+                        sess->src_port = src_port; sess->original_dst_port = dst_port;\
+                        sess->proxy_target_ip = google_dns;\
+                        sess->proxy_target_port = htons(53);\
+                        sess->worker = w; sess->is_dns_tcp = true;\
+                        sess->original_domain_with_suffix = full_domain;\
+                        sess->clean_domain = clean_domain;\
 
-                        sess->tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
-                        if (sess->tcp_sock == INVALID_SOCKET) { delete sess; return; }
-                        u_long mode = 1; ioctlsocket(sess->tcp_sock, FIONBIO, &mode);
-                        t_udp_sessions[key] = sess;
-                        
-                        sockaddr_in proxy_addr; memset(&proxy_addr, 0, sizeof(proxy_addr));
-                        proxy_addr.sin_family = AF_INET;
-                        inet_pton(AF_INET, g_config.proxy_ip.c_str(), &proxy_addr.sin_addr);
-                        proxy_addr.sin_port = htons(g_config.proxy_port);
-                        
-                        sess->worker->connect_async(sess->tcp_sock, proxy_addr, [sess]() {
-                            if (sess->state == UdpSession::CLOSED) return;
-                            uint8_t req[] = { 0x05, 0x01, 0x00 };
-                            int sent = send(sess->tcp_sock, (const char*)req, sizeof(req), 0);
-                            if (sent > 0) TrafficManager::instance().report_proxy_tx(sent, false); // Proxy
-                            sess->state = UdpSession::HANDSHAKE_AUTH;
-                            sess->worker->add_socket(sess->tcp_sock, 
-                            [sess](char*, int, sockaddr_in*) { handle_socks5_tcp_read(sess); }, 
-                            nullptr, 
-                            [sess]() { close_udp_session_internal(sess); },
-                            false
-                        );
-                        });
+                        sess->tcp_sock = socket(AF_INET, SOCK_STREAM, 0);\
+                        if (sess->tcp_sock == INVALID_SOCKET) { delete sess; return; }\
+                        u_long mode = 1; ioctlsocket(sess->tcp_sock, FIONBIO, &mode);\
+                        t_udp_sessions[key] = sess;\
+                        \
+                        sockaddr_in proxy_addr; memset(&proxy_addr, 0, sizeof(proxy_addr));\
+                        proxy_addr.sin_family = AF_INET;\
+                        inet_pton(AF_INET, g_config.proxy_ip.c_str(), &proxy_addr.sin_addr);\
+                        proxy_addr.sin_port = htons(g_config.proxy_port);\
+                        \
+                        sess->worker->connect_async(sess->tcp_sock, proxy_addr, [sess]() {\
+                            if (sess->state == UdpSession::CLOSED) return;\
+                            uint8_t req[] = { 0x05, 0x01, 0x00 };\
+                            int sent = send(sess->tcp_sock, (const char*)req, sizeof(req), 0);\
+                            if (sent > 0) TrafficManager::instance().report_proxy_tx(sent, false); \
+                            sess->state = UdpSession::HANDSHAKE_AUTH;\
+                            sess->worker->add_socket(sess->tcp_sock, \
+                            [sess](char*, int, sockaddr_in*) { handle_socks5_tcp_read(sess); }, \
+                            nullptr, \
+                            [sess]() { close_udp_session_internal(sess); },\
+                            false\
+                        );\
+                        });\
                     }
 
-                    if (sess && sess->state != UdpSession::CLOSED) {
-                        sess->last_active = GetTickCount64();
-                        if (sess->state == UdpSession::ESTABLISHED) send_dns_over_tcp(sess, data);
-                        else sess->pending_packets.push_back(std::move(data));
-                    }
-                });
-                return;
+                    if (sess && sess->state != UdpSession::CLOSED) {\
+                        sess->last_active = GetTickCount64();\
+                        if (sess->state == UdpSession::ESTABLISHED) send_dns_over_tcp(sess, data);\
+                        else sess->pending_packets.push_back(std::move(data));\
+                    }\
+                });\
+                return;\
             }
         }
     }
