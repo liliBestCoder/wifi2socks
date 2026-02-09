@@ -27,6 +27,16 @@ WinPkFilterDriver::WinPkFilterDriver()
         m_read_request->EthPacket[i].Buffer = m_read_buffers[i];
     }
 
+    // Allocate batch write request
+    m_write_request = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
+    m_write_request->dwPacketsNumber = BATCH_SIZE;
+
+    // Allocate individual buffers for writing
+    for (int i = 0; i < BATCH_SIZE; ++i) {
+        m_write_buffers[i] = new INTERMEDIATE_BUFFER();
+        m_write_request->EthPacket[i].Buffer = m_write_buffers[i];
+    }
+
     // Allocate single buffer for sending
     m_send_buffer = new INTERMEDIATE_BUFFER();
 }
@@ -37,8 +47,10 @@ WinPkFilterDriver::~WinPkFilterDriver() {
     // Cleanup buffers
     for (int i = 0; i < BATCH_SIZE; ++i) {
         delete m_read_buffers[i];
+        delete m_write_buffers[i];
     }
     free(m_read_request);
+    free(m_write_request);
     delete m_send_buffer;
 }
 
@@ -270,6 +282,36 @@ bool WinPkFilterDriver::send_to_adapter(const char* packet, size_t length) {
     
     ETH_REQUEST req = { m_adapter_handle, { m_send_buffer } };
     return m_ndis_api.SendPacketToAdapter(&req) != FALSE;
+}
+
+bool WinPkFilterDriver::send_packets_to_adapter(std::vector<Packet>&& packets) {
+    if (!m_adapter_handle || packets.empty()) return false;
+
+    std::lock_guard<std::mutex> lock(m_write_mutex);
+    m_write_request->hAdapterHandle = m_adapter_handle;
+    
+    size_t processed = 0;
+    while (processed < packets.size()) {
+        size_t current_batch = (std::min)(packets.size() - processed, (size_t)BATCH_SIZE);
+        m_write_request->dwPacketsNumber = (DWORD)current_batch;
+        m_write_request->dwPacketsSuccess = 0;
+
+        for (size_t i = 0; i < current_batch; ++i) {
+            auto& p = packets[processed + i];
+            PINTERMEDIATE_BUFFER buf = m_write_buffers[i];
+            size_t clen = (std::min)(p.data.size(), (size_t)MAX_ETHER_FRAME);
+            memcpy(buf->m_IBuffer, p.data.data(), clen);
+            buf->m_Length = (ULONG)clen;
+            buf->m_dwDeviceFlags = PACKET_FLAG_ON_SEND;
+            m_write_request->EthPacket[i].Buffer = buf;
+        }
+
+        if (!m_ndis_api.SendPacketsToAdapter(m_write_request)) {
+            // If batch fails, we don't have much to do but continue or abort
+        }
+        processed += current_batch;
+    }
+    return true;
 }
 
 bool WinPkFilterDriver::send_to_mstcp(const char* packet, size_t length) {

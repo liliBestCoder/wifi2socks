@@ -170,6 +170,8 @@ int main() {
         sys_check_timeouts();
         udp_check_timeouts();
 
+        flush_outbound_packets();
+
         uint64_t now = GetTickCount64();
         // Cleanup NAT table every 10 seconds
         if (now - last_cleanup > 10000) {

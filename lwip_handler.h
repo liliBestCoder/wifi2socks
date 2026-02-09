@@ -13,6 +13,7 @@ uint32_t get_now_ms();
 void lwip_system_init();
 void lwip_periodic_handle();
 void process_ethernet_frame(const char* packet, size_t length, bool outbound);
+void flush_outbound_packets();
 void set_winpkfilter_driver(WinPkFilterDriver* driver);
 
 // Helpers

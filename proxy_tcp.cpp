@@ -230,7 +230,7 @@ err_t tcp_client_sent(void* arg, struct tcp_pcb* tpcb, u16_t len) {
 void handle_proxy_read(TcpCtxPtr ctx) {
     if (ctx->closed) return;
     
-    std::vector<uint8_t> data(262144);
+    std::vector<uint8_t> data(32768);
     int r = recv(ctx->proxy_socket, (char*)data.data(), (int)data.size(), 0);
     
     if (r > 0) {

@@ -61,57 +61,35 @@ public:
 
 
     bool send_to_adapter(const char* packet, size_t length);
-
+    bool send_packets_to_adapter(std::vector<Packet>&& packets);
     bool send_to_mstcp(const char* packet, size_t length);
-
     bool get_adapter_mac(const std::string& adapter_name, uint8_t* mac);
-
-
 
     static std::vector<std::pair<std::string, std::string>> get_adapters();
 
-
-
 private:
-
     void run();
 
-
-
     CNdisApi m_ndis_api;
-
     HANDLE m_adapter_handle;
-
     HANDLE m_wait_event;
-
     
-
     PacketHandler m_packet_handler;
-
     BatchPacketHandler m_batch_handler;
-
     std::function<void()> m_on_before_batch;
-
     std::function<void()> m_on_after_batch;
 
-
-
     std::thread m_worker_thread;
-
     bool m_running;
 
-
-
     static const int BATCH_SIZE = 64;
-
     PETH_M_REQUEST m_read_request;
-
     PINTERMEDIATE_BUFFER m_read_buffers[BATCH_SIZE];
-
     
-
+    PETH_M_REQUEST m_write_request;
+    PINTERMEDIATE_BUFFER m_write_buffers[BATCH_SIZE];
+    
     INTERMEDIATE_BUFFER* m_send_buffer;
-
     std::mutex m_send_mutex;
-
+    std::mutex m_write_mutex;
 };

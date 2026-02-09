@@ -30,10 +30,20 @@ struct netif g_netif;
 uint8_t HOST_MAC[6] = { 0 }; 
 bool g_host_mac_known = false;
 
+static std::vector<WinPkFilterDriver::Packet> g_outbound_batch;
+
 WinPkFilterDriver* g_winpkfilter_driver = nullptr;
 
 void set_winpkfilter_driver(WinPkFilterDriver* driver) {
     g_winpkfilter_driver = driver;
+}
+
+void flush_outbound_packets() {
+    if (g_outbound_batch.empty()) return;
+    if (g_winpkfilter_driver) {
+        g_winpkfilter_driver->send_packets_to_adapter(std::move(g_outbound_batch));
+    }
+    g_outbound_batch.clear();
 }
 
 uint32_t get_now_ms() { return (uint32_t)GetTickCount64(); }
@@ -124,7 +134,7 @@ err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
         }
     }
     
-    g_winpkfilter_driver->send_to_adapter((const char*)buf.data(), buf.size());
+    g_outbound_batch.push_back({ std::move(buf), true });
     return ERR_OK;
 }
 
