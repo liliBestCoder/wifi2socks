@@ -144,7 +144,12 @@ void close_udp_session_internal(UdpSession* sess) {
     if (!sess || sess->state == UdpSession::CLOSED) return; 
     
     UdpKey key(sess->src_ip, sess->original_dst_ip, sess->src_port, sess->original_dst_port);
-    t_udp_sessions.erase(key);
+    
+    // Safety check: is this session actually in the map of the CURRENT thread?
+    auto it = t_udp_sessions.find(key);
+    if (it != t_udp_sessions.end() && it->second == sess) {
+        t_udp_sessions.erase(it);
+    }
 
     sess->state = UdpSession::CLOSED;
 

@@ -53,23 +53,21 @@ void Worker::retain_context(SocketContext* ctx) {
 }
 
 void Worker::release_context(SocketContext* ctx) {
-    if (ctx) {
-        ctx->ref_count--;
-        if (ctx->ref_count <= 0) {
-            ctx->magic = 0xDEADBEEF;
-            delete ctx;
-        }
+    if (ctx && --ctx->ref_count <= 0) {
+        ctx->magic = 0xDEADBEEF;
+        delete ctx;
     }
 }
 
 void Worker::post_read(SocketContext* ctx) {
-    if (!ctx || ctx->read_pending) return;
+    if (!ctx || ctx->read_pending || ctx->magic != SocketContext::MAGIC_VAL) return;
 
     DWORD bytes = 0;
     DWORD flags = 0;
     
     memset(&ctx->read_io.overlapped, 0, sizeof(OVERLAPPED));
     ctx->read_io.type = IO_READ;
+    ctx->read_io.sock = ctx->sock;
 
     retain_context(ctx);
 
@@ -77,7 +75,7 @@ void Worker::post_read(SocketContext* ctx) {
 
     if (ctx->is_udp) {
         ctx->wsaBuf.buf = ctx->buffer;
-        ctx->wsaBuf.len = 4096;
+        ctx->wsaBuf.len = sizeof(ctx->buffer);
         ctx->remote_addr_len = sizeof(ctx->remote_addr);
         
         ret = WSARecvFrom(ctx->sock, &ctx->wsaBuf, 1, &bytes, &flags, (sockaddr*)&ctx->remote_addr, &ctx->remote_addr_len, &ctx->read_io.overlapped, NULL);
@@ -100,10 +98,11 @@ void Worker::post_read(SocketContext* ctx) {
 }
 
 void Worker::post_write(SocketContext* ctx, char* buf, int len) {
-    if (!ctx || ctx->write_pending) return;
+    if (!ctx || ctx->write_pending || ctx->magic != SocketContext::MAGIC_VAL) return;
 
     memset(&ctx->write_io.overlapped, 0, sizeof(OVERLAPPED));
     ctx->write_io.type = IO_WRITE;
+    ctx->write_io.sock = ctx->sock;
     
     ctx->wsaWriteBuf.buf = buf;
     ctx->wsaWriteBuf.len = len;
@@ -139,6 +138,9 @@ void Worker::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> 
         } else {
             ctx = new SocketContext();
             ctx->sock = s;
+            ctx->read_io.sock = s;
+            ctx->write_io.sock = s;
+            ctx->connect_io.sock = s;
             retain_context(ctx);
             m_sockets[s] = ctx;
             new_association = true;
@@ -184,9 +186,12 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
 
         SocketContext* ctx = new SocketContext();
         ctx->sock = s;
+        ctx->read_io.sock = s;
+        ctx->write_io.sock = s;
+        ctx->connect_io.sock = s;
+
         if (on_connect) {
-            ctx->on_write = [on_connect](int bytes) {
-                // Always callback. Logic in handle_proxy_connect handles validation/errors.
+            ctx->on_write = [on_connect](int status) {
                 on_connect();
             };
         }
@@ -205,9 +210,20 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
             BOOL ret = m_lpfnConnectEx(s, (sockaddr*)&addr, sizeof(addr), NULL, 0, NULL, &ctx->connect_io.overlapped);
             if (!ret && WSAGetLastError() != ERROR_IO_PENDING) {
                 release_context(ctx);
+                // Also remove from map if it fails immediately
+                auto it = m_sockets.find(s);
+                if (it != m_sockets.end() && it->second == ctx) {
+                    m_sockets.erase(it);
+                    release_context(ctx);
+                }
             }
         } else {
              release_context(ctx);
+             auto it = m_sockets.find(s);
+             if (it != m_sockets.end() && it->second == ctx) {
+                 m_sockets.erase(it);
+                 release_context(ctx);
+             }
         }
     });
     PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
@@ -287,9 +303,11 @@ void Worker::loop() {
                 auto it = m_sockets.find(ioCtx->sock);
                 if (it != m_sockets.end()) {
                     SocketContext* ctx = it->second;
-                    ctx->on_read = nullptr;
-                    ctx->on_write = nullptr;
-                    ctx->on_close = nullptr;
+                    if (ctx->magic == SocketContext::MAGIC_VAL) {
+                        ctx->on_read = nullptr;
+                        ctx->on_write = nullptr;
+                        ctx->on_close = nullptr;
+                    }
                     m_sockets.erase(it);
                     release_context(ctx);
                 }

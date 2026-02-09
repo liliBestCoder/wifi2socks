@@ -58,25 +58,33 @@ struct SocketContext {
     
     std::atomic<int> ref_count;         
 
-    SocketContext() {
+    SocketContext() : ref_count(0) {
         magic = MAGIC_VAL;
-        memset(&read_io, 0, sizeof(read_io));
+        
+        // Zero out OVERLAPPED part of IO_CONTEXTs
+        memset(&read_io.overlapped, 0, sizeof(OVERLAPPED));
         read_io.type = IO_READ;
-        memset(&write_io, 0, sizeof(write_io)); // NEW
-        write_io.type = IO_WRITE;               // NEW
-        memset(&connect_io, 0, sizeof(connect_io));
+        read_io.sock = INVALID_SOCKET;
+        
+        memset(&write_io.overlapped, 0, sizeof(OVERLAPPED));
+        write_io.type = IO_WRITE;
+        write_io.sock = INVALID_SOCKET;
+        
+        memset(&connect_io.overlapped, 0, sizeof(OVERLAPPED));
         connect_io.type = IO_CONNECT;
+        connect_io.sock = INVALID_SOCKET;
+
         read_pending = false;
-        write_pending = false;                  // NEW
+        write_pending = false;
         paused = false;
         sock = INVALID_SOCKET;
-        ref_count = 0;
         
         is_udp = false;
         memset(buffer, 0, sizeof(buffer));
         wsaBuf.buf = buffer;
-        wsaBuf.len = 4096;
-        wsaWriteBuf.buf = NULL; wsaWriteBuf.len = 0; // NEW
+        wsaBuf.len = sizeof(buffer);
+        wsaWriteBuf.buf = NULL;
+        wsaWriteBuf.len = 0;
         memset(&remote_addr, 0, sizeof(remote_addr));
         remote_addr_len = sizeof(remote_addr);
     }
