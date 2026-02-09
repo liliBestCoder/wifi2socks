@@ -169,10 +169,10 @@ void close_udp_session_internal(UdpSession* sess) {
 
         worker->queue_task([worker, s1, s2, sess]() {
             if (s1 != INVALID_SOCKET) {
-                worker->remove_socket(s1, [s1]() { closesocket(s1); });
+                worker->remove_socket(s1);
             }
             if (s2 != INVALID_SOCKET) {
-                worker->remove_socket(s2, [s2]() { closesocket(s2); });
+                worker->remove_socket(s2);
             }
             delete sess;
         });

@@ -37,31 +37,32 @@ struct SocketContext {
     
     // Callbacks
     std::function<void(char*, int, sockaddr_in*)> on_read;
-    std::function<void(int)> on_write; // Changed: takes bytes transferred (or -1/0 for error)
+    std::function<void(int)> on_write; 
     std::function<void()> on_close; 
+    std::function<void()> on_remove_done; // Callback for when context is finally deleted
     
     IO_CONTEXT read_io;    
-    IO_CONTEXT write_io;   // NEW
+    IO_CONTEXT write_io;   
     IO_CONTEXT connect_io; 
     
     bool read_pending;     
-    bool write_pending;    // NEW
+    bool write_pending;    
     bool paused;           
+    bool closing;          // Scheme A: Mark for deletion
     
     // UDP Support
     bool is_udp;
     char buffer[4096];
     WSABUF wsaBuf;
-    WSABUF wsaWriteBuf;    // NEW
+    WSABUF wsaWriteBuf;    
     sockaddr_in remote_addr;
     int remote_addr_len;
     
-    std::atomic<int> ref_count;         
+    int pending_io;        // Number of outstanding overlapped operations
 
-    SocketContext() : ref_count(0) {
+    SocketContext() : pending_io(0), closing(false) {
         magic = MAGIC_VAL;
         
-        // Zero out OVERLAPPED part of IO_CONTEXTs
         memset(&read_io.overlapped, 0, sizeof(OVERLAPPED));
         read_io.type = IO_READ;
         read_io.sock = INVALID_SOCKET;
