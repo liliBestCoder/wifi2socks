@@ -16,7 +16,9 @@
 #pragma comment(lib, "iphlpapi.lib")
 
 WinPkFilterDriver::WinPkFilterDriver()
-    : m_adapter_handle(nullptr), m_wait_event(nullptr), m_running(false) {
+    : m_adapter_handle(nullptr), m_wait_event(nullptr), m_running(false), m_tx_running(false) {
+    m_tx_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+
     // Allocate batch read request
     m_read_request = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
     m_read_request->dwPacketsNumber = BATCH_SIZE;
@@ -43,6 +45,7 @@ WinPkFilterDriver::WinPkFilterDriver()
 
 WinPkFilterDriver::~WinPkFilterDriver() {
     stop();
+    if (m_tx_event) CloseHandle(m_tx_event);
 
     // Cleanup buffers
     for (int i = 0; i < BATCH_SIZE; ++i) {
@@ -113,6 +116,8 @@ bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler han
     if (!m_ndis_api.SetAdapterMode(&mode)) return false;
 
     m_running = true;
+    m_tx_running = true;
+    m_tx_thread = std::thread(&WinPkFilterDriver::tx_run, this);
     m_worker_thread = std::thread(&WinPkFilterDriver::run, this);
     return true;
 }
@@ -172,6 +177,8 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
     }
 
     m_running = true;
+    m_tx_running = true;
+    m_tx_thread = std::thread(&WinPkFilterDriver::tx_run, this);
     m_worker_thread = std::thread(&WinPkFilterDriver::run, this);
     LOG_INFO("[Driver] Batch worker thread started.");
     return true;
@@ -179,8 +186,13 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
 
 void WinPkFilterDriver::stop() {
     m_running = false;
+    m_tx_running = false;
     if (m_wait_event) SetEvent(m_wait_event);
+    if (m_tx_event) SetEvent(m_tx_event);
+
     if (m_worker_thread.joinable()) m_worker_thread.join();
+    if (m_tx_thread.joinable()) m_tx_thread.join();
+
     if (m_adapter_handle) {
         ADAPTER_MODE mode = { m_adapter_handle, 0 };
         m_ndis_api.SetAdapterMode(&mode);
@@ -191,6 +203,46 @@ void WinPkFilterDriver::stop() {
     m_on_before_batch = nullptr;
     m_on_after_batch = nullptr;
     m_batch_handler = nullptr;
+}
+
+void WinPkFilterDriver::tx_run() {
+    while (m_tx_running) {
+        WaitForSingleObject(m_tx_event, INFINITE);
+        if (!m_tx_running) break;
+
+        std::vector<std::vector<Packet>> local_queue;
+        {
+            std::lock_guard<std::mutex> lock(m_tx_mtx);
+            local_queue.swap(m_tx_queue);
+        }
+
+        if (local_queue.empty()) continue;
+
+        std::lock_guard<std::mutex> lock(m_write_mutex);
+        m_write_request->hAdapterHandle = m_adapter_handle;
+
+        for (auto& packets : local_queue) {
+            size_t processed = 0;
+            while (processed < packets.size()) {
+                size_t current_batch = (std::min)(packets.size() - processed, (size_t)BATCH_SIZE);
+                m_write_request->dwPacketsNumber = (DWORD)current_batch;
+                m_write_request->dwPacketsSuccess = 0;
+
+                for (size_t i = 0; i < current_batch; ++i) {
+                    auto& p = packets[processed + i];
+                    PINTERMEDIATE_BUFFER buf = m_write_buffers[i];
+                    size_t clen = (std::min)(p.data.size(), (size_t)MAX_ETHER_FRAME);
+                    memcpy(buf->m_IBuffer, p.data.data(), clen);
+                    buf->m_Length = (ULONG)clen;
+                    buf->m_dwDeviceFlags = PACKET_FLAG_ON_SEND;
+                    m_write_request->EthPacket[i].Buffer = buf;
+                }
+
+                m_ndis_api.SendPacketsToAdapter(m_write_request);
+                processed += current_batch;
+            }
+        }
+    }
 }
 
 void WinPkFilterDriver::run() {
@@ -287,30 +339,11 @@ bool WinPkFilterDriver::send_to_adapter(const char* packet, size_t length) {
 bool WinPkFilterDriver::send_packets_to_adapter(std::vector<Packet>&& packets) {
     if (!m_adapter_handle || packets.empty()) return false;
 
-    std::lock_guard<std::mutex> lock(m_write_mutex);
-    m_write_request->hAdapterHandle = m_adapter_handle;
-    
-    size_t processed = 0;
-    while (processed < packets.size()) {
-        size_t current_batch = (std::min)(packets.size() - processed, (size_t)BATCH_SIZE);
-        m_write_request->dwPacketsNumber = (DWORD)current_batch;
-        m_write_request->dwPacketsSuccess = 0;
-
-        for (size_t i = 0; i < current_batch; ++i) {
-            auto& p = packets[processed + i];
-            PINTERMEDIATE_BUFFER buf = m_write_buffers[i];
-            size_t clen = (std::min)(p.data.size(), (size_t)MAX_ETHER_FRAME);
-            memcpy(buf->m_IBuffer, p.data.data(), clen);
-            buf->m_Length = (ULONG)clen;
-            buf->m_dwDeviceFlags = PACKET_FLAG_ON_SEND;
-            m_write_request->EthPacket[i].Buffer = buf;
-        }
-
-        if (!m_ndis_api.SendPacketsToAdapter(m_write_request)) {
-            // If batch fails, we don't have much to do but continue or abort
-        }
-        processed += current_batch;
+    {
+        std::lock_guard<std::mutex> lock(m_tx_mtx);
+        m_tx_queue.push_back(std::move(packets));
     }
+    SetEvent(m_tx_event);
     return true;
 }
 

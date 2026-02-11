@@ -166,7 +166,15 @@ int main() {
     uint64_t last_cleanup = 0;
     uint64_t last_keepalive = 0;
     uint64_t last_stats = 0;
+    size_t peak_q_size = 0;
+
     while (true) {
+        // Monitor peak queue size BEFORE processing
+        size_t current_q_size = MainDispatcher::instance().get_queue_size();
+        if (current_q_size > peak_q_size) {
+            peak_q_size = current_q_size;
+        }
+
         // All LwIP calls happen here in the Main thread, no lock needed.
         MainDispatcher::instance().process_pending();
         sys_check_timeouts();
@@ -176,11 +184,11 @@ int main() {
 
         uint64_t now = GetTickCount64();
 
-        // Monitor main thread task queue
+        // Report stats every 1 second
         if (now - last_stats > 1000) {
-            size_t q_size = MainDispatcher::instance().get_queue_size();
-            if (q_size > 100) {
-                LOG_INFO("[CORE] Main thread queue size: %llu", (unsigned long long)q_size);
+            if (peak_q_size > 0) {
+                LOG_INFO("[CORE] Main thread queue peak size (last 1s): %llu", (unsigned long long)peak_q_size);
+                peak_q_size = 0; 
             }
             last_stats = now;
         }
@@ -197,7 +205,6 @@ int main() {
         }
 
         // Wait for tasks or 1ms timeout. 
-        // If process_pending swapped many tasks, we loop again immediately instead of waiting.
         WaitForSingleObject(MainDispatcher::instance().get_event_handle(), 1);
     }
     return 0;

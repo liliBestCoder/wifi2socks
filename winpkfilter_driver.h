@@ -69,6 +69,7 @@ public:
 
 private:
     void run();
+    void tx_run();
 
     CNdisApi m_ndis_api;
     HANDLE m_adapter_handle;
@@ -80,7 +81,13 @@ private:
     std::function<void()> m_on_after_batch;
 
     std::thread m_worker_thread;
+    std::thread m_tx_thread;
     bool m_running;
+    bool m_tx_running;
+
+    HANDLE m_tx_event;
+    std::mutex m_tx_mtx;
+    std::vector<std::vector<Packet>> m_tx_queue;
 
     static const int BATCH_SIZE = 512;
     PETH_M_REQUEST m_read_request;
