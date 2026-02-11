@@ -105,9 +105,6 @@ int main() {
     set_winpkfilter_driver(&pk_driver);
     
     WorkerPool::instance().init(8);
-    WorkerPool::instance().for_each_worker([](Worker* w) {
-        w->set_periodic_callback(proxy_tcp_periodic_check);
-    });
     lwip_init();
 
     ip4_addr_t ip, mask, gw;
@@ -168,6 +165,7 @@ int main() {
 
     uint64_t last_cleanup = 0;
     uint64_t last_keepalive = 0;
+    uint64_t last_stats = 0;
     while (true) {
         // All LwIP calls happen here in the Main thread, no lock needed.
         MainDispatcher::instance().process_pending();
@@ -177,6 +175,16 @@ int main() {
         flush_outbound_packets();
 
         uint64_t now = GetTickCount64();
+
+        // Monitor main thread task queue
+        if (now - last_stats > 1000) {
+            size_t q_size = MainDispatcher::instance().get_queue_size();
+            if (q_size > 100) {
+                LOG_INFO("[CORE] Main thread queue size: %llu", (unsigned long long)q_size);
+            }
+            last_stats = now;
+        }
+
         // Cleanup NAT table every 10 seconds
         if (now - last_cleanup > 10000) {
             NatTable::instance().cleanup(300000); 

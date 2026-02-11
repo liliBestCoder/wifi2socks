@@ -16,6 +16,11 @@ public:
     // Main thread calls this to execute pending tasks
     void process_pending();
 
+    size_t get_queue_size() {
+        std::lock_guard<std::mutex> lock(m_mtx);
+        return m_queue.size();
+    }
+
     // Get the event handle for the LwIP thread to wait on
     HANDLE get_event_handle() { return m_event; }
 
