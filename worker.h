@@ -39,6 +39,7 @@ struct SocketContext {
     std::function<void(char*, int, sockaddr_in*)> on_read;
     std::function<void(int)> on_write; 
     std::function<void()> on_close; 
+    std::function<void()> on_tick; // Added for periodic flush
     std::function<void()> on_remove_done; // Callback for when context is finally deleted
     
     IO_CONTEXT read_io;    
@@ -59,8 +60,9 @@ struct SocketContext {
     int remote_addr_len;
     
     std::atomic<int> pending_io;        // Number of outstanding overlapped operations
+    void* user_data;                    // User-defined context data
 
-    SocketContext() : pending_io(0), closing(false) {
+    SocketContext() : pending_io(0), closing(false), user_data(nullptr) {
         magic = MAGIC_VAL;
         
         memset(&read_io.overlapped, 0, sizeof(OVERLAPPED));
@@ -120,6 +122,9 @@ public:
 
     void queue_task(std::function<void()> task);
 
+    void set_periodic_callback(std::function<void(void*)> cb);
+    void set_socket_user_data(SOCKET s, void* user_data);
+
 private:
     void loop();
     void post_read(SocketContext* ctx);
@@ -136,6 +141,7 @@ private:
     std::atomic<bool> m_running;
     
     LPFN_CONNECTEX m_lpfnConnectEx;
+    std::function<void(void*)> m_periodic_callback;
 };
 
 class WorkerPool {

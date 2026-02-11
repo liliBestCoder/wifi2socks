@@ -22,6 +22,10 @@
 #include <string>
 #include <algorithm>
 #include <memory>
+#include <chrono>
+
+const size_t MAX_BATCH_SIZE = 64 * 1024; // 64KB
+const int MAX_DELAY_MS = 10; // 10ms
 
 struct TcpCtx;
 typedef std::shared_ptr<TcpCtx> TcpCtxPtr;
@@ -63,6 +67,10 @@ struct TcpCtx : public std::enable_shared_from_this<TcpCtx> {
     size_t upstream_offset;
     bool upstream_busy;
 
+    // Downlink Batching (Proxy -> Main Thread)
+    std::vector<uint8_t> downstream_buffer;
+    std::chrono::steady_clock::time_point last_downstream_flush_time;
+
     std::mutex data_mtx;
     Worker* worker;
 
@@ -74,6 +82,8 @@ struct TcpCtx : public std::enable_shared_from_this<TcpCtx> {
                client_ip(0), client_port(0), is_direct(false) {
         sni_buffer.reserve(g_config.max_sni_len);
         upstream_data.reserve(8192); 
+        downstream_buffer.reserve(MAX_BATCH_SIZE);
+        last_downstream_flush_time = std::chrono::steady_clock::now();
     }
 };
 
@@ -82,6 +92,30 @@ void handle_proxy_read(TcpCtxPtr ctx);
 void handle_proxy_write(TcpCtxPtr ctx, int bytes);
 void connect_to_proxy_async(TcpCtxPtr ctx);
 void try_send_upstream(TcpCtxPtr ctx); 
+
+void flush_downstream_buffer(TcpCtxPtr ctx) {
+    if (ctx->downstream_buffer.empty()) return;
+
+    MainDispatcher::instance().queue_task([ctx, d = std::move(ctx->downstream_buffer)]() mutable {
+        if (ctx->client_pcb && !ctx->closed) {
+            ctx->tx_queue.push_back(std::move(d));
+            try_send_downstream(ctx);
+        }
+    });
+
+    ctx->downstream_buffer.clear();
+    ctx->downstream_buffer.reserve(MAX_BATCH_SIZE);
+    ctx->last_downstream_flush_time = std::chrono::steady_clock::now();
+}
+
+void check_and_flush_downstream(TcpCtxPtr ctx) {
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - ctx->last_downstream_flush_time).count();
+
+    if (ctx->downstream_buffer.size() >= MAX_BATCH_SIZE || (elapsed >= MAX_DELAY_MS && !ctx->downstream_buffer.empty())) {
+        flush_downstream_buffer(ctx);
+    }
+}
 
 // Cleanup function running on Main Thread
 void final_cleanup_on_main(void* arg) {
@@ -222,9 +256,6 @@ err_t tcp_client_sent(void* arg, struct tcp_pcb* tpcb, u16_t len) {
 void handle_proxy_read(TcpCtxPtr ctx) {
     if (ctx->closed) return;
     
-    std::vector<uint8_t> batched_data;
-    batched_data.reserve(256 * 1024); 
-
     char buf[65536];
     bool socket_closed = false;
 
@@ -232,8 +263,8 @@ void handle_proxy_read(TcpCtxPtr ctx) {
         int r = recv(ctx->proxy_socket, buf, sizeof(buf), 0);
         if (r > 0) {
             TrafficManager::instance().report_proxy_rx(r, ctx->is_direct);
-            batched_data.insert(batched_data.end(), (uint8_t*)buf, (uint8_t*)buf + r);
-            if (batched_data.size() >= 256 * 1024) break; 
+            ctx->downstream_buffer.insert(ctx->downstream_buffer.end(), (uint8_t*)buf, (uint8_t*)buf + r);
+            if (ctx->downstream_buffer.size() >= MAX_BATCH_SIZE) break; 
         } else if (r == 0) {
             socket_closed = true;
             break;
@@ -246,16 +277,10 @@ void handle_proxy_read(TcpCtxPtr ctx) {
         }
     }
 
-    if (!batched_data.empty()) {
-        MainDispatcher::instance().queue_task([ctx, d = std::move(batched_data)]() mutable {
-            if (ctx->client_pcb) {
-                ctx->tx_queue.push_back(std::move(d));
-                try_send_downstream(ctx);
-            }
-        });
-    }
+    check_and_flush_downstream(ctx);
 
     if (socket_closed) {
+        flush_downstream_buffer(ctx);
         ctx->worker->remove_socket(ctx->proxy_socket, nullptr); 
         ctx->proxy_socket = INVALID_SOCKET; 
         
@@ -377,6 +402,7 @@ void handle_handshake_read(TcpCtxPtr ctx) {
                     [ctx](int bytes) { handle_proxy_write(ctx, bytes); },
                     [ctx]() { close_tcp_ctx(ctx); }
                 );
+                ctx->worker->set_socket_user_data(ctx->proxy_socket, new std::shared_ptr<TcpCtx>(ctx));
             } else {
                 close_tcp_ctx(ctx);
             }
@@ -430,6 +456,7 @@ void handle_proxy_connect(TcpCtxPtr ctx) {
             [ctx](int bytes) { handle_proxy_write(ctx, bytes); },
             [ctx]() { close_tcp_ctx(ctx); }
         );
+        ctx->worker->set_socket_user_data(ctx->proxy_socket, new std::shared_ptr<TcpCtx>(ctx));
         return;
     }
 
@@ -645,4 +672,12 @@ err_t tcp_proxy_accept(void* arg, struct tcp_pcb* newpcb, err_t err) {
         if (ptr) { auto ctx = *ptr; ctx->client_pcb = NULL; close_tcp_ctx(ctx); }
     });
     return ERR_OK;
+}
+
+void proxy_tcp_periodic_check(void* user_data) {
+    if (!user_data) return;
+    auto ctx = *(std::shared_ptr<TcpCtx>*)user_data;
+    if (ctx) {
+        check_and_flush_downstream(ctx);
+    }
 }

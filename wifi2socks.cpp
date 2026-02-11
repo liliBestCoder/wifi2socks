@@ -105,6 +105,9 @@ int main() {
     set_winpkfilter_driver(&pk_driver);
     
     WorkerPool::instance().init(8);
+    WorkerPool::instance().for_each_worker([](Worker* w) {
+        w->set_periodic_callback(proxy_tcp_periodic_check);
+    });
     lwip_init();
 
     ip4_addr_t ip, mask, gw;

@@ -273,6 +273,21 @@ void Worker::resume_read(SOCKET s) {
     PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
 }
 
+void Worker::set_periodic_callback(std::function<void(void*)> cb) {
+    m_periodic_callback = cb;
+}
+
+void Worker::set_socket_user_data(SOCKET s, void* user_data) {
+    std::lock_guard<std::mutex> lock(m_mtx);
+    m_task_queue.push_back([this, s, user_data]() {
+        auto it = m_sockets.find(s);
+        if (it != m_sockets.end()) {
+            it->second->user_data = user_data;
+        }
+    });
+    PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
+}
+
 void Worker::loop() {
     DWORD bytesTransferred;
     ULONG_PTR completionKey;
@@ -294,6 +309,15 @@ void Worker::loop() {
 
         BOOL ret = GetQueuedCompletionStatus(m_iocp, &bytesTransferred, &completionKey, &overlapped, 10);
 
+        // Periodic Callback for all sockets
+        if (m_periodic_callback) {
+            for (auto const& [sock, ctx] : m_sockets) {
+                if (ctx && ctx->user_data && !ctx->closing) {
+                    try { m_periodic_callback(ctx->user_data); } catch (...) {}
+                }
+            }
+        }
+
         if (overlapped != NULL) {
             IO_CONTEXT* ioCtx = (IO_CONTEXT*)overlapped;
 
@@ -312,6 +336,7 @@ void Worker::loop() {
                     // If no IO was pending, delete immediately
                     if (ctx->pending_io == 0) {
                         if (ctx->on_remove_done) ctx->on_remove_done();
+                        if (ctx->user_data) delete (std::shared_ptr<void>*)ctx->user_data;
                         delete ctx;
                     }
                 } else {
@@ -379,6 +404,7 @@ void Worker::loop() {
             // If the connection was marked for closing AND all pending IO have returned
             if (ctx->closing && ctx->pending_io == 0) {
                 if (ctx->on_remove_done) ctx->on_remove_done();
+                if (ctx->user_data) delete (std::shared_ptr<void>*)ctx->user_data;
                 delete ctx;
             }
         }
