@@ -68,23 +68,31 @@ uint16_t ip_chksum_simple(void* dataptr, int len) {
     return (uint16_t)~(acc);
 }
 
-void recalculate_tcp_checksum(struct ip_hdr* ip, uint8_t* tcp_base, int tcp_len) {
-    *(uint16_t*)(tcp_base + 16) = 0;
-    uint32_t sum = 0;
-    uint16_t* ip_src = (uint16_t*)&ip->src.addr;
-    sum += ip_src[0]; sum += ip_src[1];
-    uint16_t* ip_dst = (uint16_t*)&ip->dest.addr;
-    sum += ip_dst[0]; sum += ip_dst[1];
-    sum += ::htons(IP_PROTO_TCP);
-    sum += ::htons((uint16_t)tcp_len);
-    uint32_t raw_sum = 0;
-    uint16_t* ptr = (uint16_t*)tcp_base;
-    int l = tcp_len;
-    while (l > 1) { raw_sum += *ptr++; l -= 2; }
-    if (l > 0) { raw_sum += (uint16_t)(*(const uint8_t*)ptr); }
-    sum += raw_sum;
-    while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
-    *(uint16_t*)(tcp_base + 16) = (uint16_t)~sum;
+void fix_checksum(struct pbuf *p, struct ip_hdr *ip) {
+
+    u16_t eth_len = 14;            // 以太网头长度
+    u16_t ip_hdr_len = IPH_HL(ip) * 4; // IP 头长度
+    u16_t tcp_len = ntohs(IPH_LEN(ip)) - ip_hdr_len; // TCP 段总长度
+
+    // A. 必须操作：先将 TCP 首部中的旧校验和字段置零
+    // TCP 校验和在 offset 16 处（2字节）
+    pbuf_put_at(p, eth_len + ip_hdr_len + 16, 0);
+    pbuf_put_at(p, eth_len + ip_hdr_len + 17, 0);
+
+    // B. 移动指针：让 pbuf 的数据起始点对齐到 TCP 首部
+    pbuf_remove_header(p, eth_len + ip_hdr_len);
+
+    // C. 调用计算：此时函数会遍历 pbuf 链表，并加上伪首部信息
+    u16_t new_chksum = ip4_chksum_pseudo(p, IP_PROTO_TCP, tcp_len,
+                                         &ip->src, &ip->dest);
+
+    // D. 还原指针：把隐藏的头部找回来
+    pbuf_add_header(p, eth_len + ip_hdr_len);
+
+    // E. 填回结果：将计算出的校验和填入 TCP 头部
+    // 注意：new_chksum 已经是网络字节序，按字节写入即可
+    pbuf_put_at(p, eth_len + ip_hdr_len + 16, (u8_t)(new_chksum & 0xFF));
+    pbuf_put_at(p, eth_len + ip_hdr_len + 17, (u8_t)(new_chksum >> 8));
 }
 
 void recalculate_udp_checksum(struct ip_hdr* ip, uint8_t* udp_base, int udp_len) {
@@ -129,9 +137,24 @@ err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
                     if (entry.original_dst_ip != 0) {
                         ip->src.addr = entry.original_dst_ip;
                         *(uint16_t*)tcp_base = htons(entry.original_dst_port);
+                        
+                        // Sync changes to pbuf for fix_checksum
+                        u16_t ip_off = 14;
+                        u16_t tcp_off = ip_off + IPH_HL(ip) * 4;
+                        pbuf_put_at(p, ip_off + 12, ((u8_t*)&ip->src.addr)[0]);
+                        pbuf_put_at(p, ip_off + 13, ((u8_t*)&ip->src.addr)[1]);
+                        pbuf_put_at(p, ip_off + 14, ((u8_t*)&ip->src.addr)[2]);
+                        pbuf_put_at(p, ip_off + 15, ((u8_t*)&ip->src.addr)[3]);
+                        pbuf_put_at(p, tcp_off + 0, tcp_base[0]);
+                        pbuf_put_at(p, tcp_off + 1, tcp_base[1]);
+
+                        fix_checksum(p, ip);
+                        
+                        // Copy TCP checksum back to rp->m_IBuffer
+                        pbuf_copy_partial(p, tcp_base + 16, 2, tcp_off + 16);
+
                         IPH_CHKSUM_SET(ip, 0);
                         IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
-                        recalculate_tcp_checksum(ip, tcp_base, ntohs(IPH_LEN(ip)) - IPH_HL(ip) * 4);
                     }
                 }
             }
@@ -316,11 +339,11 @@ void process_ethernet_frame(const char* packet, size_t length, bool outbound) {
 
                 ip->dest.addr = lwip_ip.addr;
 
-                *(uint16_t*)(tcp_ptr + 2) = htons(g_config.lwip_listen_port);
+                                *(uint16_t*)(tcp_ptr + 2) = htons(g_config.lwip_listen_port);
 
-                                //IPH_CHKSUM_SET(ip, 0); IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
+                                                //IPH_CHKSUM_SET(ip, 0); IPH_CHKSUM_SET(ip, ip_chksum_simple(ip, IPH_HL(ip) * 4));
 
-                                //recalculate_tcp_checksum(ip, tcp_ptr, ip_len - IPH_HL(ip) * 4);
+                                                //fix_checksum(p, ip);
 
             }
 
