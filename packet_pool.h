@@ -3,6 +3,7 @@
 #include <mutex>
 #include <cstdint>
 #include <memory>
+#include <windows.h>
 
 #ifndef JUMBO_FRAME_SUPPORTED
 #define JUMBO_FRAME_SUPPORTED 1

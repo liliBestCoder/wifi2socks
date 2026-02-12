@@ -147,8 +147,9 @@ int main() {
             }
 
             if (!inbound_pkts.empty()) {
-                MainDispatcher::instance().queue_task([pkts = std::move(inbound_pkts)]() {
-                    for (const auto& p : pkts) {
+                auto pkts_ptr = std::make_shared<std::vector<WinPkFilterDriver::Packet>>(std::move(inbound_pkts));
+                MainDispatcher::instance().queue_task([pkts_ptr]() {
+                    for (const auto& p : *pkts_ptr) {
                         process_ethernet_frame((const char*)p.data->data, p.data->length, false);
                     }
                 });
