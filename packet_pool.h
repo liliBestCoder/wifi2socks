@@ -1,9 +1,18 @@
 #pragma once
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <iphlpapi.h>
+
 #include <vector>
 #include <mutex>
 #include <cstdint>
 #include <memory>
-#include <windows.h>
 
 #ifndef JUMBO_FRAME_SUPPORTED
 #define JUMBO_FRAME_SUPPORTED 1
