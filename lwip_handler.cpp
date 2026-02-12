@@ -27,6 +27,7 @@
 #include "lwip/prot/tcp.h"
 #include "lwip/prot/udp.h"
 #include "lwip/raw.h"
+#include "lwip/inet_chksum.h"
 
 struct netif g_netif;
 uint8_t HOST_MAC[6] = { 0 }; 
