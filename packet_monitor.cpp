@@ -4,7 +4,7 @@
 
 PacketMonitor& PacketMonitor::instance() {
     static PacketMonitor monitor;
-    return m_running ? monitor : (monitor.m_running = false, monitor);
+    return monitor;
 }
 
 PacketMonitor::PacketMonitor() : m_running(false) {}

@@ -29,7 +29,7 @@ class PacketMonitor {
 public:
     static PacketMonitor& instance();
 
-    void start(const std::string& pipe_name = "\.\pipe\wifi2socks_monitor");
+    void start(const std::string& pipe_name = "\\\\.\\pipe\\wifi2socks_monitor");
     void stop();
     void publish(const char* data, size_t len);
 
