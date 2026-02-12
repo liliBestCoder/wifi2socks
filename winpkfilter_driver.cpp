@@ -115,6 +115,10 @@ bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler han
     m_wait_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (!m_ndis_api.SetPacketEvent(m_adapter_handle, m_wait_event)) return false;
 
+    // Increase driver internal buffer size (RX-Ring equivalent) to 4096 packets
+    // This prevents packet drops in the kernel if user-mode is briefly busy.
+    m_ndis_api.SetAdapterBuffSize(m_adapter_handle, 4096);
+
     ADAPTER_MODE mode;
     mode.dwFlags = MSTCP_FLAG_SENT_RECEIVE | MSTCP_FLAG_SENT_TUNNEL | MSTCP_FLAG_RECV_TUNNEL;
     mode.hAdapterHandle = m_adapter_handle;
@@ -180,6 +184,9 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
         LOG_ERROR("[Driver] Failed to set packet event.");
         return false;
     }
+
+    // Increase driver internal buffer size (RX-Ring equivalent) to 4096 packets
+    m_ndis_api.SetAdapterBuffSize(m_adapter_handle, 4096);
 
     ADAPTER_MODE mode;
     mode.dwFlags = MSTCP_FLAG_SENT_RECEIVE | MSTCP_FLAG_SENT_TUNNEL | MSTCP_FLAG_RECV_TUNNEL;
