@@ -16,6 +16,7 @@
 #include "dhcp_server.h"
 #include "logger.h"
 #include "packet_pool.h"
+#include "packet_monitor.h"
 #include <vector>
 #include <iostream>
 #include <stdarg.h>
@@ -138,6 +139,10 @@ err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
     }
     
     g_outbound_batch.push_back({ RawPacketPtr(rp), true });
+    
+    // Pipeline monitoring
+    PacketMonitor::instance().publish((const char*)rp->m_IBuffer, rp->m_Length);
+
     return ERR_OK;
 }
 

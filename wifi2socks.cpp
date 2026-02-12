@@ -16,6 +16,7 @@ LogLevel g_log_level = LOG_LEVEL_INFO;
 
 #include "winpkfilter_driver.h"
 #include "packet_pool.h"
+#include "packet_monitor.h"
 #include "dhcp_server.h"
 #include "worker.h"
 #include "lwip/etharp.h"
@@ -105,6 +106,7 @@ int main() {
 
     // IMPORTANT: PacketPool must be initialized before the driver starts
     PacketPool::instance().init(8192);
+    PacketMonitor::instance().start();
 
     std::string adapter_name = find_adapter_by_ip(g_config.tap_ip);
     static WinPkFilterDriver pk_driver;
@@ -140,6 +142,9 @@ int main() {
             inbound_pkts.reserve(packets.size());
 
             for (auto& p : packets) {
+                // Pipeline monitoring
+                PacketMonitor::instance().publish((const char*)p.data->m_IBuffer, p.data->m_Length);
+
                 if (p.outbound) {
                     // Zero-copy: Pass pooled buffer directly
                     process_ethernet_frame((const char*)p.data->m_IBuffer, p.data->m_Length, true);
