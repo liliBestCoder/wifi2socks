@@ -19,6 +19,7 @@
 // WinPkFilter SDK headers (Original ones restored)
 #include "Common.h"
 #include "ndisapi.h"
+#include "packet_pool.h"
 
 // Combined flags for convenience if not in older Common.h
 #ifndef MSTCP_FLAG_TUNNEL
@@ -34,7 +35,7 @@ public:
 
     struct Packet {
 
-        std::vector<char> data;
+        RawPacketPtr data;
 
         bool outbound;
 

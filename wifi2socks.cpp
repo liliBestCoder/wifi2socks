@@ -15,6 +15,7 @@
 LogLevel g_log_level = LOG_LEVEL_INFO;
 
 #include "winpkfilter_driver.h"
+#include "packet_pool.h"
 #include "dhcp_server.h"
 #include "worker.h"
 #include "lwip/etharp.h"
@@ -104,6 +105,7 @@ int main() {
     static WinPkFilterDriver pk_driver;
     set_winpkfilter_driver(&pk_driver);
     
+    PacketPool::instance().init(8192);
     WorkerPool::instance().init(8);
     lwip_init();
 
@@ -137,7 +139,7 @@ int main() {
                 if (p.outbound) {
                     // 出站包（来自宿主机协议栈）在驱动线程立即处理并转发
                     // 避免排队延迟，且出站路径不触及 LwIP 状态，是线程安全的
-                    process_ethernet_frame(p.data.data(), p.data.size(), true);
+                    process_ethernet_frame((const char*)p.data->data, p.data->length, true);
                 } else {
                     // 入站包（来自手机/客户端）收集起来批量交给主线程处理
                     inbound_pkts.push_back(std::move(p));
@@ -147,7 +149,7 @@ int main() {
             if (!inbound_pkts.empty()) {
                 MainDispatcher::instance().queue_task([pkts = std::move(inbound_pkts)]() {
                     for (const auto& p : pkts) {
-                        process_ethernet_frame(p.data.data(), p.data.size(), false);
+                        process_ethernet_frame((const char*)p.data->data, p.data->length, false);
                     }
                 });
             }

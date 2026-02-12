@@ -231,8 +231,8 @@ void WinPkFilterDriver::tx_run() {
                 for (size_t i = 0; i < current_batch; ++i) {
                     auto& p = packets[processed + i];
                     PINTERMEDIATE_BUFFER buf = m_write_buffers[i];
-                    size_t clen = (std::min)(p.data.size(), (size_t)MAX_ETHER_FRAME);
-                    memcpy(buf->m_IBuffer, p.data.data(), clen);
+                    size_t clen = (std::min)((size_t)p.data->length, (size_t)MAX_ETHER_FRAME);
+                    memcpy(buf->m_IBuffer, p.data->data, clen);
                     buf->m_Length = (ULONG)clen;
                     buf->m_dwDeviceFlags = PACKET_FLAG_ON_SEND;
                     m_write_request->EthPacket[i].Buffer = buf;
@@ -269,14 +269,24 @@ void WinPkFilterDriver::run() {
                 for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
                     PINTERMEDIATE_BUFFER buf = m_read_request->EthPacket[i].Buffer;
                     bool outbound = (buf->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
-                    packets.push_back({ std::vector<char>((const char*)buf->m_IBuffer, (const char*)buf->m_IBuffer + buf->m_Length), outbound });
+                    RawPacket* rp = PacketPool::instance().acquire();
+                    if (rp) {
+                        memcpy(rp->data, buf->m_IBuffer, buf->m_Length);
+                        rp->length = buf->m_Length;
+                        packets.push_back({ RawPacketPtr(rp), outbound });
+                    }
                 }
             } else {
                 // 2. Fallback to single packet reads to fill the batch
                 while (packets.size() < BATCH_SIZE && m_ndis_api.ReadPacket(&single_request)) {
                     PINTERMEDIATE_BUFFER buf = m_read_buffers[0];
                     bool outbound = (buf->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
-                    packets.push_back({ std::vector<char>((const char*)buf->m_IBuffer, (const char*)buf->m_IBuffer + buf->m_Length), outbound });
+                    RawPacket* rp = PacketPool::instance().acquire();
+                    if (rp) {
+                        memcpy(rp->data, buf->m_IBuffer, buf->m_Length);
+                        rp->length = buf->m_Length;
+                        packets.push_back({ RawPacketPtr(rp), outbound });
+                    }
                 }
             }
 
@@ -286,7 +296,7 @@ void WinPkFilterDriver::run() {
                 } else {
                     if (m_on_before_batch) m_on_before_batch();
                     for (const auto& p : packets) {
-                        if (m_packet_handler) m_packet_handler(p.data.data(), p.data.size(), p.outbound);
+                        if (m_packet_handler) m_packet_handler((const char*)p.data->data, p.data->length, p.outbound);
                     }
                     if (m_on_after_batch) m_on_after_batch();
                 }

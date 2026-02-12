@@ -15,6 +15,7 @@
 #include "proxy_udp.h"
 #include "dhcp_server.h"
 #include "logger.h"
+#include "packet_pool.h"
 #include <vector>
 #include <iostream>
 #include <stdarg.h>
@@ -107,14 +108,17 @@ void recalculate_udp_checksum(struct ip_hdr* ip, uint8_t* udp_base, int udp_len)
 err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
     if (!g_winpkfilter_driver) return ERR_IF;
     
-    std::vector<char> buf(p->tot_len);
-    pbuf_copy_partial(p, buf.data(), p->tot_len, 0);
+    RawPacket* rp = PacketPool::instance().acquire();
+    if (!rp) return ERR_MEM;
+
+    pbuf_copy_partial(p, rp->data, p->tot_len, 0);
+    rp->length = p->tot_len;
 
     if (p->tot_len >= sizeof(struct eth_hdr)) {
-        struct eth_hdr* eth = (struct eth_hdr*)buf.data();
+        struct eth_hdr* eth = (struct eth_hdr*)rp->data;
         uint16_t type = ntohs(eth->type);
         if (type == ETHTYPE_IP) {
-            struct ip_hdr* ip = (struct ip_hdr*)(buf.data() + sizeof(struct eth_hdr));
+            struct ip_hdr* ip = (struct ip_hdr*)(rp->data + sizeof(struct eth_hdr));
             if (IPH_PROTO(ip) == IP_PROTO_TCP) {
                 uint8_t* tcp_base = (uint8_t*)ip + IPH_HL(ip) * 4;
                 uint16_t src_p = ntohs(*(uint16_t*)tcp_base);
@@ -133,7 +137,7 @@ err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
         }
     }
     
-    g_outbound_batch.push_back({ std::move(buf), true });
+    g_outbound_batch.push_back({ RawPacketPtr(rp), true });
     return ERR_OK;
 }
 
