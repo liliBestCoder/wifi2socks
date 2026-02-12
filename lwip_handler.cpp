@@ -111,14 +111,14 @@ err_t winpkfilter_linkoutput(struct netif* netif, struct pbuf* p) {
     RawPacket* rp = PacketPool::instance().acquire();
     if (!rp) return ERR_MEM;
 
-    pbuf_copy_partial(p, rp->data, p->tot_len, 0);
-    rp->length = p->tot_len;
+    pbuf_copy_partial(p, rp->m_IBuffer, p->tot_len, 0);
+    rp->m_Length = p->tot_len;
 
     if (p->tot_len >= sizeof(struct eth_hdr)) {
-        struct eth_hdr* eth = (struct eth_hdr*)rp->data;
+        struct eth_hdr* eth = (struct eth_hdr*)rp->m_IBuffer;
         uint16_t type = ntohs(eth->type);
         if (type == ETHTYPE_IP) {
-            struct ip_hdr* ip = (struct ip_hdr*)(rp->data + sizeof(struct eth_hdr));
+            struct ip_hdr* ip = (struct ip_hdr*)(rp->m_IBuffer + sizeof(struct eth_hdr));
             if (IPH_PROTO(ip) == IP_PROTO_TCP) {
                 uint8_t* tcp_base = (uint8_t*)ip + IPH_HL(ip) * 4;
                 uint16_t src_p = ntohs(*(uint16_t*)tcp_base);

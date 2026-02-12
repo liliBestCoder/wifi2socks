@@ -57,7 +57,7 @@ std::string find_adapter_by_ip(const std::string& target_ip) {
                         LOG_INFO("MATCH FOUND BY IP: %s", name.c_str());
                         free(pAddresses);
                         // 修正为 \\Device\\ 格式
-                        return "\\\\Device\\\\" + name;
+                        return "\\\\Device\\\\\\" + name;
                     }
                 }
             }
@@ -90,7 +90,9 @@ int main() {
         WiFiAPManager::instance().RegisterListener(&wifi_listener);
         WiFiAPManager::instance().Start();
         LOG_INFO("[CORE] WiFi AP Started.");
-    } catch (...) {}
+    } catch (...) {
+        LOG_ERROR("[CORE] Failed to start WiFi AP.");
+    }
     
     static DhcpServer dhcp_server(g_config.tap_ip);
     g_dhcp_server_ptr = &dhcp_server;
@@ -101,11 +103,13 @@ int main() {
     GeoChecker::instance().init();
     LOG_INFO("[CORE] GeoChecker Initialized.");
 
+    // IMPORTANT: PacketPool must be initialized before the driver starts
+    PacketPool::instance().init(8192);
+
     std::string adapter_name = find_adapter_by_ip(g_config.tap_ip);
     static WinPkFilterDriver pk_driver;
     set_winpkfilter_driver(&pk_driver);
     
-    PacketPool::instance().init(8192);
     WorkerPool::instance().init(8);
     lwip_init();
 
@@ -137,11 +141,9 @@ int main() {
 
             for (auto& p : packets) {
                 if (p.outbound) {
-                    // 出站包（来自宿主机协议栈）在驱动线程立即处理并转发
-                    // 避免排队延迟，且出站路径不触及 LwIP 状态，是线程安全的
-                    process_ethernet_frame((const char*)p.data->data, p.data->length, true);
+                    // Zero-copy: Pass pooled buffer directly
+                    process_ethernet_frame((const char*)p.data->m_IBuffer, p.data->m_Length, true);
                 } else {
-                    // 入站包（来自手机/客户端）收集起来批量交给主线程处理
                     inbound_pkts.push_back(std::move(p));
                 }
             }
@@ -150,7 +152,7 @@ int main() {
                 auto pkts_ptr = std::make_shared<std::vector<WinPkFilterDriver::Packet>>(std::move(inbound_pkts));
                 MainDispatcher::instance().queue_task([pkts_ptr]() {
                     for (const auto& p : *pkts_ptr) {
-                        process_ethernet_frame((const char*)p.data->data, p.data->length, false);
+                        process_ethernet_frame((const char*)p.data->m_IBuffer, p.data->m_Length, false);
                     }
                 });
             }
@@ -172,13 +174,11 @@ int main() {
     size_t peak_q_size = 0;
 
     while (true) {
-        // Monitor peak queue size BEFORE processing
         size_t current_q_size = MainDispatcher::instance().get_queue_size();
         if (current_q_size > peak_q_size) {
             peak_q_size = current_q_size;
         }
 
-        // All LwIP calls happen here in the Main thread, no lock needed.
         MainDispatcher::instance().process_pending();
         sys_check_timeouts();
         udp_check_timeouts();
@@ -187,7 +187,6 @@ int main() {
 
         uint64_t now = GetTickCount64();
 
-        // Report stats every 1 second
         if (now - last_stats > 1000) {
             if (peak_q_size > 0) {
                 LOG_INFO("[CORE] Main thread queue peak size (last 1s): %llu", (unsigned long long)peak_q_size);
@@ -196,18 +195,15 @@ int main() {
             last_stats = now;
         }
 
-        // Cleanup NAT table every 10 seconds
         if (now - last_cleanup > 10000) {
             NatTable::instance().cleanup(300000); 
             last_cleanup = now;
         }
-        // Check WiFi KeepAlive every 1 second
         if (now - last_keepalive > 1000) {
             WiFiAPManager::instance().CheckKeepAlive();
             last_keepalive = now;
         }
 
-        // Wait for tasks or 1ms timeout. 
         WaitForSingleObject(MainDispatcher::instance().get_event_handle(), 1);
     }
     return 0;

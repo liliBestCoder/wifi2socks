@@ -23,23 +23,19 @@ WinPkFilterDriver::WinPkFilterDriver()
     m_read_request = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
     m_read_request->dwPacketsNumber = BATCH_SIZE;
 
-    // Allocate individual buffers for reading
+    // Initialize read buffers array to nullptr
     for (int i = 0; i < BATCH_SIZE; ++i) {
-        m_read_buffers[i] = new INTERMEDIATE_BUFFER();
-        m_read_request->EthPacket[i].Buffer = m_read_buffers[i];
+        m_read_buffers[i] = nullptr;
     }
 
     // Allocate batch write request
     m_write_request = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
     m_write_request->dwPacketsNumber = BATCH_SIZE;
 
-    // Allocate individual buffers for writing
     for (int i = 0; i < BATCH_SIZE; ++i) {
-        m_write_buffers[i] = new INTERMEDIATE_BUFFER();
-        m_write_request->EthPacket[i].Buffer = m_write_buffers[i];
+        m_write_buffers[i] = nullptr; 
     }
 
-    // Allocate single buffer for sending
     m_send_buffer = new INTERMEDIATE_BUFFER();
 }
 
@@ -47,10 +43,11 @@ WinPkFilterDriver::~WinPkFilterDriver() {
     stop();
     if (m_tx_event) CloseHandle(m_tx_event);
 
-    // Cleanup buffers
+    // Return any remaining read buffers to the pool
     for (int i = 0; i < BATCH_SIZE; ++i) {
-        delete m_read_buffers[i];
-        delete m_write_buffers[i];
+        if (m_read_buffers[i]) {
+            PacketPool::instance().release(m_read_buffers[i]);
+        }
     }
     free(m_read_request);
     free(m_write_request);
@@ -75,6 +72,14 @@ bool WinPkFilterDriver::start(const std::string& adapter_name, PacketHandler han
     if (!m_ndis_api.IsDriverLoaded()) {
         LOG_ERROR("WinPkFilter driver not loaded.");
         return false;
+    }
+
+    // Pre-fill read buffers from pool for zero-copy
+    for (int i = 0; i < BATCH_SIZE; ++i) {
+        if (!m_read_buffers[i]) {
+            m_read_buffers[i] = PacketPool::instance().acquire();
+            m_read_request->EthPacket[i].Buffer = m_read_buffers[i];
+        }
     }
 
     TCP_AdapterList adapters;
@@ -127,6 +132,14 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
     if (!m_ndis_api.IsDriverLoaded()) {
         LOG_ERROR("[Driver] WinPkFilter driver not loaded.");
         return false;
+    }
+
+    // Pre-fill read buffers from pool for zero-copy
+    for (int i = 0; i < BATCH_SIZE; ++i) {
+        if (!m_read_buffers[i]) {
+            m_read_buffers[i] = PacketPool::instance().acquire();
+            m_read_request->EthPacket[i].Buffer = m_read_buffers[i];
+        }
     }
 
     TCP_AdapterList adapters;
@@ -230,12 +243,8 @@ void WinPkFilterDriver::tx_run() {
 
                 for (size_t i = 0; i < current_batch; ++i) {
                     auto& p = packets[processed + i];
-                    PINTERMEDIATE_BUFFER buf = m_write_buffers[i];
-                    size_t clen = (std::min)((size_t)p.data->length, (size_t)MAX_ETHER_FRAME);
-                    memcpy(buf->m_IBuffer, p.data->data, clen);
-                    buf->m_Length = (ULONG)clen;
-                    buf->m_dwDeviceFlags = PACKET_FLAG_ON_SEND;
-                    m_write_request->EthPacket[i].Buffer = buf;
+                    // Zero-copy: Point directly to the pooled buffer
+                    m_write_request->EthPacket[i].Buffer = p.data.get();
                 }
 
                 m_ndis_api.SendPacketsToAdapter(m_write_request);
@@ -248,7 +257,6 @@ void WinPkFilterDriver::tx_run() {
 void WinPkFilterDriver::run() {
     ETH_REQUEST single_request;
     single_request.hAdapterHandle = m_adapter_handle;
-    single_request.EthPacket.Buffer = m_read_buffers[0]; // Reuse first buffer for single reads
 
     m_read_request->hAdapterHandle = m_adapter_handle;
 
@@ -261,32 +269,36 @@ void WinPkFilterDriver::run() {
             std::vector<Packet> packets;
             packets.reserve(BATCH_SIZE);
 
-            // 1. Try batch read first
+            // 1. Try batch read
             m_read_request->dwPacketsNumber = BATCH_SIZE;
             m_read_request->dwPacketsSuccess = 0;
             
             if (m_ndis_api.ReadPackets(m_read_request) && m_read_request->dwPacketsSuccess > 0) {
                 for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
-                    PINTERMEDIATE_BUFFER buf = m_read_request->EthPacket[i].Buffer;
-                    bool outbound = (buf->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
-                    RawPacket* rp = PacketPool::instance().acquire();
-                    if (rp) {
-                        memcpy(rp->data, buf->m_IBuffer, buf->m_Length);
-                        rp->length = buf->m_Length;
-                        packets.push_back({ RawPacketPtr(rp), outbound });
-                    }
+                    PINTERMEDIATE_BUFFER filled_buf = m_read_request->EthPacket[i].Buffer;
+                    bool outbound = (filled_buf->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
+                    
+                    // Zero-copy: Transfer buffer to Packet object
+                    packets.push_back({ RawPacketPtr(filled_buf), outbound });
+                    
+                    // Replace the "loaned" buffer with a new one from the pool
+                    m_read_buffers[i] = PacketPool::instance().acquire();
+                    m_read_request->EthPacket[i].Buffer = m_read_buffers[i];
                 }
             } else {
-                // 2. Fallback to single packet reads to fill the batch
+                // 2. Fallback to single packet reads
+                // Reuse the first buffer slot for single reads
+                single_request.EthPacket.Buffer = m_read_buffers[0];
                 while (packets.size() < BATCH_SIZE && m_ndis_api.ReadPacket(&single_request)) {
-                    PINTERMEDIATE_BUFFER buf = m_read_buffers[0];
-                    bool outbound = (buf->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
-                    RawPacket* rp = PacketPool::instance().acquire();
-                    if (rp) {
-                        memcpy(rp->data, buf->m_IBuffer, buf->m_Length);
-                        rp->length = buf->m_Length;
-                        packets.push_back({ RawPacketPtr(rp), outbound });
-                    }
+                    PINTERMEDIATE_BUFFER filled_buf = single_request.EthPacket.Buffer;
+                    bool outbound = (filled_buf->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
+                    
+                    packets.push_back({ RawPacketPtr(filled_buf), outbound });
+                    
+                    // Replace the buffer
+                    m_read_buffers[0] = PacketPool::instance().acquire();
+                    single_request.EthPacket.Buffer = m_read_buffers[0];
+                    m_read_request->EthPacket[0].Buffer = m_read_buffers[0]; // Keep batch request in sync
                 }
             }
 
@@ -296,7 +308,7 @@ void WinPkFilterDriver::run() {
                 } else {
                     if (m_on_before_batch) m_on_before_batch();
                     for (const auto& p : packets) {
-                        if (m_packet_handler) m_packet_handler((const char*)p.data->data, p.data->length, p.outbound);
+                        if (m_packet_handler) m_packet_handler((const char*)p.data->m_IBuffer, p.data->m_Length, p.outbound);
                     }
                     if (m_on_after_batch) m_on_after_batch();
                 }

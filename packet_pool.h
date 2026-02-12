@@ -20,10 +20,8 @@
 
 #include "Common.h"
 
-struct RawPacket {
-    uint8_t data[MAX_ETHER_FRAME];
-    uint32_t length;
-};
+// 使用 WinPkFilter 的中间缓冲区作为池对象类型
+using RawPacket = INTERMEDIATE_BUFFER;
 
 class PacketPool {
 public:
