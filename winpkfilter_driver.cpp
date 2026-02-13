@@ -116,6 +116,27 @@ USHORT recalculate_tcp_checksum(PIP_HEADER ip_header) {
     return tcp_header->Csum;
 }
 
+USHORT recalculate_udp_checksum(PIP_HEADER ip_header) {
+    PUDP_HEADER udp_header = (PUDP_HEADER)((UCHAR*)ip_header + (ip_header->Ver_HLen & 0x0F) * 4);
+    int udp_len = ntohs(ip_header->Len) - (ip_header->Ver_HLen & 0x0F) * 4;
+    udp_header->Csum = 0;
+    PSEUDO_HEADER pseudo_header;
+    pseudo_header.SrcAddr = ip_header->SrcAddr;
+    pseudo_header.DstAddr = ip_header->DstAddr;
+    pseudo_header.Zero = 0;
+    pseudo_header.Proto = ip_header->Proto;
+    pseudo_header.Len = htons((USHORT)udp_len);
+    int total_len = sizeof(PSEUDO_HEADER) + udp_len;
+    if (total_len % 2 != 0) total_len++;
+    char* checksum_buf = new char[total_len];
+    memset(checksum_buf, 0, total_len);
+    memcpy(checksum_buf, &pseudo_header, sizeof(PSEUDO_HEADER));
+    memcpy(checksum_buf + sizeof(PSEUDO_HEADER), udp_header, udp_len);
+    udp_header->Csum = checksum((USHORT*)checksum_buf, total_len);
+    delete[] checksum_buf;
+    return udp_header->Csum;
+}
+
 WinPkFilterDriver::WinPkFilterDriver()
     : m_adapter_handle(nullptr), m_wait_event(nullptr), m_running(false), m_tx_running(false), m_gateway_ip(0) {
     CNdisApi::SetPoolSize(8192);
@@ -279,7 +300,7 @@ void WinPkFilterDriver::run() {
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                 ck.port = udp->DstPort;
                                 auto od = NatManager::instance().get_mapping(ck);
-                                if (od) { ip->SrcAddr = od->ip; udp->SrcPort = od->port; ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4); udp->Csum = 0; }
+                                if (od) { ip->SrcAddr = od->ip; udp->SrcPort = od->port; ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4); recalculate_udp_checksum(ip); }
                             }
                             packets_to_send.push_back(std::move(p));
                         } else { // Case 2: Outbound from client
@@ -296,7 +317,7 @@ void WinPkFilterDriver::run() {
                                     ck.port = udp->SrcPort; od.port = udp->DstPort;
                                     NatManager::instance().create_or_update_udp_mapping(ck, od);
                                     ip->DstAddr = NAT_TARGET_IP; udp->DstPort = htons(NAT_TARGET_PORT);
-                                    ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4); udp->Csum = 0;
+                                    ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4); recalculate_udp_checksum(ip);
                                 }
                                 packets_to_mstcp.push_back(std::move(p));
                             } else packets_to_send.push_back(std::move(p));
