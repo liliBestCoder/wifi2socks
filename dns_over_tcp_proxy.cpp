@@ -38,6 +38,10 @@ void DnsOverTcpProxy::start() {
         return;
     }
     
+    int buf_size = 1024 * 1024; // 1MB
+    setsockopt(m_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
+    setsockopt(m_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
+
     u_long mode = 1;
     ioctlsocket(m_socket, FIONBIO, &mode);
     

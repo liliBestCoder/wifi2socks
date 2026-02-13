@@ -32,6 +32,10 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
 {
     u_long mode = 1;
     ioctlsocket(m_client_socket, FIONBIO, &mode);
+
+    int buf_size = 1024 * 1024; // 1MB
+    setsockopt(m_client_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
+    setsockopt(m_client_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
 }
 
 ProxyTCP::~ProxyTCP() {
@@ -148,6 +152,10 @@ void ProxyTCP::connect_remote() {
         return;
     }
     
+    int buf_size = 1024 * 1024; // 1MB
+    setsockopt(m_remote_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
+    setsockopt(m_remote_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
+
     u_long mode = 1;
     ioctlsocket(m_remote_socket, FIONBIO, &mode);
     
@@ -283,9 +291,8 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
 
 void ProxyTCP::on_client_write(int len) {
     if (!m_client_outbox.empty()) {
-        std::vector<uint8_t> data = std::move(m_client_outbox);
+        m_worker->send_async(m_client_socket, std::move(m_client_outbox));
         m_client_outbox.clear();
-        m_worker->send_async(m_client_socket, (char*)data.data(), (int)data.size());
         // m_client_write_busy remains true
     } else {
         m_client_write_busy = false;
@@ -294,9 +301,8 @@ void ProxyTCP::on_client_write(int len) {
 
 void ProxyTCP::on_remote_write(int len) {
     if (!m_remote_outbox.empty()) {
-        std::vector<uint8_t> data = std::move(m_remote_outbox);
+        m_worker->send_async(m_remote_socket, std::move(m_remote_outbox));
         m_remote_outbox.clear();
-        m_worker->send_async(m_remote_socket, (char*)data.data(), (int)data.size());
         // m_remote_write_busy remains true
     } else {
         m_remote_write_busy = false;

@@ -120,6 +120,7 @@ public:
     // Returns true if operation posted (or queued), false if socket not found/closed.
     // The callback on_write passed in add_socket will be called when done.
     bool send_async(SOCKET s, char* buf, int len);
+    bool send_async(SOCKET s, std::vector<uint8_t>&& data);
     void read_async(SOCKET s);
     void update_read_callback(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read);
 
@@ -131,7 +132,7 @@ public:
 private:
     void loop();
     void post_read(SocketContext* ctx);
-    void post_write(SocketContext* ctx, char* buf, int len); // NEW
+    void post_write(SocketContext* ctx, std::vector<uint8_t>&& data); 
     
     void retain_context(SocketContext* ctx);
     void release_context(SocketContext* ctx);

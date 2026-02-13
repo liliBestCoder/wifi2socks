@@ -95,6 +95,7 @@ private:
     PINTERMEDIATE_BUFFER m_read_buffers[BATCH_SIZE];
     
     PETH_M_REQUEST m_write_request;
+    PETH_M_REQUEST m_mstcp_request;
     PINTERMEDIATE_BUFFER m_write_buffers[BATCH_SIZE];
     
     INTERMEDIATE_BUFFER* m_send_buffer;

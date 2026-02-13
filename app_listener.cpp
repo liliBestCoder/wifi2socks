@@ -108,6 +108,9 @@ void AppListener::tcp_listener_thread() {
             continue;
         }
 
+        int flag = 1;
+        setsockopt(client_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+
         LOG_DEBUG("[AppListener] Accepted new TCP connection from %s:%d", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
         
         // Find original destination from NAT manager

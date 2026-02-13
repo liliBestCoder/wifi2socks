@@ -33,7 +33,7 @@ void Worker::start(int core_index) {
     if (m_running) return;
     m_running = true;
     m_thread = std::thread(&Worker::loop, this);
-    SetThreadPriority(m_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
+    SetThreadPriority(m_thread.native_handle(), THREAD_PRIORITY_HIGHEST);
 
     if (core_index >= 0) {
         DWORD_PTR mask = (static_cast<DWORD_PTR>(1) << (core_index % (sizeof(DWORD_PTR) * 8)));
@@ -91,14 +91,14 @@ void Worker::post_read(SocketContext* ctx) {
     }
 }
 
-void Worker::post_write(SocketContext* ctx, char* buf, int len) {
+void Worker::post_write(SocketContext* ctx, std::vector<uint8_t>&& data) {
     if (!ctx || ctx->write_pending || ctx->closing || ctx->magic != SocketContext::MAGIC_VAL) return;
 
     memset(&ctx->write_io.overlapped, 0, sizeof(OVERLAPPED));
     ctx->write_io.type = IO_WRITE;
     ctx->write_io.sock = ctx->sock;
     
-    ctx->write_io.buf.assign(buf, buf + len);
+    ctx->write_io.buf = std::move(data);
     ctx->wsaWriteBuf.buf = (char*)ctx->write_io.buf.data();
     ctx->wsaWriteBuf.len = (ULONG)ctx->write_io.buf.size();
 
@@ -226,12 +226,15 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
 }
 
 bool Worker::send_async(SOCKET s, char* buf, int len) {
-    std::vector<uint8_t> data(buf, buf + len);
+    return send_async(s, std::vector<uint8_t>(buf, buf + len));
+}
+
+bool Worker::send_async(SOCKET s, std::vector<uint8_t>&& data) {
     std::lock_guard<std::mutex> lock(m_mtx);
-    m_task_queue.push_back([this, s, data = std::move(data)]() {
+    m_task_queue.push_back([this, s, data = std::move(data)]() mutable {
         auto it = m_sockets.find(s);
         if (it != m_sockets.end()) {
-            post_write(it->second, (char*)data.data(), (int)data.size());
+            post_write(it->second, std::move(data));
         }
     });
     PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
@@ -306,7 +309,13 @@ void Worker::loop() {
             }
         }
 
-        BOOL ret = GetQueuedCompletionStatus(m_iocp, &bytesTransferred, &completionKey, &overlapped, 10);
+        DWORD timeout = 10;
+        {
+            std::lock_guard<std::mutex> lock(m_mtx);
+            if (!m_task_queue.empty()) timeout = 0;
+        }
+
+        BOOL ret = GetQueuedCompletionStatus(m_iocp, &bytesTransferred, &completionKey, &overlapped, timeout);
 
         // Periodic Callback for all sockets
         if (m_periodic_callback) {

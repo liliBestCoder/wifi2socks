@@ -102,12 +102,16 @@ USHORT recalculate_tcp_checksum(PIP_HEADER ip_header) {
     pseudo_header.Len = htons((USHORT)tcp_len);
     int total_len = sizeof(PSEUDO_HEADER) + tcp_len;
     if (total_len % 2 != 0) total_len++;
-    char* checksum_buf = new char[total_len];
+    
+    char stack_buf[2048];
+    char* checksum_buf = (total_len <= (int)sizeof(stack_buf)) ? stack_buf : new char[total_len];
+
     memset(checksum_buf, 0, total_len);
     memcpy(checksum_buf, &pseudo_header, sizeof(PSEUDO_HEADER));
     memcpy(checksum_buf + sizeof(PSEUDO_HEADER), tcp_header, tcp_len);
     tcp_header->Csum = checksum((USHORT*)checksum_buf, total_len);
-    delete[] checksum_buf;
+
+    if (checksum_buf != stack_buf) delete[] checksum_buf;
     return tcp_header->Csum;
 }
 
@@ -123,12 +127,16 @@ USHORT recalculate_udp_checksum(PIP_HEADER ip_header) {
     pseudo_header.Len = htons((USHORT)udp_len);
     int total_len = sizeof(PSEUDO_HEADER) + udp_len;
     if (total_len % 2 != 0) total_len++;
-    char* checksum_buf = new char[total_len];
+
+    char stack_buf[2048];
+    char* checksum_buf = (total_len <= (int)sizeof(stack_buf)) ? stack_buf : new char[total_len];
+
     memset(checksum_buf, 0, total_len);
     memcpy(checksum_buf, &pseudo_header, sizeof(PSEUDO_HEADER));
     memcpy(checksum_buf + sizeof(PSEUDO_HEADER), udp_header, udp_len);
     udp_header->Csum = checksum((USHORT*)checksum_buf, total_len);
-    delete[] checksum_buf;
+    
+    if (checksum_buf != stack_buf) delete[] checksum_buf;
     return udp_header->Csum;
 }
 
@@ -141,6 +149,8 @@ WinPkFilterDriver::WinPkFilterDriver()
     for (int i = 0; i < BATCH_SIZE; ++i) m_read_buffers[i] = nullptr;
     m_write_request = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
     m_write_request->dwPacketsNumber = BATCH_SIZE;
+    m_mstcp_request = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
+    m_mstcp_request->dwPacketsNumber = BATCH_SIZE;
     for (int i = 0; i < BATCH_SIZE; ++i) m_write_buffers[i] = nullptr; 
     m_send_buffer = new INTERMEDIATE_BUFFER();
     memset(m_adapter_mac, 0, 6);
@@ -154,6 +164,7 @@ WinPkFilterDriver::~WinPkFilterDriver() {
     }
     free(m_read_request);
     free(m_write_request);
+    free(m_mstcp_request);
     delete m_send_buffer;
 }
 
@@ -217,7 +228,9 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
 
     m_running = true; m_tx_running = true;
     m_tx_thread = std::thread(&WinPkFilterDriver::tx_run, this);
+    SetThreadPriority(m_tx_thread.native_handle(), THREAD_PRIORITY_HIGHEST);
     m_worker_thread = std::thread(&WinPkFilterDriver::run, this);
+    SetThreadPriority(m_worker_thread.native_handle(), THREAD_PRIORITY_HIGHEST);
     return true;
 }
 
@@ -402,7 +415,20 @@ void WinPkFilterDriver::run() {
             }
         }
         if (!packets_to_send.empty()) send_packets_to_adapter(std::move(packets_to_send));
-        if (!packets_to_mstcp.empty()) { for (auto& p : packets_to_mstcp) send_to_mstcp((const char*)p.data->m_IBuffer, p.data->m_Length); }
+        if (!packets_to_mstcp.empty()) {
+            size_t processed = 0;
+            m_mstcp_request->hAdapterHandle = m_adapter_handle;
+            while (processed < packets_to_mstcp.size()) {
+                size_t current_batch = (std::min)(packets_to_mstcp.size() - processed, (size_t)BATCH_SIZE);
+                m_mstcp_request->dwPacketsNumber = (DWORD)current_batch;
+                m_mstcp_request->dwPacketsSuccess = 0;
+                for (size_t i = 0; i < current_batch; ++i) {
+                    m_mstcp_request->EthPacket[i].Buffer = packets_to_mstcp[processed + i].data.get();
+                }
+                m_ndis_api.SendPacketsToMstcp(m_mstcp_request);
+                processed += current_batch;
+            }
+        }
     }
 }
 
