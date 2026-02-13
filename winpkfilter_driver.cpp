@@ -11,9 +11,116 @@
 #include "winpkfilter_driver.h"
 #include "app_config.h"
 #include "logger.h"
+#include "nat_manager.h" // Include the new NAT manager
+
+// Define IP and TCP header structures for parsing
+#include <pshpack1.h>
+typedef struct _IP_HEADER
+{
+    UCHAR   Ver_HLen;       // IP version and header length
+    UCHAR   TOS;            // Type of service
+    USHORT  Len;            // Total length of the packet
+    USHORT  ID;             // Unique identifier
+    USHORT  Flags_Frag;     // Flags and fragment offset
+    UCHAR   TTL;            // Time to live
+    UCHAR   Proto;          // Protocol (TCP, UDP etc)
+    USHORT  Csum;           // IP header checksum
+    ULONG   SrcAddr;        // Source IP address
+    ULONG   DstAddr;        // Destination IP address
+} IP_HEADER, *PIP_HEADER;
+
+typedef struct _TCP_HEADER
+{
+    USHORT  SrcPort;
+    USHORT  DstPort;
+    ULONG   SeqNum;
+    ULONG   AckNum;
+    UCHAR   HdrLen;
+    UCHAR   Flags;
+    USHORT  WinSize;
+    USHORT  Csum;
+    USHORT  UrgPtr;
+} TCP_HEADER, *PTCP_HEADER;
+
+typedef struct _UDP_HEADER
+{
+    USHORT  SrcPort;
+    USHORT  DstPort;
+    USHORT  Len;
+    USHORT  Csum;
+} UDP_HEADER, *PUDP_HEADER;
+#include <poppack.h>
+
 
 #pragma comment(lib, "ndisapilib.lib")
 #pragma comment(lib, "iphlpapi.lib")
+
+// Global NAT Manager instance
+static NatManager nat_manager;
+
+// Define the NAT target address and port
+const ULONG NAT_TARGET_IP = inet_addr("127.0.0.1");
+const USHORT NAT_TARGET_PORT = 3080;
+
+
+// Function to calculate TCP/UDP checksum
+USHORT checksum(USHORT* buffer, int size) {
+    unsigned long cksum = 0;
+    while (size > 1) {
+        cksum += *buffer++;
+        size -= sizeof(USHORT);
+    }
+    if (size) {
+        cksum += *(UCHAR*)buffer;
+    }
+    cksum = (cksum >> 16) + (cksum & 0xffff);
+    cksum += (cksum >> 16);
+    return (USHORT)(~cksum);
+}
+
+// Pseudo header for TCP/UDP checksum calculation
+typedef struct _PSEUDO_HEADER {
+    ULONG   SrcAddr;
+    ULONG   DstAddr;
+    UCHAR   Zero;
+    UCHAR   Proto;
+    USHORT  Len;
+} PSEUDO_HEADER, *PPSEUDO_HEADER;
+
+USHORT recalculate_tcp_checksum(PIP_HEADER ip_header) {
+    PTCP_HEADER tcp_header = (PTCP_HEADER)((UCHAR*)ip_header + (ip_header->Ver_HLen & 0x0F) * 4);
+    int tcp_len = ntohs(ip_header->Len) - (ip_header->Ver_HLen & 0x0F) * 4;
+
+    // Zero out the checksum field
+    tcp_header->Csum = 0;
+
+    // Create pseudo-header
+    PSEUDO_HEADER pseudo_header;
+    pseudo_header.SrcAddr = ip_header->SrcAddr;
+    pseudo_header.DstAddr = ip_header->DstAddr;
+    pseudo_header.Zero = 0;
+    pseudo_header.Proto = ip_header->Proto;
+    pseudo_header.Len = htons((USHORT)tcp_len);
+
+    // Allocate buffer for checksum calculation
+    int total_len = sizeof(PSEUDO_HEADER) + tcp_len;
+    // Align to 2 bytes
+    if (total_len % 2 != 0) {
+        total_len++;
+    }
+    char* checksum_buf = new char[total_len];
+    memset(checksum_buf, 0, total_len);
+
+    // Copy pseudo-header and TCP segment
+    memcpy(checksum_buf, &pseudo_header, sizeof(PSEUDO_HEADER));
+    memcpy(checksum_buf + sizeof(PSEUDO_HEADER), tcp_header, tcp_len);
+
+    tcp_header->Csum = checksum((USHORT*)checksum_buf, total_len);
+
+    delete[] checksum_buf;
+    return tcp_header->Csum;
+}
+
 
 WinPkFilterDriver::WinPkFilterDriver()
     : m_adapter_handle(nullptr), m_wait_event(nullptr), m_running(false), m_tx_running(false) {
@@ -264,16 +371,22 @@ void WinPkFilterDriver::run() {
 
     m_read_request->hAdapterHandle = m_adapter_handle;
 
+    // Get local IP address to distinguish packets from our app
+    ULONG local_ip = inet_addr("127.0.0.1");
+
+
     while (m_running) {
         WaitForSingleObject(m_wait_event, INFINITE);
         if (!m_running) break;
 
+        std::vector<Packet> packets_to_send;
+        std::vector<Packet> packets_to_mstcp;
+
         bool has_packets = true;
         while (m_running && has_packets) {
-            std::vector<Packet> packets;
-            packets.reserve(BATCH_SIZE);
+            std::vector<Packet> captured_packets;
+            captured_packets.reserve(BATCH_SIZE);
 
-            // 1. Try batch read
             m_read_request->dwPacketsNumber = BATCH_SIZE;
             m_read_request->dwPacketsSuccess = 0;
             
@@ -282,42 +395,132 @@ void WinPkFilterDriver::run() {
                     PINTERMEDIATE_BUFFER filled_buf = m_read_request->EthPacket[i].Buffer;
                     bool outbound = (filled_buf->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
                     
-                    // Zero-copy: Transfer buffer to Packet object
-                    packets.push_back({ RawPacketPtr(filled_buf), outbound });
+                    captured_packets.push_back({ RawPacketPtr(filled_buf), outbound });
                     
-                    // Replace the "loaned" buffer with a new one from the pool
                     m_read_buffers[i] = PacketPool::instance().acquire();
                     m_read_request->EthPacket[i].Buffer = m_read_buffers[i];
                 }
-            } else {
-                // 2. Fallback to single packet reads
-                // Reuse the first buffer slot for single reads
-                single_request.EthPacket.Buffer = m_read_buffers[0];
-                while (packets.size() < BATCH_SIZE && m_ndis_api.ReadPacket(&single_request)) {
-                    PINTERMEDIATE_BUFFER filled_buf = single_request.EthPacket.Buffer;
-                    bool outbound = (filled_buf->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
-                    
-                    packets.push_back({ RawPacketPtr(filled_buf), outbound });
-                    
-                    // Replace the buffer
-                    m_read_buffers[0] = PacketPool::instance().acquire();
-                    single_request.EthPacket.Buffer = m_read_buffers[0];
-                    m_read_request->EthPacket[0].Buffer = m_read_buffers[0]; // Keep batch request in sync
-                }
             }
+            
+            if (!captured_packets.empty()) {
+                for (auto& p : captured_packets) {
+                    char* buffer = (char*)p.data->m_IBuffer;
+                    size_t length = p.data->m_Length;
 
-            if (!packets.empty()) {
-                if (m_batch_handler) {
-                    m_batch_handler(std::move(packets));
-                } else {
-                    if (m_on_before_batch) m_on_before_batch();
-                    for (const auto& p : packets) {
-                        if (m_packet_handler) m_packet_handler((const char*)p.data->m_IBuffer, p.data->m_Length, p.outbound);
+                    if (length < 14) { // Not a full Ethernet frame
+                        if (p.outbound) packets_to_send.push_back(std::move(p));
+                        else packets_to_mstcp.push_back(std::move(p));
+                        continue;
                     }
-                    if (m_on_after_batch) m_on_after_batch();
+                    USHORT ether_type = ntohs(*(USHORT*)(buffer + 12));
+                    if (ether_type != 0x0800) { // Not IP
+                        if (p.outbound) packets_to_send.push_back(std::move(p));
+                        else packets_to_mstcp.push_back(std::move(p));
+                        continue;
+                    }
+
+                    PIP_HEADER ip_header = (PIP_HEADER)(buffer + 14);
+                    
+                    if (p.outbound) {
+                        // Outbound: from protocol stack to adapter
+                        // Two cases:
+                        // 1. From our app (src=local) -> client (dst=remote_client). Needs Reverse NAT.
+                        // 2. From client (src=remote_client) -> real server (dst=real_server). Needs Forward NAT.
+
+                        if (ip_header->SrcAddr == local_ip) {
+                            // Case 1: Reverse NAT for response from our local service
+                            ClientKey client_key;
+                            client_key.ip = ip_header->DstAddr;
+                            
+                            std::optional<OriginalDestination> orig_dest;
+
+                            if (ip_header->Proto == IPPROTO_TCP) {
+                                PTCP_HEADER tcp_header = (PTCP_HEADER)((char*)ip_header + (ip_header->Ver_HLen & 0x0F) * 4);
+                                client_key.port = tcp_header->DstPort;
+                                orig_dest = nat_manager.get_mapping(client_key);
+                                if (orig_dest) {
+                                    ip_header->SrcAddr = orig_dest->ip;
+                                    tcp_header->SrcPort = orig_dest->port;
+                                    
+                                    ip_header->Csum = 0;
+                                    ip_header->Csum = checksum((USHORT*)ip_header, (ip_header->Ver_HLen & 0x0F) * 4);
+                                    tcp_header->Csum = 0;
+                                    recalculate_tcp_checksum(ip_header);
+                                }
+                            } else if (ip_header->Proto == IPPROTO_UDP) {
+                                 PUDP_HEADER udp_header = (PUDP_HEADER)((char*)ip_header + (ip_header->Ver_HLen & 0x0F) * 4);
+                                 client_key.port = udp_header->DstPort;
+                                 orig_dest = nat_manager.get_mapping(client_key);
+                                 if (orig_dest) {
+                                     ip_header->SrcAddr = orig_dest->ip;
+                                     udp_header->SrcPort = orig_dest->port;
+
+                                     ip_header->Csum = 0;
+                                     ip_header->Csum = checksum((USHORT*)ip_header, (ip_header->Ver_HLen & 0x0F) * 4);
+                                     udp_header->Csum = 0; // Optional for UDP
+                                 }
+                            }
+                            // After modification, send to adapter
+                            packets_to_send.push_back(std::move(p));
+
+                        } else {
+                            // Case 2: Forward NAT for initial packet from client
+                            if (ip_header->Proto == IPPROTO_TCP || ip_header->Proto == IPPROTO_UDP) {
+                                ClientKey key;
+                                key.ip = ip_header->SrcAddr;
+                                OriginalDestination dest;
+                                dest.ip = ip_header->DstAddr;
+                            
+                                if (ip_header->Proto == IPPROTO_TCP) {
+                                    PTCP_HEADER tcp_header = (PTCP_HEADER)((char*)ip_header + (ip_header->Ver_HLen & 0x0F) * 4);
+                                    key.port = tcp_header->SrcPort;
+                                    dest.port = tcp_header->DstPort;
+                                    nat_manager.create_tcp_mapping(key, dest);
+
+                                    ip_header->DstAddr = NAT_TARGET_IP;
+                                    tcp_header->DstPort = htons(NAT_TARGET_PORT);
+
+                                    ip_header->Csum = 0;
+                                    ip_header->Csum = checksum((USHORT*)ip_header, (ip_header->Ver_HLen & 0x0F) * 4);
+                                    tcp_header->Csum = 0;
+                                    recalculate_tcp_checksum(ip_header);
+
+                                } else { // UDP
+                                    PUDP_HEADER udp_header = (PUDP_HEADER)((char*)ip_header + (ip_header->Ver_HLen & 0x0F) * 4);
+                                    key.port = udp_header->SrcPort;
+                                    dest.port = udp_header->DstPort;
+                                    nat_manager.create_or_update_udp_mapping(key, dest);
+
+                                    ip_header->DstAddr = NAT_TARGET_IP;
+                                    udp_header->DstPort = htons(NAT_TARGET_PORT);
+
+                                    ip_header->Csum = 0;
+                                    ip_header->Csum = checksum((USHORT*)ip_header, (ip_header->Ver_HLen & 0x0F) * 4);
+                                    udp_header->Csum = 0;
+                                }
+                                packets_to_mstcp.push_back(std::move(p));
+                            } else {
+                                packets_to_send.push_back(std::move(p));
+                            }
+                        }
+                    } else { 
+                        // Inbound: from adapter to protocol stack.
+                        // Should be passed to mstcp directly in this architecture
+                        // as Windows handles the inbound part of the TCP/IP connection.
+                        packets_to_mstcp.push_back(std::move(p));
+                    }
                 }
             } else {
                 has_packets = false;
+            }
+        }
+
+        if (!packets_to_send.empty()) {
+            send_packets_to_adapter(std::move(packets_to_send));
+        }
+        if (!packets_to_mstcp.empty()) {
+            for (auto& p : packets_to_mstcp) {
+                 send_to_mstcp((const char*)p.data->m_IBuffer, p.data->m_Length);
             }
         }
     }
