@@ -66,21 +66,18 @@ void Worker::post_read(SocketContext* ctx) {
     ctx->read_io.type = IO_READ;
     ctx->read_io.sock = ctx->sock;
 
+    ctx->wsaBuf.buf = ctx->buffer;
+    ctx->wsaBuf.len = sizeof(ctx->buffer);
+
     ctx->pending_io++;
 
     int ret = SOCKET_ERROR;
 
     if (ctx->is_udp) {
-        ctx->wsaBuf.buf = ctx->buffer;
-        ctx->wsaBuf.len = sizeof(ctx->buffer);
         ctx->remote_addr_len = sizeof(ctx->remote_addr);
-        
         ret = WSARecvFrom(ctx->sock, &ctx->wsaBuf, 1, &bytes, &flags, (sockaddr*)&ctx->remote_addr, &ctx->remote_addr_len, &ctx->read_io.overlapped, NULL);
     } else {
-        static char dummy_buf[1];
-        static WSABUF wsaBufZero = { 0, dummy_buf };
-        
-        ret = WSARecv(ctx->sock, &wsaBufZero, 1, &bytes, &flags, &ctx->read_io.overlapped, NULL);
+        ret = WSARecv(ctx->sock, &ctx->wsaBuf, 1, &bytes, &flags, &ctx->read_io.overlapped, NULL);
     }
 
     if (ret == SOCKET_ERROR) {
@@ -101,8 +98,9 @@ void Worker::post_write(SocketContext* ctx, char* buf, int len) {
     ctx->write_io.type = IO_WRITE;
     ctx->write_io.sock = ctx->sock;
     
-    ctx->wsaWriteBuf.buf = buf;
-    ctx->wsaWriteBuf.len = len;
+    ctx->write_io.buf.assign(buf, buf + len);
+    ctx->wsaWriteBuf.buf = (char*)ctx->write_io.buf.data();
+    ctx->wsaWriteBuf.len = (ULONG)ctx->write_io.buf.size();
 
     ctx->pending_io++;
 
@@ -228,11 +226,12 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
 }
 
 bool Worker::send_async(SOCKET s, char* buf, int len) {
+    std::vector<uint8_t> data(buf, buf + len);
     std::lock_guard<std::mutex> lock(m_mtx);
-    m_task_queue.push_back([this, s, buf, len]() {
+    m_task_queue.push_back([this, s, data = std::move(data)]() {
         auto it = m_sockets.find(s);
         if (it != m_sockets.end()) {
-            post_write(it->second, buf, len);
+            post_write(it->second, (char*)data.data(), (int)data.size());
         }
     });
     PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
@@ -364,11 +363,7 @@ void Worker::loop() {
                             ctx->read_pending = false;
                             auto on_read = ctx->on_read; 
                             if (on_read) {
-                                if (ctx->is_udp) {
-                                    on_read(ctx->buffer, (int)bytesTransferred, &ctx->remote_addr);
-                                } else {
-                                    on_read(nullptr, 0, nullptr);
-                                }
+                                on_read(ctx->buffer, (int)bytesTransferred, ctx->is_udp ? &ctx->remote_addr : nullptr);
                             }
                             if (!ctx->closing && !ctx->paused) {
                                 post_read(ctx);

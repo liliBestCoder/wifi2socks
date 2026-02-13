@@ -312,12 +312,20 @@ void WinPkFilterDriver::run() {
                             }
 
                             if (should_intercept) {
-                                OriginalDestination od(ip->DstAddr, 0, ip->SrcAddr);
+                                uint16_t original_dst_port = 0;
+                                if (ip->Proto == IPPROTO_TCP) {
+                                    PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                    original_dst_port = tcp->DstPort;
+                                } else {
+                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                    original_dst_port = udp->DstPort;
+                                }
+
+                                OriginalDestination od(ip->DstAddr, original_dst_port, ip->SrcAddr);
                                 uint64_t mapping_key = 0;
 
                                 if (ip->Proto == IPPROTO_TCP) {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    od.port = tcp->DstPort;
                                     mapping_key = NatManager::make_key(ip->SrcAddr, tcp->SrcPort);
                                     
                                     NatManager::instance().create_tcp_mapping(mapping_key, od);
@@ -329,7 +337,6 @@ void WinPkFilterDriver::run() {
                                     recalculate_tcp_checksum(ip);
                                 } else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    od.port = udp->DstPort;
                                     mapping_key = NatManager::make_key(ip->SrcAddr, udp->SrcPort);
 
                                     NatManager::instance().create_or_update_udp_mapping(mapping_key, od);

@@ -28,6 +28,7 @@ struct IO_CONTEXT {
     IO_TYPE type;
     SOCKET sock;
     std::function<void()> on_done;
+    std::vector<uint8_t> buf;
 };
 
 struct SocketContext {
