@@ -314,6 +314,12 @@ void WinPkFilterDriver::run() {
                                     ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4); recalculate_tcp_checksum(ip);
                                 } else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                    USHORT dport_h = ntohs(udp->DstPort);
+                                    // Ignore DHCP and local discovery/NetBIOS traffic
+                                    if (dport_h == 67 || dport_h == 68 || dport_h == 5353 || dport_h == 5355 || dport_h == 137 || dport_h == 138 || dport_h == 1900) {
+                                        packets_to_send.push_back(std::move(p));
+                                        continue;
+                                    }
                                     ck.port = udp->SrcPort; od.port = udp->DstPort;
                                     NatManager::instance().create_or_update_udp_mapping(ck, od);
                                     ip->DstAddr = NAT_TARGET_IP; udp->DstPort = htons(NAT_TARGET_PORT);
