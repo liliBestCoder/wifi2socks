@@ -313,7 +313,7 @@ void WinPkFilterDriver::run() {
 
                             if (should_intercept) {
                                 OriginalDestination od = { ip->DstAddr, 0, ip->SrcAddr };
-                                ClientKey mapping_key = { m_gateway_ip, 0 }; // Full NAT: App sees everything from Gateway IP
+                                ClientKey mapping_key = { ip->SrcAddr, 0 }; // No Full NAT: App sees the real client IP
 
                                 if (ip->Proto == IPPROTO_TCP) {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
@@ -322,7 +322,7 @@ void WinPkFilterDriver::run() {
                                     
                                     NatManager::instance().create_tcp_mapping(mapping_key, od);
                                     
-                                    ip->SrcAddr = m_gateway_ip; // FULL NAT
+                                    // ip->SrcAddr = m_gateway_ip; // FULL NAT DISABLED
                                     ip->DstAddr = m_gateway_ip; 
                                     tcp->DstPort = htons(NAT_TARGET_PORT);
                                     
@@ -335,7 +335,7 @@ void WinPkFilterDriver::run() {
 
                                     NatManager::instance().create_or_update_udp_mapping(mapping_key, od);
                                     
-                                    ip->SrcAddr = m_gateway_ip; // FULL NAT
+                                    // ip->SrcAddr = m_gateway_ip; // FULL NAT DISABLED
                                     ip->DstAddr = m_gateway_ip; 
                                     udp->DstPort = htons(NAT_TARGET_PORT);
                                     
@@ -361,7 +361,7 @@ void WinPkFilterDriver::run() {
                             }
 
                             if (src_port == NAT_TARGET_PORT) {
-                                ClientKey mapping_key = { m_gateway_ip, 0 };
+                                ClientKey mapping_key = { ip->DstAddr, 0 };
                                 if (ip->Proto == IPPROTO_TCP) {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     mapping_key.port = tcp->DstPort;

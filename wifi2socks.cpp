@@ -129,9 +129,9 @@ int main() {
         }
     }
 
-    // Start the new application listener on 127.0.0.1:3080.
+    // Start the new application listener on 0.0.0.0:3080.
     // This will handle incoming TCP connections and UDP packets redirected by the driver.
-    AppListener::instance().start("127.0.0.1", 3080);
+    AppListener::instance().start("0.0.0.0", 3080);
 
     SimpleHttpServer::instance().start(g_config.http_api_port);
 
