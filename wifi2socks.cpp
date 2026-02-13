@@ -19,15 +19,12 @@ LogLevel g_log_level = LOG_LEVEL_INFO;
 #include "packet_monitor.h"
 #include "dhcp_server.h"
 #include "worker.h"
-#include "lwip/etharp.h"
-#include "lwip/ip.h"
-#include "lwip_handler.h"
 #include "proxy_tcp.h"
 #include "proxy_udp.h"
 #include "main_dispatcher.h"
-#include "nat_table.h"
 #include "geo_checker.h"
 #include "config_loader.h"
+#include "app_listener.h"
 #include <iostream>
 #include <thread>
 #include <shellapi.h>
@@ -110,9 +107,9 @@ int main() {
 
     std::string adapter_name = find_adapter_by_ip(g_config.tap_ip);
     static WinPkFilterDriver pk_driver;
-    set_winpkfilter_driver(&pk_driver);
     
     WorkerPool::instance().init(8);
+    UdpProxy::initialize();
 
     // LwIP stack and netif initialization has been removed.
     // The new NAT logic is self-contained within the WinPkFilterDriver.
@@ -124,7 +121,6 @@ int main() {
     
     // The driver now handles packet processing internally for NAT.
     // We no longer need to pass a complex packet handler.
-    // The empty lambda is a placeholder as the driver's run loop ignores it.
     if (!adapter_name.empty()) {
         if (!pk_driver.start_batch(adapter_name, [](std::vector<WinPkFilterDriver::Packet>&&) {})) {
             LOG_ERROR("[CORE] Failed to start WinPkFilter driver with internal NAT.");
@@ -133,8 +129,9 @@ int main() {
         }
     }
 
-    // TODO: Start the new application listener on 127.0.0.1:3080 here.
+    // Start the new application listener on 127.0.0.1:3080.
     // This will handle incoming TCP connections and UDP packets redirected by the driver.
+    AppListener::instance().start("127.0.0.1", 3080);
 
     SimpleHttpServer::instance().start(g_config.http_api_port);
 

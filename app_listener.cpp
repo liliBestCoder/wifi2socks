@@ -2,8 +2,8 @@
 #include "logger.h"
 #include "nat_manager.h"
 #include "worker.h"
-#include "proxy_tcp.h" // We'll need to adapt or reuse this
-#include "proxy_udp.h"   // We'll need to adapt or reuse this
+#include "proxy_tcp.h"
+#include "proxy_udp.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -19,6 +19,10 @@ AppListener::AppListener() : m_running(false), m_tcp_socket(INVALID_SOCKET), m_u
 
 AppListener::~AppListener() {
     stop();
+}
+
+void* AppListener::get_udp_socket() const {
+    return m_udp_socket;
 }
 
 void AppListener::start(const std::string& host, uint16_t port) {
@@ -112,10 +116,9 @@ void AppListener::tcp_listener_thread() {
         auto dest = NatManager::instance().get_mapping(key);
 
         if (dest) {
-            // We have the original destination, now hand it off to a worker.
-            // This part needs to connect to your existing proxy logic.
-            // We assume the WorkerPool can handle dispatching a native socket.
-            WorkerPool::instance().dispatch_socket(client_socket, *dest);
+            // Create a new ProxyTCP session and start it.
+            // The session will manage its own lifetime.
+            std::make_shared<ProxyTCP>(client_socket, *dest)->start();
         } else {
             LOG_WARN("[AppListener] No NAT mapping found for TCP connection from %s:%d. Closing.", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
             closesocket(client_socket);
@@ -170,16 +173,10 @@ void AppListener::udp_listener_thread() {
         auto dest = NatManager::instance().get_mapping(key);
 
         if (dest) {
-            // We have the original destination, now process the UDP packet.
-            // This needs to connect to the existing UDP proxy logic.
-            // We'll create a UdpProxy session.
-            sockaddr_in dest_addr;
-            dest_addr.sin_family = AF_INET;
-            dest_addr.sin_addr.s_addr = dest->ip;
-            dest_addr.sin_port = dest->port;
-            
-            // The UdpProxy needs the listening socket to send responses back to the client.
-            UdpProxy::handle_client_data(listen_socket, buffer, bytes_read, &client_addr, &dest_addr);
+            // Pass the data to the UDP proxy handler.
+            // The handler will manage sending the data to the real destination
+            // and routing the response back.
+            UdpProxy::handle_client_data(listen_socket, buffer, bytes_read, &client_addr, &(*dest));
 
         } else {
              LOG_WARN("[AppListener] No NAT mapping for UDP packet from %s:%d.", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));

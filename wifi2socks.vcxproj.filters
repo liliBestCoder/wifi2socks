@@ -96,6 +96,9 @@
     <ClCompile Include="nat_manager.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="app_listener.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="common.pb.h">
@@ -138,6 +141,9 @@
       <Filter>头文件\protocol\arp</Filter>
     </ClInclude>
     <ClInclude Include="nat_manager.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="app_listener.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>

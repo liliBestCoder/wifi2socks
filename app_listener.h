@@ -17,6 +17,8 @@ public:
     // Stops the listeners.
     void stop();
 
+    void* get_udp_socket() const;
+
 private:
     AppListener();
     ~AppListener();

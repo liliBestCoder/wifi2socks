@@ -204,6 +204,7 @@
     <ClCompile Include="lwip\src\core\ipv4\ip4_addr.c" />
     <ClCompile Include="lwip\src\netif\ethernet.c" />
     <ClCompile Include="nat_manager.cpp" />
+    <ClCompile Include="app_listener.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="common.pb.h" />
@@ -236,6 +237,7 @@
     <ClInclude Include="packet_monitor.h" />
     <ClInclude Include="lwip_includes.h" />
     <ClInclude Include="nat_manager.h" />
+    <ClInclude Include="app_listener.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
