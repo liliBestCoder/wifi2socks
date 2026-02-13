@@ -74,23 +74,14 @@ public:
         }
 
         bool is_direct = true;
-        bool should_proxy_dns = false;
+        uint16_t dport = ntohs(dest->port);
 
         // --- 1. DNS Handling (Port 53) ---
-        if (ntohs(dest->port) == 53) {
+        if (dport == 53) {
             std::string domain = parse_dns_query_domain(data, len);
             if (!domain.empty()) {
                 Rule rule = RuleManager::instance().match(domain);
-                if (rule == RULE_PROXY) {
-                    should_proxy_dns = true;
-                    is_direct = false;
-                } else if (rule == RULE_DIRECT) {
-                    is_direct = true;
-                } else {
-                    // Fallback to GeoChecker
-                    is_direct = GeoChecker::instance().is_cn_domain(domain);
-                    should_proxy_dns = !is_direct;
-                }
+                bool should_proxy_dns = (rule == RULE_PROXY) || (rule == RULE_PASS && !GeoChecker::instance().is_cn_domain(domain));
 
                 if (should_proxy_dns) {
                     LOG_INFO("[DNS] Routing DNS query for '%s' over TCP (DoT).", domain.c_str());
@@ -104,41 +95,38 @@ public:
                     return;
                 }
             }
-        } else {
-            // --- 2. General UDP Handling ---
+            is_direct = true;
+        } 
+        // --- 2. QUIC Handling (Port 443) ---
+        else if (dport == 443) {
             uint32_t ip_h = ntohl(dest->ip);
             Rule rule = RuleManager::instance().match_ip(ip_h);
             
-            if (rule == RULE_DIRECT) is_direct = true;
-            else if (rule == RULE_PROXY) is_direct = false; // Note: Generic UDP proxying might need SOCKS5 UDP ASSOCIATE
-            else {
-                is_direct = GeoChecker::instance().is_cn_ip(ip_h);
+            bool is_cn = (rule == RULE_DIRECT) || (rule == RULE_PASS && GeoChecker::instance().is_cn_ip(ip_h));
+            
+            if (!is_cn) {
+                LOG_DEBUG("[UdpProxy] Dropping international QUIC packet to %s", inet_ntoa({.s_addr = dest->ip}));
+                return; // DROP
             }
-
-            // Special case: QUIC (Port 443)
-            if (ntohs(dest->port) == 443 && !is_direct) {
-                LOG_DEBUG("[UdpProxy] Dropping non-CN QUIC packet to %s", inet_ntoa({.s_addr = dest->ip}));
-                return; 
-            }
+            is_direct = true;
+        }
+        // --- 3. General UDP Handling ---
+        else {
+            is_direct = true; // Always direct for general UDP
         }
         
-        // --- 3. Forwarding ---
-        // For now, if not direct and not handled by DoT, we still use direct as a fallback 
-        // until full UDP proxying (SOCKS5 UDP Associate) is implemented.
-        
+        // --- 4. Forwarding (Direct Relay) ---
         sockaddr_in dest_addr_sock = {};
         dest_addr_sock.sin_family = AF_INET;
         dest_addr_sock.sin_addr.s_addr = dest->ip;
         dest_addr_sock.sin_port = dest->port;
 
-        uint64_t dest_key = ((uint64_t)dest->ip << 16) | ntohs(dest->port);
+        uint64_t dest_key = ((uint64_t)dest->ip << 16) | dport;
         SOCKET remote_socket = get_or_create_remote_socket(dest_key, client_addr);
 
         if (remote_socket != INVALID_SOCKET) {
             int bytes_sent = sendto(remote_socket, data, len, 0, (const sockaddr*)&dest_addr_sock, sizeof(dest_addr_sock));
-            if (bytes_sent == SOCKET_ERROR) {
-                LOG_ERROR("[UdpProxy] sendto to remote failed with error: %d", WSAGetLastError());
-            } else {
+            if (bytes_sent != SOCKET_ERROR) {
                  TrafficManager::instance().report_proxy_tx(bytes_sent, is_direct);
             }
         }
