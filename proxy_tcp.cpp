@@ -34,21 +34,9 @@ std::string parse_http_host(const uint8_t* data, size_t len) {
 
 bool is_generate_204_request(const uint8_t* data, size_t len) {
     if (len < 20) return false;
-    // Check for "GET /generate_204"
     return (memcmp(data, "GET /generate_204", 17) == 0);
 }
 
-// Helper to get ConnectEx function pointer
-LPFN_CONNECTEX get_connect_ex() {
-    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET) return nullptr;
-    GUID guid = WSAID_CONNECTEX;
-    LPFN_CONNECTEX connect_ex = nullptr;
-    DWORD bytes = 0;
-    WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER, &guid, sizeof(guid), &connect_ex, sizeof(connect_ex), &bytes, NULL, NULL);
-    closesocket(s);
-    return connect_ex;
-}
 
 ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
     : m_state(INITIAL),
@@ -61,7 +49,6 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
       m_remote_write_busy(false),
       m_ref_count(0)
 {
-    // Set sockets to non-blocking
     u_long mode = 1;
     ioctlsocket(m_client_socket, FIONBIO, &mode);
 }
@@ -73,7 +60,6 @@ ProxyTCP::~ProxyTCP() {
     if (m_remote_socket != INVALID_SOCKET) {
         closesocket(m_remote_socket);
     }
-    LOG_DEBUG("[ProxyTCP] Session destroyed.");
 }
 
 void ProxyTCP::start() {
@@ -84,16 +70,14 @@ void ProxyTCP::start() {
         return;
     }
 
-    // Add client socket to IOCP for initial read
     auto self = shared_from_this();
-    retain(); // Increment ref count for the client socket
+    retain(); 
     m_worker->add_socket(
         m_client_socket,
         [self](char* buf, int len, sockaddr_in*) { self->on_client_initial_read(buf, len); },
-        nullptr, // No write callback initially
+        nullptr, 
         [self]() { self->on_close(); }
     );
-    // The worker's loop will automatically post the first read.
 }
 
 void ProxyTCP::on_client_initial_read(char* buf, int len) {
@@ -102,7 +86,6 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
         return;
     }
 
-    // Limit buffer size to prevent memory abuse
     size_t max_len = (g_config.max_sni_len > 0) ? g_config.max_sni_len : 16384;
     if (m_initial_buffer.size() + len > max_len) {
         LOG_INFO("[ProxyTCP] Initial buffer exceeded limit. Deciding with current data.");
@@ -113,7 +96,6 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
         m_initial_buffer.insert(m_initial_buffer.end(), (const uint8_t*)buf, (const uint8_t*)buf + len);
     }
 
-    // 1. Check for /generate_204 Mock (Port 80)
     if (ntohs(m_original_dest.port) == 80 && is_generate_204_request(m_initial_buffer.data(), m_initial_buffer.size())) {
         LOG_INFO("[ProxyTCP] Intercepted /generate_204. Sending mock response.");
         const char* resp204 = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
@@ -122,7 +104,6 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
         return;
     }
 
-    // 2. Try to parse Domain (SNI or Host)
     bool ready_to_decide = false;
     std::string domain = TlsParser::parse_client_hello((const char*)m_initial_buffer.data(), m_initial_buffer.size());
     if (!domain.empty()) {
@@ -136,96 +117,81 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
         }
     }
 
-    // If still not ready, and we haven't hit the buffer limit, wait for more data.
-    // The worker loop will automatically post another read.
     if (!ready_to_decide && m_initial_buffer.size() < max_len) {
         return;
     }
 
-    // 3. Routing Decision (Priority: RuleManager > GeoChecker > IP)
     if (!m_detected_domain.empty()) {
         RuleAction rule = RuleManager::instance().match_domain(m_detected_domain);
-        if (rule == RULE_DIRECT) {
-            m_is_direct = true;
-        } else if (rule == RULE_PROXY) {
-            m_is_direct = false;
-        } else { // RULE_PASS
-            m_is_direct = GeoChecker::instance().is_cn_domain(m_detected_domain);
-        }
+        if (rule == RULE_DIRECT) m_is_direct = true;
+        else if (rule == RULE_PROXY) m_is_direct = false;
+        else m_is_direct = GeoChecker::instance().is_cn_domain(m_detected_domain);
     } else {
-        // No domain detected, fallback to IP-based routing
         uint32_t ip_h = ntohl(m_original_dest.ip);
         RuleAction rule = RuleManager::instance().match_ip(ip_h);
-        if (rule == RULE_DIRECT) {
-            m_is_direct = true;
-        } else if (rule == RULE_PROXY) {
-            m_is_direct = false;
-        } else { // RULE_PASS
-            m_is_direct = GeoChecker::instance().is_cn_ip(ip_h);
-        }
+        if (rule == RULE_DIRECT) m_is_direct = true;
+        else if (rule == RULE_PROXY) m_is_direct = false;
+        else m_is_direct = GeoChecker::instance().is_cn_ip(ip_h);
     }
     
     auto self = shared_from_this();
     m_worker->update_read_callback(m_client_socket, [self](char* b, int l, sockaddr_in*) { self->on_client_read(b, l); });
     
-    // 4. Connect to remote
     connect_remote();
 }
 
 void ProxyTCP::connect_remote() {
     m_state = CONNECTING;
+    auto self = shared_from_this();
 
-    sockaddr_in remote_addr;\n    remote_addr.sin_family = AF_INET;
+    sockaddr_in remote_addr;
+    remote_addr.sin_family = AF_INET;
 
     if (m_is_direct) {
-        LOG_INFO("[ProxyTCP] Routing DIRECT for %s (IP: %s)", 
-            m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str(),
-            inet_ntoa({.s_addr = m_original_dest.ip}));
-        remote_addr.sin_addr.s_addr = m_original_dest.ip;\n        remote_addr.sin_port = m_original_dest.port;
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &m_original_dest.ip, ip_str, INET_ADDRSTRLEN);
+        LOG_INFO("[ProxyTCP] Routing DIRECT for %s (IP: %s)", m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str(), ip_str);
+        remote_addr.sin_addr.s_addr = m_original_dest.ip;
+        remote_addr.sin_port = m_original_dest.port;
     } else {
-        LOG_INFO("[ProxyTCP] Routing PROXY for %s", m_detected_domain.empty() ? inet_ntoa({.s_addr = m_original_dest.ip}) : m_detected_domain.c_str());
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &m_original_dest.ip, ip_str, INET_ADDRSTRLEN);
+        LOG_INFO("[ProxyTCP] Routing PROXY for %s", m_detected_domain.empty() ? ip_str : m_detected_domain.c_str());
         inet_pton(AF_INET, g_config.proxy_ip.c_str(), &remote_addr.sin_addr);
         remote_addr.sin_port = htons(g_config.proxy_port);
     }
     
     m_remote_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if(m_remote_socket == INVALID_SOCKET) {
+        close_session();
+        return;
+    }
+    
     u_long mode = 1;
     ioctlsocket(m_remote_socket, FIONBIO, &mode);
     
-    sockaddr_in bind_addr = {0};
-    bind_addr.sin_family = AF_INET;
-    bind_addr.sin_addr.s_addr = INADDR_ANY;
-    bind_addr.sin_port = 0;
-    bind(m_remote_socket, (SOCKADDR*)&bind_addr, sizeof(bind_addr));
-
-    retain();
-    m_worker->add_socket(
-        m_remote_socket,
-        this,
-        [this](char* buf, int len) { on_remote_read(buf, len); },
-        [this](int len) { on_remote_write(len); },
-        [this]() { on_close(); }
-    );
-
-    auto connect_ex = get_connect_ex();
-    if (!connect_ex || !connect_ex(m_remote_socket, (SOCKADDR*)&remote_addr, sizeof(remote_addr), NULL, 0, NULL, m_worker->get_overlapped_for_connect(m_remote_socket))) {
-        if (WSAGetLastError() != WSA_IO_PENDING) {
-            LOG_ERROR("[ProxyTCP] ConnectEx failed: %d", WSAGetLastError());
-            on_close();
-        }
-    }
+    m_worker->connect_async(m_remote_socket, remote_addr, [self]() {
+        self->on_remote_connect();
+    });
 }
 
 void ProxyTCP::on_remote_connect() {
     LOG_DEBUG("[ProxyTCP] Remote connection established.");
     m_state = ESTABLISHED;
-    setsockopt(m_remote_socket, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
-    m_worker->read_async(m_remote_socket);
+    
+    auto self = shared_from_this();
+    retain(); 
+    m_worker->add_socket(
+        m_remote_socket,
+        [self](char* buf, int len, sockaddr_in*) { self->on_remote_read(buf, len); },
+        [self](int len) { self->on_remote_write(len); },
+        [self]() { self->on_close(); }
+    );
 
     if (!m_initial_buffer.empty()) {
         TrafficManager::instance().report_proxy_tx((int)m_initial_buffer.size(), m_is_direct);
         m_remote_write_busy = true;
-        m_worker->write_async(m_remote_socket, (char*)m_initial_buffer.data(), (int)m_initial_buffer.size());
+        m_worker->send_async(m_remote_socket, (char*)m_initial_buffer.data(), (int)m_initial_buffer.size());
         m_initial_buffer.clear();
     }
 }
@@ -238,7 +204,7 @@ void ProxyTCP::on_client_read(char* buf, int len) {
     TrafficManager::instance().report_proxy_tx(len, m_is_direct);
     if (m_state == ESTABLISHED && !m_remote_write_busy) {
         m_remote_write_busy = true;
-        m_worker->write_async(m_remote_socket, buf, len);
+        m_worker->send_async(m_remote_socket, buf, len);
     }
 }
 
@@ -250,7 +216,7 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
     TrafficManager::instance().report_proxy_rx(len, m_is_direct);
     if (m_state == ESTABLISHED && !m_client_write_busy) {
         m_client_write_busy = true;
-        m_worker->write_async(m_client_socket, buf, len);
+        m_worker->send_async(m_client_socket, buf, len);
     }
 }
 
@@ -260,9 +226,6 @@ void ProxyTCP::on_client_write(int len) {
 
 void ProxyTCP::on_remote_write(int len) {
     m_remote_write_busy = false;
-    if (m_state == ESTABLISHED) {
-        m_worker->read_async(m_client_socket);
-    }
 }
 
 void ProxyTCP::on_close() {
