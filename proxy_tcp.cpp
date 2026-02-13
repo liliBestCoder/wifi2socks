@@ -170,6 +170,7 @@ void ProxyTCP::on_remote_connect() {
 
     // Send the buffered initial data to the remote
     if (!m_initial_buffer.empty()) {
+        TrafficManager::instance().report_proxy_tx(m_initial_buffer.size(), m_is_direct);
         m_remote_write_busy = true;
         m_worker->write_async(m_remote_socket, (char*)m_initial_buffer.data(), m_initial_buffer.size());
         m_initial_buffer.clear();
@@ -181,6 +182,7 @@ void ProxyTCP::on_client_read(char* buf, int len) {
         close_session();
         return;
     }
+    TrafficManager::instance().report_proxy_tx(len, m_is_direct);
     if (m_state == ESTABLISHED && !m_remote_write_busy) {
         m_remote_write_busy = true;
         m_worker->write_async(m_remote_socket, buf, len);
@@ -192,6 +194,7 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
         close_session();
         return;
     }
+    TrafficManager::instance().report_proxy_rx(len, m_is_direct);
     if (m_state == ESTABLISHED && !m_client_write_busy) {
         m_client_write_busy = true;
         m_worker->write_async(m_client_socket, buf, len);
