@@ -312,20 +312,33 @@ void WinPkFilterDriver::run() {
                             }
 
                             if (should_intercept) {
-                                ClientKey ck = { ip->SrcAddr, 0 };
-                                OriginalDestination od = { ip->DstAddr, 0 };
+                                OriginalDestination od = { ip->DstAddr, 0, ip->SrcAddr };
+                                ClientKey mapping_key = { m_gateway_ip, 0 }; // Full NAT: App sees everything from Gateway IP
+
                                 if (ip->Proto == IPPROTO_TCP) {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    ck.port = tcp->SrcPort; od.port = tcp->DstPort;
-                                    NatManager::instance().create_tcp_mapping(ck, od);
-                                    ip->DstAddr = m_gateway_ip; tcp->DstPort = htons(NAT_TARGET_PORT);
+                                    od.port = tcp->DstPort;
+                                    mapping_key.port = tcp->SrcPort; // Use client's unique source port
+                                    
+                                    NatManager::instance().create_tcp_mapping(mapping_key, od);
+                                    
+                                    ip->SrcAddr = m_gateway_ip; // FULL NAT
+                                    ip->DstAddr = m_gateway_ip; 
+                                    tcp->DstPort = htons(NAT_TARGET_PORT);
+                                    
                                     ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
                                     recalculate_tcp_checksum(ip);
                                 } else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    ck.port = udp->SrcPort; od.port = udp->DstPort;
-                                    NatManager::instance().create_or_update_udp_mapping(ck, od);
-                                    ip->DstAddr = m_gateway_ip; udp->DstPort = htons(NAT_TARGET_PORT);
+                                    od.port = udp->DstPort;
+                                    mapping_key.port = udp->SrcPort;
+
+                                    NatManager::instance().create_or_update_udp_mapping(mapping_key, od);
+                                    
+                                    ip->SrcAddr = m_gateway_ip; // FULL NAT
+                                    ip->DstAddr = m_gateway_ip; 
+                                    udp->DstPort = htons(NAT_TARGET_PORT);
+                                    
                                     ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
                                     recalculate_udp_checksum(ip);
                                 }
@@ -348,18 +361,20 @@ void WinPkFilterDriver::run() {
                             }
 
                             if (src_port == NAT_TARGET_PORT) {
-                                ClientKey ck = { ip->DstAddr, 0 };
+                                ClientKey mapping_key = { m_gateway_ip, 0 };
                                 if (ip->Proto == IPPROTO_TCP) {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    ck.port = tcp->DstPort;
+                                    mapping_key.port = tcp->DstPort;
                                 } else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    ck.port = udp->DstPort;
+                                    mapping_key.port = udp->DstPort;
                                 }
 
-                                auto od = NatManager::instance().get_mapping(ck);
+                                auto od = NatManager::instance().get_mapping(mapping_key);
                                 if (od) {
                                     ip->SrcAddr = od->ip;
+                                    ip->DstAddr = od->original_client_ip; // Restore client destination IP
+                                    
                                     if (ip->Proto == IPPROTO_TCP) {
                                         PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                         tcp->SrcPort = od->port;

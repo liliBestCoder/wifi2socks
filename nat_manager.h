@@ -25,6 +25,7 @@ struct ClientKeyHash {
 struct OriginalDestination {
     uint32_t ip;
     uint16_t port;
+    uint32_t original_client_ip; // 新增：记录原始客户端 IP
 };
 
 class NatManager {
