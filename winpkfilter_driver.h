@@ -100,4 +100,7 @@ private:
     INTERMEDIATE_BUFFER* m_send_buffer;
     std::mutex m_send_mutex;
     std::mutex m_write_mutex;
+
+    uint8_t m_adapter_mac[6];
+    uint32_t m_gateway_ip;
 };
