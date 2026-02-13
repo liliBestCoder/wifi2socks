@@ -444,3 +444,21 @@ void WorkerPool::for_each_worker(std::function<void(Worker*)> callback) {
         callback(w);
     }
 }
+
+void Worker::read_async(SOCKET s) {
+    queue_task([this, s]() {
+        auto it = m_sockets.find(s);
+        if (it != m_sockets.end()) {
+            post_read(it->second);
+        }
+    });
+}
+
+void Worker::update_read_callback(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read) {
+    queue_task([this, s, on_read]() {
+        auto it = m_sockets.find(s);
+        if (it != m_sockets.end()) {
+            it->second->on_read = on_read;
+        }
+    });
+}

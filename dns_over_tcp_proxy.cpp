@@ -7,7 +7,6 @@
 #include <ws2tcpip.h>
 #include <mswsock.h>
 
-extern LPFN_CONNECTEX get_connect_ex(); // Reuse the helper from proxy_tcp.cpp
 
 DnsOverTcpProxy::DnsOverTcpProxy(const std::vector<uint8_t>& query_payload, ResponseCallback callback)
     : m_state(CONNECTING),
@@ -27,54 +26,47 @@ DnsOverTcpProxy::~DnsOverTcpProxy() {
 }
 
 void DnsOverTcpProxy::start() {
-    m_worker = WorkerPool::instance().get_worker();
+    m_worker = WorkerPool::instance().get_next_worker();
     if (!m_worker) {
         LOG_ERROR("[DoT] No available workers.");
         return;
     }
 
     m_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (m_socket == INVALID_SOCKET) {
+        LOG_ERROR("[DoT] Failed to create socket.");
+        return;
+    }
+    
     u_long mode = 1;
     ioctlsocket(m_socket, FIONBIO, &mode);
-
-    sockaddr_in bind_addr = {0};
-    bind_addr.sin_family = AF_INET;
-    bind_addr.sin_addr.s_addr = INADDR_ANY;
-    bind_addr.sin_port = 0;
-    bind(m_socket, (SOCKADDR*)&bind_addr, sizeof(bind_addr));
-
-    auto self = shared_from_this();
-    m_worker->add_socket(
-        m_socket,
-        this,
-        [self](char* buf, int len) { self->on_read(buf, len); },
-        [self](int len) { self->on_write(len); },
-        [self]() { self->on_close(); }
-    );
-
+    
     sockaddr_in proxy_addr;
     proxy_addr.sin_family = AF_INET;
     inet_pton(AF_INET, g_config.proxy_ip.c_str(), &proxy_addr.sin_addr);
     proxy_addr.sin_port = htons(g_config.proxy_port);
 
-    auto connect_ex = get_connect_ex();
-    if (!connect_ex || !connect_ex(m_socket, (SOCKADDR*)&proxy_addr, sizeof(proxy_addr), NULL, 0, NULL, m_worker->get_overlapped_for_connect(m_socket))) {
-        if (WSAGetLastError() != WSA_IO_PENDING) {
-            LOG_ERROR("[DoT] ConnectEx failed: %d", WSAGetLastError());
-            on_close();
-        }
-    }
+    auto self = shared_from_this();
+    m_worker->connect_async(m_socket, proxy_addr, [self]() {
+        self->on_connect();
+    });
 }
 
 void DnsOverTcpProxy::on_connect() {
-    setsockopt(m_socket, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
+    auto self = shared_from_this();
+    m_worker->add_socket(
+        m_socket,
+        [self](char* buf, int len, sockaddr_in*) { self->on_read(buf, len); },
+        [self](int len) { self->on_write(len); },
+        [self]() { self->on_close(); }
+    );
     send_socks5_auth();
 }
 
 void DnsOverTcpProxy::send_socks5_auth() {
     m_state = SOCKS5_AUTH;
     unsigned char req[] = { 0x05, 0x01, 0x00 };
-    m_worker->write_async(m_socket, (char*)req, sizeof(req));
+    m_worker->send_async(m_socket, (char*)req, sizeof(req));
 }
 
 void DnsOverTcpProxy::send_socks5_connect() {
@@ -88,11 +80,11 @@ void DnsOverTcpProxy::send_socks5_connect() {
     req.push_back((dns_ip >> 16) & 0xFF);
     req.push_back((dns_ip >> 24) & 0xFF);
     
-    uint16_t dns_port = htons(53); // Or 853 for DoT, but standard DNS over TCP uses 53
+    uint16_t dns_port = htons(53); 
     req.push_back(dns_port & 0xFF);
     req.push_back((dns_port >> 8) & 0xFF);
 
-    m_worker->write_async(m_socket, (char*)req.data(), (int)req.size());
+    m_worker->send_async(m_socket, (char*)req.data(), (int)req.size());
 }
 
 void DnsOverTcpProxy::send_dns_query() {
@@ -105,7 +97,7 @@ void DnsOverTcpProxy::send_dns_query() {
     tcp_pkt.insert(tcp_pkt.end(), m_query_payload.begin(), m_query_payload.end());
 
     TrafficManager::instance().report_proxy_tx((int)tcp_pkt.size(), false);
-    m_worker->write_async(m_socket, (char*)tcp_pkt.data(), (int)tcp_pkt.size());
+    m_worker->send_async(m_socket, (char*)tcp_pkt.data(), (int)tcp_pkt.size());
 }
 
 void DnsOverTcpProxy::on_read(char* buf, int len) {
@@ -148,20 +140,16 @@ void DnsOverTcpProxy::handle_dns_response(const char* buf, int len) {
             if (m_read_buffer.size() >= 2) {
                 m_expected_len = ntohs(*(uint16_t*)m_read_buffer.data());
                 m_len_received = true;
+                m_read_buffer.erase(m_read_buffer.begin(), m_read_buffer.begin() + 2);
             } else break;
         }
 
         if (m_len_received) {
-            if (m_read_buffer.size() >= (size_t)2 + m_expected_len) {
-                // We have a full DNS response
-                m_callback((const char*)m_read_buffer.data() + 2, m_expected_len);
-                
-                // For a simple DNS proxy, we close after one response
+            if (m_read_buffer.size() >= m_expected_len) {
+                m_callback((const char*)m_read_buffer.data(), m_expected_len);
                 on_close();
                 break;
             } else {
-                // Need more data
-                m_worker->read_async(m_socket);
                 break;
             }
         }
@@ -169,15 +157,16 @@ void DnsOverTcpProxy::handle_dns_response(const char* buf, int len) {
 }
 
 void DnsOverTcpProxy::on_write(int len) {
-    if (len > 0) {
-        m_worker->read_async(m_socket);
-    }
+    // This is called after a send operation completes. We can post another read.
+    // The worker loop already does this, so this can be a no-op for now.
 }
 
 void DnsOverTcpProxy::on_close() {
+    if (m_state == CLOSED) return;
     m_state = CLOSED;
     if (m_socket != INVALID_SOCKET) {
         m_worker->remove_socket(m_socket);
         m_socket = INVALID_SOCKET;
     }
+    // The object will be destroyed when the last shared_ptr goes out of scope.
 }

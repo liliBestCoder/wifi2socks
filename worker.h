@@ -119,6 +119,8 @@ public:
     // Returns true if operation posted (or queued), false if socket not found/closed.
     // The callback on_write passed in add_socket will be called when done.
     bool send_async(SOCKET s, char* buf, int len);
+    void read_async(SOCKET s);
+    void update_read_callback(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read);
 
     void queue_task(std::function<void()> task);
 

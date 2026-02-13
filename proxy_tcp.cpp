@@ -77,7 +77,7 @@ ProxyTCP::~ProxyTCP() {
 }
 
 void ProxyTCP::start() {
-    m_worker = WorkerPool::instance().get_worker();
+    m_worker = WorkerPool::instance().get_worker(m_original_dest.port);
     if (!m_worker) {
         LOG_ERROR("[ProxyTCP] No available workers. Closing session.");
         close_session();
@@ -85,16 +85,15 @@ void ProxyTCP::start() {
     }
 
     // Add client socket to IOCP for initial read
+    auto self = shared_from_this();
     retain(); // Increment ref count for the client socket
     m_worker->add_socket(
         m_client_socket,
-        this,
-        [this](char* buf, int len) { on_client_initial_read(buf, len); },
+        [self](char* buf, int len, sockaddr_in*) { self->on_client_initial_read(buf, len); },
         nullptr, // No write callback initially
-        [this]() { on_close(); }
+        [self]() { self->on_close(); }
     );
-    // Request the first read
-    m_worker->read_async(m_client_socket);
+    // The worker's loop will automatically post the first read.
 }
 
 void ProxyTCP::on_client_initial_read(char* buf, int len) {
@@ -106,12 +105,12 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
     // Limit buffer size to prevent memory abuse
     size_t max_len = (g_config.max_sni_len > 0) ? g_config.max_sni_len : 16384;
     if (m_initial_buffer.size() + len > max_len) {
-        LOG_WARN("[ProxyTCP] Initial buffer exceeded limit. Deciding with current data.");
+        LOG_INFO("[ProxyTCP] Initial buffer exceeded limit. Deciding with current data.");
         len = (int)(max_len - m_initial_buffer.size());
     }
 
     if (len > 0) {
-        m_initial_buffer.insert(m_initial_buffer.end(), buf, buf + len);
+        m_initial_buffer.insert(m_initial_buffer.end(), (const uint8_t*)buf, (const uint8_t*)buf + len);
     }
 
     // 1. Check for /generate_204 Mock (Port 80)
@@ -124,49 +123,52 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
     }
 
     // 2. Try to parse Domain (SNI or Host)
-    bool ready = false;
+    bool ready_to_decide = false;
     std::string domain = TlsParser::parse_client_hello((const char*)m_initial_buffer.data(), m_initial_buffer.size());
     if (!domain.empty()) {
         m_detected_domain = domain;
-        ready = true;
+        ready_to_decide = true;
     } else if (is_http_start(m_initial_buffer.data(), m_initial_buffer.size())) {
         domain = parse_http_host(m_initial_buffer.data(), m_initial_buffer.size());
         if (!domain.empty()) {
             m_detected_domain = domain;
-            ready = true;
+            ready_to_decide = true;
         }
     }
 
-    // If still not ready, we might need more data, unless we reached the limit
-    if (!ready && m_initial_buffer.size() < max_len) {
-        m_worker->read_async(m_client_socket);
+    // If still not ready, and we haven't hit the buffer limit, wait for more data.
+    // The worker loop will automatically post another read.
+    if (!ready_to_decide && m_initial_buffer.size() < max_len) {
         return;
     }
 
     // 3. Routing Decision (Priority: RuleManager > GeoChecker > IP)
     if (!m_detected_domain.empty()) {
-        Rule rule = RuleManager::instance().match(m_detected_domain);
-        if (rule == RULE_DIRECT) m_is_direct = true;
-        else if (rule == RULE_PROXY) m_is_direct = false;
-        else {
-            // Fallback to GeoChecker
+        RuleAction rule = RuleManager::instance().match_domain(m_detected_domain);
+        if (rule == RULE_DIRECT) {
+            m_is_direct = true;
+        } else if (rule == RULE_PROXY) {
+            m_is_direct = false;
+        } else { // RULE_PASS
             m_is_direct = GeoChecker::instance().is_cn_domain(m_detected_domain);
         }
     } else {
-        // No domain detected, check IP
+        // No domain detected, fallback to IP-based routing
         uint32_t ip_h = ntohl(m_original_dest.ip);
-        Rule rule = RuleManager::instance().match_ip(ip_h);
-        if (rule == RULE_DIRECT) m_is_direct = true;
-        else if (rule == RULE_PROXY) m_is_direct = false;
-        else {
+        RuleAction rule = RuleManager::instance().match_ip(ip_h);
+        if (rule == RULE_DIRECT) {
+            m_is_direct = true;
+        } else if (rule == RULE_PROXY) {
+            m_is_direct = false;
+        } else { // RULE_PASS
             m_is_direct = GeoChecker::instance().is_cn_ip(ip_h);
         }
     }
-
-    // Switch client socket's read callback to forwarding mode
-    m_worker->update_read_callback(m_client_socket, [this](char* buf, int len) { on_client_read(buf, len); });
     
-    // Connect to remote
+    auto self = shared_from_this();
+    m_worker->update_read_callback(m_client_socket, [self](char* b, int l, sockaddr_in*) { self->on_client_read(b, l); });
+    
+    // 4. Connect to remote
     connect_remote();
 }
 
