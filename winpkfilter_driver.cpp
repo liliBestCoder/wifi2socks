@@ -298,7 +298,7 @@ void WinPkFilterDriver::run() {
                     if (!p.outbound) {
                         // --- 2. Inbound: Client to Host (INTERCEPT) ---
                         bool intercepted = false;
-                        if (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) {
+                        if ((ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) && ip->SrcAddr != m_gateway_ip) {
                             bool should_intercept = false;
                             if (ip->Proto == IPPROTO_TCP) {
                                 if (ip->DstAddr != m_gateway_ip) should_intercept = true;
@@ -312,17 +312,16 @@ void WinPkFilterDriver::run() {
                             }
 
                             if (should_intercept) {
-                                OriginalDestination od = { ip->DstAddr, 0, ip->SrcAddr };
-                                ClientKey mapping_key = { ip->SrcAddr, 0 }; // No Full NAT: App sees the real client IP
+                                OriginalDestination od(ip->DstAddr, 0, ip->SrcAddr);
+                                uint64_t mapping_key = 0;
 
                                 if (ip->Proto == IPPROTO_TCP) {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     od.port = tcp->DstPort;
-                                    mapping_key.port = tcp->SrcPort; // Use client's unique source port
+                                    mapping_key = NatManager::make_key(ip->SrcAddr, tcp->SrcPort);
                                     
                                     NatManager::instance().create_tcp_mapping(mapping_key, od);
                                     
-                                    // ip->SrcAddr = m_gateway_ip; // FULL NAT DISABLED
                                     ip->DstAddr = m_gateway_ip; 
                                     tcp->DstPort = htons(NAT_TARGET_PORT);
                                     
@@ -331,11 +330,10 @@ void WinPkFilterDriver::run() {
                                 } else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     od.port = udp->DstPort;
-                                    mapping_key.port = udp->SrcPort;
+                                    mapping_key = NatManager::make_key(ip->SrcAddr, udp->SrcPort);
 
                                     NatManager::instance().create_or_update_udp_mapping(mapping_key, od);
                                     
-                                    // ip->SrcAddr = m_gateway_ip; // FULL NAT DISABLED
                                     ip->DstAddr = m_gateway_ip; 
                                     udp->DstPort = htons(NAT_TARGET_PORT);
                                     
@@ -361,13 +359,13 @@ void WinPkFilterDriver::run() {
                             }
 
                             if (src_port == NAT_TARGET_PORT) {
-                                ClientKey mapping_key = { ip->DstAddr, 0 };
+                                uint64_t mapping_key = 0;
                                 if (ip->Proto == IPPROTO_TCP) {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    mapping_key.port = tcp->DstPort;
+                                    mapping_key = NatManager::make_key(ip->DstAddr, tcp->DstPort);
                                 } else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    mapping_key.port = udp->DstPort;
+                                    mapping_key = NatManager::make_key(ip->DstAddr, udp->DstPort);
                                 }
 
                                 auto od = NatManager::instance().get_mapping(mapping_key);

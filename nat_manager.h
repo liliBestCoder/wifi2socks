@@ -7,47 +7,40 @@
 #include <shared_mutex>
 #include <optional>
 
-struct ClientKey {
-    uint32_t ip;
-    uint16_t port;
-
-    bool operator==(const ClientKey& o) const {
-        return ip == o.ip && port == o.port;
-    }
-};
-
-struct ClientKeyHash {
-    size_t operator()(const ClientKey& k) const {
-        return std::hash<uint32_t>{}(k.ip) ^ (std::hash<uint16_t>{}(k.port) << 1);
-    }
-};
-
 struct OriginalDestination {
     uint32_t ip;
     uint16_t port;
-    uint32_t original_client_ip; // 新增：记录原始客户端 IP
+    uint32_t original_client_ip;
+
+    OriginalDestination() : ip(0), port(0), original_client_ip(0) {}
+    OriginalDestination(uint32_t i, uint16_t p, uint32_t oc) 
+        : ip(i), port(p), original_client_ip(oc) {}
 };
 
 class NatManager {
 public:
     static NatManager& instance();
 
+    static uint64_t make_key(uint32_t ip, uint16_t port) {
+        return (static_cast<uint64_t>(ip) << 16) | port;
+    }
+
     // TCP Mappings (Connection-based)
-    void create_tcp_mapping(const ClientKey& key, const OriginalDestination& dest);
-    void remove_tcp_mapping(const ClientKey& key);
+    void create_tcp_mapping(uint64_t key, const OriginalDestination& dest);
+    void remove_tcp_mapping(uint64_t key);
     
     // UDP Mappings (Flow-based with timeout)
-    void create_or_update_udp_mapping(const ClientKey& key, const OriginalDestination& dest);
+    void create_or_update_udp_mapping(uint64_t key, const OriginalDestination& dest);
     
     // Generic lookup
-    std::optional<OriginalDestination> get_mapping(const ClientKey& key);
+    std::optional<OriginalDestination> get_mapping(uint64_t key);
 
 private:
     NatManager();
     ~NatManager();
 
-    std::unordered_map<ClientKey, OriginalDestination, ClientKeyHash> m_tcp_map;
-    std::unordered_map<ClientKey, std::pair<OriginalDestination, uint64_t>, ClientKeyHash> m_udp_map;
+    std::unordered_map<uint64_t, OriginalDestination> m_tcp_map;
+    std::unordered_map<uint64_t, std::pair<OriginalDestination, uint64_t>> m_udp_map;
     
     mutable std::shared_mutex m_tcp_mtx;
     mutable std::shared_mutex m_udp_mtx;

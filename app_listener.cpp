@@ -111,9 +111,7 @@ void AppListener::tcp_listener_thread() {
         LOG_DEBUG("[AppListener] Accepted new TCP connection from %s:%d", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
         
         // Find original destination from NAT manager
-        ClientKey key;
-        key.ip = client_addr.sin_addr.s_addr;
-        key.port = client_addr.sin_port;
+        uint64_t key = NatManager::make_key(client_addr.sin_addr.s_addr, client_addr.sin_port);
         
         auto dest = NatManager::instance().get_mapping(key);
 
@@ -168,9 +166,7 @@ void AppListener::udp_listener_thread() {
         }
 
         // Find original destination
-        ClientKey key;
-        key.ip = client_addr.sin_addr.s_addr;
-        key.port = client_addr.sin_port;
+        uint64_t key = NatManager::make_key(client_addr.sin_addr.s_addr, client_addr.sin_port);
 
         auto dest = NatManager::instance().get_mapping(key);
 
