@@ -288,6 +288,20 @@ void WinPkFilterDriver::run() {
                     p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p));
                 } else if (ether_type == ETHERTYPE_IP) {
                     PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
+
+                    // --- Global UDP Exemption (DHCP, Discovery, etc.) ---
+                    if (ip->Proto == IPPROTO_UDP) {
+                        PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                        USHORT sport = ntohs(udp->SrcPort);
+                        USHORT dport = ntohs(udp->DstPort);
+                        if (sport == 67 || sport == 68 || dport == 67 || dport == 68 ||
+                            sport == 137 || sport == 138 || dport == 137 || dport == 138 ||
+                            dport == 5353 || dport == 5355 || dport == 1900) {
+                            p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p));
+                            continue;
+                        }
+                    }
+
                     if (p.outbound) {
                         if (ip->SrcAddr == local_ip) { // Case 1: Response from local service
                             ClientKey ck = { ip->DstAddr, 0 };
@@ -314,12 +328,6 @@ void WinPkFilterDriver::run() {
                                     ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4); recalculate_tcp_checksum(ip);
                                 } else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    USHORT dport_h = ntohs(udp->DstPort);
-                                    // Ignore DHCP and local discovery/NetBIOS traffic
-                                    if (dport_h == 67 || dport_h == 68 || dport_h == 5353 || dport_h == 5355 || dport_h == 137 || dport_h == 138 || dport_h == 1900) {
-                                        packets_to_send.push_back(std::move(p));
-                                        continue;
-                                    }
                                     ck.port = udp->SrcPort; od.port = udp->DstPort;
                                     NatManager::instance().create_or_update_udp_mapping(ck, od);
                                     ip->DstAddr = NAT_TARGET_IP; udp->DstPort = htons(NAT_TARGET_PORT);
