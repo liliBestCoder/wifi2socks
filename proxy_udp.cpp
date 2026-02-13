@@ -7,6 +7,7 @@
 #include "traffic_manager.h"
 #include "app_listener.h"
 #include "proxy_tcp.h"
+#include "dns_over_tcp_proxy.h"
 
 #include <unordered_map>
 #include <mutex>
@@ -96,10 +97,10 @@ public:
                         }
                     };
                     
-                    // We need a way to inject data into ProxyTCP and get a response.
-                    // Let's create a special constructor or a static method for this one-shot task.
-                    // For now, let's just log it and proceed with UDP forwarding as a placeholder.
-                    LOG_INFO("[DNS] DoT logic not fully implemented yet. Forwarding as UDP for now.");
+                    // Create and start the one-shot DoT proxy session
+                    std::vector<uint8_t> query_vec((uint8_t*)data, (uint8_t*)data + len);
+                    std::make_shared<DnsOverTcpProxy>(query_vec, on_dns_response)->start();
+                    return; // Done for this packet
                 }
             }
         }

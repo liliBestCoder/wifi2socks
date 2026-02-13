@@ -114,10 +114,8 @@ void ProxyTCP::connect_remote() {
     } else {
         LOG_INFO("[ProxyTCP] Routing PROXY for domain %s", m_detected_domain.c_str());
         // For proxy connection, resolve the proxy server address
-        // This part needs your proxy server logic (e.g., from config)
-        // For now, placeholder:
-        inet_pton(AF_INET, g_config.proxy_server_ip.c_str(), &remote_addr.sin_addr);
-        remote_addr.sin_port = htons(g_config.proxy_server_port);
+        inet_pton(AF_INET, g_config.proxy_ip.c_str(), &remote_addr.sin_addr);
+        remote_addr.sin_port = htons(g_config.proxy_port);
     }
     
     m_remote_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);

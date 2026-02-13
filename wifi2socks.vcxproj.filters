@@ -81,6 +81,9 @@
     <ClCompile Include="app_listener.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="dns_over_tcp_proxy.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="common.pb.h">
@@ -150,6 +153,9 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="app_listener.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="dns_over_tcp_proxy.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="ndisapi.h">

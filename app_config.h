@@ -13,6 +13,7 @@ struct AppConfig {
     
     std::string proxy_ip;
     uint16_t proxy_port;
+    std::string proxy_dns_server;
     
     uint16_t lwip_listen_port;
     uint32_t max_sni_len;
@@ -39,6 +40,7 @@ struct AppConfig {
         
         proxy_ip = "127.0.0.1";
         proxy_port = 2080;
+        proxy_dns_server = "8.8.8.8";
         
         lwip_listen_port = 7000;
         max_sni_len = 4096;
