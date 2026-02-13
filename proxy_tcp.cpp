@@ -56,7 +56,7 @@ void ProxyTCP::start() {
     m_worker->add_socket(
         m_client_socket,
         [self](char* buf, int len, sockaddr_in*) { self->on_client_initial_read(buf, len); },
-        nullptr, 
+        [self](int len) { self->on_client_write(len); }, 
         [self]() { self->on_close(); }
     );
 }
@@ -249,9 +249,17 @@ void ProxyTCP::on_client_read(char* buf, int len) {
         return;
     }
     TrafficManager::instance().report_proxy_tx(len, m_is_direct);
-    if (m_state == ESTABLISHED && !m_remote_write_busy) {
-        m_remote_write_busy = true;
-        m_worker->send_async(m_remote_socket, buf, len);
+    
+    if (m_state == ESTABLISHED) {
+        if (!m_remote_write_busy) {
+            m_remote_write_busy = true;
+            m_worker->send_async(m_remote_socket, buf, len);
+        } else {
+            m_remote_outbox.insert(m_remote_outbox.end(), buf, buf + len);
+        }
+    } else {
+        // Still connecting, buffer the data to be sent once established
+        m_initial_buffer.insert(m_initial_buffer.end(), buf, buf + len);
     }
 }
 
@@ -261,18 +269,38 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
         return;
     }
     TrafficManager::instance().report_proxy_rx(len, m_is_direct);
-    if (m_state == ESTABLISHED && !m_client_write_busy) {
-        m_client_write_busy = true;
-        m_worker->send_async(m_client_socket, buf, len);
+    
+    if (m_state == ESTABLISHED) {
+        if (!m_client_write_busy) {
+            m_client_write_busy = true;
+            m_worker->send_async(m_client_socket, buf, len);
+        } else {
+            m_client_outbox.insert(m_client_outbox.end(), buf, buf + len);
+        }
     }
+    // If not established, we shouldn't really be receiving data from remote yet
 }
 
 void ProxyTCP::on_client_write(int len) {
-    m_client_write_busy = false;
+    if (!m_client_outbox.empty()) {
+        std::vector<uint8_t> data = std::move(m_client_outbox);
+        m_client_outbox.clear();
+        m_worker->send_async(m_client_socket, (char*)data.data(), (int)data.size());
+        // m_client_write_busy remains true
+    } else {
+        m_client_write_busy = false;
+    }
 }
 
 void ProxyTCP::on_remote_write(int len) {
-    m_remote_write_busy = false;
+    if (!m_remote_outbox.empty()) {
+        std::vector<uint8_t> data = std::move(m_remote_outbox);
+        m_remote_outbox.clear();
+        m_worker->send_async(m_remote_socket, (char*)data.data(), (int)data.size());
+        // m_remote_write_busy remains true
+    } else {
+        m_remote_write_busy = false;
+    }
 }
 
 void ProxyTCP::on_close() {

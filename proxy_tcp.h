@@ -48,7 +48,10 @@ private:
     OriginalDestination m_original_dest;
     Worker* m_worker;
 
-    std::vector<uint8_t> m_initial_buffer; // Buffer for SNI sniffing
+    std::vector<uint8_t> m_initial_buffer; // Buffer for data received before ESTABLISHED
+    std::vector<uint8_t> m_client_outbox;  // Data to be sent to client
+    std::vector<uint8_t> m_remote_outbox;  // Data to be sent to remote
+    
     std::string m_detected_domain;
     bool m_is_direct;
 
