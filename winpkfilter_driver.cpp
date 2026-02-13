@@ -67,8 +67,6 @@ const USHORT ETHERTYPE_ARP = 0x0806;
 #pragma comment(lib, "ndisapilib.lib")
 #pragma comment(lib, "iphlpapi.lib")
 
-// Define the NAT target address and port
-const ULONG NAT_TARGET_IP = inet_addr("127.0.0.1");
 const USHORT NAT_TARGET_PORT = 3080;
 
 // Helper to calculate TCP/UDP checksum
@@ -225,7 +223,6 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
 
 void WinPkFilterDriver::run() {
     m_read_request->hAdapterHandle = m_adapter_handle;
-    ULONG local_ip = inet_addr("127.0.0.1");
 
     while (m_running) {
         WaitForSingleObject(m_wait_event, INFINITE);
@@ -245,7 +242,6 @@ void WinPkFilterDriver::run() {
                     PINTERMEDIATE_BUFFER filled_buf = m_read_request->EthPacket[i].Buffer;
                     bool outbound = (filled_buf->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
                     
-                    // Zero-copy: Pointer exchange with PacketPool
                     captured_packets.push_back({ RawPacketPtr(filled_buf), outbound });
                     
                     m_read_buffers[i] = PacketPool::instance().acquire();
@@ -279,7 +275,7 @@ void WinPkFilterDriver::run() {
                             memcpy(rarp->SrcMac, m_adapter_mac, 6); rarp->SrcIp = m_gateway_ip;
                             memcpy(rarp->DstMac, arp->SrcMac, 6); rarp->DstIp = arp->SrcIp;
                             send_to_adapter((const char*)reply, 60);
-                            continue; // ARP handled
+                            continue;
                         }
                     }
                     p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p));
@@ -291,7 +287,6 @@ void WinPkFilterDriver::run() {
                         PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                         USHORT sport = ntohs(udp->SrcPort);
                         USHORT dport = ntohs(udp->DstPort);
-                        // DHCP (67, 68), mDNS (5353), LLMNR (5355), NetBIOS (137, 138), SSDP (1900)
                         if (sport == 67 || sport == 68 || dport == 67 || dport == 68 ||
                             sport == 137 || sport == 138 || dport == 137 || dport == 138 ||
                             dport == 5353 || dport == 5355 || dport == 1900) {
@@ -301,19 +296,17 @@ void WinPkFilterDriver::run() {
                     }
 
                     if (!p.outbound) {
-                        // --- 2. Inbound: From WiFi client to Host (INTERCEPT) ---
+                        // --- 2. Inbound: Client to Host (INTERCEPT) ---
                         bool intercepted = false;
                         if (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) {
                             bool should_intercept = false;
                             if (ip->Proto == IPPROTO_TCP) {
-                                // Intercept TCP if not destined for gateway's local services (except port 53)
                                 if (ip->DstAddr != m_gateway_ip) should_intercept = true;
                                 else {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     if (ntohs(tcp->DstPort) == 53) should_intercept = true;
                                 }
                             } else {
-                                // Intercept UDP only for DNS (port 53)
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                 if (ntohs(udp->DstPort) == 53) should_intercept = true;
                             }
@@ -325,14 +318,14 @@ void WinPkFilterDriver::run() {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     ck.port = tcp->SrcPort; od.port = tcp->DstPort;
                                     NatManager::instance().create_tcp_mapping(ck, od);
-                                    ip->DstAddr = local_ip; tcp->DstPort = htons(NAT_TARGET_PORT);
+                                    ip->DstAddr = m_gateway_ip; tcp->DstPort = htons(NAT_TARGET_PORT);
                                     ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
                                     recalculate_tcp_checksum(ip);
                                 } else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     ck.port = udp->SrcPort; od.port = udp->DstPort;
                                     NatManager::instance().create_or_update_udp_mapping(ck, od);
-                                    ip->DstAddr = local_ip; udp->DstPort = htons(NAT_TARGET_PORT);
+                                    ip->DstAddr = m_gateway_ip; udp->DstPort = htons(NAT_TARGET_PORT);
                                     ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
                                     recalculate_udp_checksum(ip);
                                 }
@@ -342,9 +335,9 @@ void WinPkFilterDriver::run() {
                         }
                         if (!intercepted) packets_to_mstcp.push_back(std::move(p));
                     } else {
-                        // --- 3. Outbound: From Host to WiFi client (RESTORE) ---
+                        // --- 3. Outbound: Host to Client (RESTORE) ---
                         bool restored = false;
-                        if (ip->SrcAddr == local_ip) { // response likely from our app
+                        if (ip->SrcAddr == m_gateway_ip) {
                             if (ip->Proto == IPPROTO_TCP) {
                                 PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                 if (ntohs(tcp->SrcPort) == NAT_TARGET_PORT) {
