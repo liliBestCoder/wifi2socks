@@ -113,67 +113,31 @@ int main() {
     set_winpkfilter_driver(&pk_driver);
     
     WorkerPool::instance().init(8);
-    lwip_init();
 
-    ip4_addr_t ip, mask, gw;
-    ip4addr_aton(g_config.tap_ip.c_str(), &ip);
-    ip4addr_aton(g_config.tap_netmask.c_str(), &mask); 
-    ip4addr_aton("0.0.0.0", &gw); 
-
-    netif_add(&g_netif, &ip, &mask, &gw, NULL, netif_init_cb, ethernet_input);
-    netif_set_default(&g_netif);
+    // LwIP stack and netif initialization has been removed.
+    // The new NAT logic is self-contained within the WinPkFilterDriver.
     
     if (!adapter_name.empty()) {
-        if (pk_driver.get_adapter_mac(adapter_name, g_netif.hwaddr)) {
-             LOG_INFO("[CORE] LwIP MAC set to %02X:%02X:%02X:%02X:%02X:%02X", 
-                 g_netif.hwaddr[0], g_netif.hwaddr[1], g_netif.hwaddr[2], 
-                 g_netif.hwaddr[3], g_netif.hwaddr[4], g_netif.hwaddr[5]);
+        // The driver's get_adapter_mac is no longer needed here as the driver handles its own setup.
+        LOG_INFO("[CORE] Adapter found: %s", adapter_name.c_str());
+    }
+    
+    // The driver now handles packet processing internally for NAT.
+    // We no longer need to pass a complex packet handler.
+    // The empty lambda is a placeholder as the driver's run loop ignores it.
+    if (!adapter_name.empty()) {
+        if (!pk_driver.start_batch(adapter_name, [](std::vector<WinPkFilterDriver::Packet>&&) {})) {
+            LOG_ERROR("[CORE] Failed to start WinPkFilter driver with internal NAT.");
         } else {
-             LOG_ERROR("[CORE] Failed to find MAC for adapter %s", adapter_name.c_str());
-        }
-    }
-    
-    netif_set_up(&g_netif);
-    netif_set_link_up(&g_netif);
-
-    if (!adapter_name.empty()) {
-        if (!pk_driver.start_batch(adapter_name, [](std::vector<WinPkFilterDriver::Packet>&& packets) {
-            std::vector<WinPkFilterDriver::Packet> inbound_pkts;
-            inbound_pkts.reserve(packets.size());
-
-            for (auto& p : packets) {
-                // Pipeline monitoring
-                PacketMonitor::instance().publish((const char*)p.data->m_IBuffer, p.data->m_Length);
-
-                if (p.outbound) {
-                    // Zero-copy: Pass pooled buffer directly
-                    process_ethernet_frame((const char*)p.data->m_IBuffer, p.data->m_Length, true);
-                } else {
-                    inbound_pkts.push_back(std::move(p));
-                }
-            }
-
-            if (!inbound_pkts.empty()) {
-                auto pkts_ptr = std::make_shared<std::vector<WinPkFilterDriver::Packet>>(std::move(inbound_pkts));
-                MainDispatcher::instance().queue_task([pkts_ptr]() {
-                    for (const auto& p : *pkts_ptr) {
-                        process_ethernet_frame((const char*)p.data->m_IBuffer, p.data->m_Length, false);
-                    }
-                });
-            }
-        })) {
-            LOG_ERROR("[CORE] Failed to start WinPkFilter driver in batch mode.");
+            LOG_INFO("[CORE] WinPkFilter driver started with internal NAT.");
         }
     }
 
-    struct tcp_pcb* pcb = tcp_new();
-    tcp_bind(pcb, IP_ADDR_ANY, g_config.lwip_listen_port);
-    pcb = tcp_listen(pcb);
-    tcp_accept(pcb, tcp_proxy_accept);
+    // TODO: Start the new application listener on 127.0.0.1:3080 here.
+    // This will handle incoming TCP connections and UDP packets redirected by the driver.
 
     SimpleHttpServer::instance().start(g_config.http_api_port);
 
-    uint64_t last_cleanup = 0;
     uint64_t last_keepalive = 0;
     uint64_t last_stats = 0;
     size_t peak_q_size = 0;
@@ -185,10 +149,9 @@ int main() {
         }
 
         MainDispatcher::instance().process_pending();
-        sys_check_timeouts();
-        udp_check_timeouts();
-
-        flush_outbound_packets();
+        
+        // LwIP timeout checks are no longer needed.
+        // The old NatTable cleanup is also removed; NatManager has its own.
 
         uint64_t now = GetTickCount64();
 
@@ -200,16 +163,12 @@ int main() {
             last_stats = now;
         }
 
-        if (now - last_cleanup > 10000) {
-            NatTable::instance().cleanup(300000); 
-            last_cleanup = now;
-        }
         if (now - last_keepalive > 1000) {
             WiFiAPManager::instance().CheckKeepAlive();
             last_keepalive = now;
         }
 
-        WaitForSingleObject(MainDispatcher::instance().get_event_handle(), 1);
+        WaitForSingleObject(MainDispatcher::instance().get_event_handle(), 100); // Wait with a timeout
     }
     return 0;
 }
