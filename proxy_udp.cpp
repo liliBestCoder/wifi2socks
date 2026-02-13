@@ -1,3 +1,4 @@
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include "proxy_udp.h"
 #include "worker.h"
 #include "logger.h"
@@ -20,7 +21,7 @@ public:
     UdpProxyManager() : m_worker(nullptr) {}
 
     void initialize() {
-        m_worker = WorkerPool::instance().get_worker(); 
+        m_worker = WorkerPool::instance().get_next_worker(); 
         if (!m_worker) {
             LOG_ERROR("[UdpProxy] Could not get a worker for UDP operations.");
         }
@@ -69,7 +70,7 @@ public:
 
     void handle_data(SOCKET listener_socket, const char* data, int len, const sockaddr_in* client_addr, const OriginalDestination* dest) {
         if (!m_worker) {
-            LOG_WARN("[UdpProxy] Not initialized. Dropping packet.");
+            LOG_ERROR("[UdpProxy] Not initialized. Dropping packet.");
             return;
         }
 
@@ -80,8 +81,8 @@ public:
         if (dport == 53) {
             std::string domain = parse_dns_query_domain(data, len);
             if (!domain.empty()) {
-                Rule rule = RuleManager::instance().match(domain);
-                bool should_proxy_dns = (rule == RULE_PROXY) || (rule == RULE_PASS && !GeoChecker::instance().is_cn_domain(domain));
+                RouteAction rule = RuleManager::instance().match_domain(domain);
+                bool should_proxy_dns = (rule == RouteAction::PROXY) || (rule == RouteAction::PASS && !GeoChecker::instance().is_cn_domain(domain));
 
                 if (should_proxy_dns) {
                     LOG_INFO("[DNS] Routing DNS query for '%s' over TCP (DoT).", domain.c_str());
@@ -100,12 +101,12 @@ public:
         // --- 2. QUIC Handling (Port 443) ---
         else if (dport == 443) {
             uint32_t ip_h = ntohl(dest->ip);
-            Rule rule = RuleManager::instance().match_ip(ip_h);
+            RouteAction rule = RuleManager::instance().match_ip(ip_h);
             
-            bool is_cn = (rule == RULE_DIRECT) || (rule == RULE_PASS && GeoChecker::instance().is_cn_ip(ip_h));
+            bool is_cn = (rule == RouteAction::DIRECT) || (rule == RouteAction::PASS && GeoChecker::instance().is_cn_ip(ip_h));
             
             if (!is_cn) {
-                LOG_DEBUG("[UdpProxy] Dropping international QUIC packet to %s", inet_ntoa({.s_addr = dest->ip}));
+                LOG_DEBUG("[UdpProxy] Dropping international QUIC packet to %s", inet_ntoa(*(in_addr*)&(dest->ip)));
                 return; // DROP
             }
             is_direct = true;
@@ -157,7 +158,7 @@ private:
                 sendto(listener_socket, buf, len, 0, (const sockaddr*)&client_addr_to_send, sizeof(client_addr_to_send));
             }
         } else {
-            LOG_WARN("[UdpProxy] Received a UDP packet on a remote socket but could not find a reverse route.");
+            LOG_ERROR("[UdpProxy] Received a UDP packet on a remote socket but could not find a reverse route.");
         }
     }
     
@@ -181,23 +182,23 @@ private:
         
         m_worker->add_socket(
             new_socket,
-            nullptr, 
             [this, new_socket](char* buf, int len, const sockaddr_in* from) { this->on_remote_read(new_socket, buf, len, from); },
             nullptr,
-            [this, dest_key]() { 
+            [this, dest_key]() {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 auto it = m_remote_sockets.find(dest_key);
                 if (it != m_remote_sockets.end()) {
                     m_reverse_routes.erase(it->second);
                     m_remote_sockets.erase(it);
                 }
-            }
+            },
+            true
         );
 
         m_remote_sockets[dest_key] = new_socket;
         m_reverse_routes[new_socket] = *client_addr;
         
-        m_worker->read_from_async(new_socket);
+        m_worker->read_async(new_socket);
 
         LOG_DEBUG("[UdpProxy] Created new remote UDP socket for dest key %llu", dest_key);
 

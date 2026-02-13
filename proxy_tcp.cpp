@@ -11,26 +11,7 @@
 #include <vector>
 #include <algorithm>
 
-// --- HTTP Parsing Helpers ---
-bool is_http_start(const uint8_t* data, size_t len) {
-    if (len < 4) return false;
-    return (memcmp(data, "GET ", 4) == 0 || memcmp(data, "POST", 4) == 0 || 
-            memcmp(data, "HEAD", 4) == 0 || memcmp(data, "PUT ", 4) == 0 ||
-            memcmp(data, "CONN", 4) == 0); // CONNECT
-}
 
-std::string parse_http_host(const uint8_t* data, size_t len) {
-    std::string s((const char*)data, len);
-    size_t pos = s.find("Host: ");
-    if (pos == std::string::npos) return "";
-    pos += 6;
-    size_t end = s.find("\r\n", pos);
-    if (end == std::string::npos) return "";
-    std::string host = s.substr(pos, end - pos);
-    size_t port_pos = host.find(':');
-    if (port_pos != std::string::npos) host = host.substr(0, port_pos);
-    return host;
-}
 
 bool is_generate_204_request(const uint8_t* data, size_t len) {
     if (len < 20) return false;
@@ -105,7 +86,7 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
     }
 
     bool ready_to_decide = false;
-    std::string domain = TlsParser::parse_client_hello((const char*)m_initial_buffer.data(), m_initial_buffer.size());
+    std::string domain = parse_tls_sni(m_initial_buffer.data(), m_initial_buffer.size());
     if (!domain.empty()) {
         m_detected_domain = domain;
         ready_to_decide = true;
@@ -122,15 +103,15 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
     }
 
     if (!m_detected_domain.empty()) {
-        RuleAction rule = RuleManager::instance().match_domain(m_detected_domain);
-        if (rule == RULE_DIRECT) m_is_direct = true;
-        else if (rule == RULE_PROXY) m_is_direct = false;
+        RouteAction rule = RuleManager::instance().match_domain(m_detected_domain);
+        if (rule == RouteAction::DIRECT) m_is_direct = true;
+        else if (rule == RouteAction::PROXY) m_is_direct = false;
         else m_is_direct = GeoChecker::instance().is_cn_domain(m_detected_domain);
     } else {
         uint32_t ip_h = ntohl(m_original_dest.ip);
-        RuleAction rule = RuleManager::instance().match_ip(ip_h);
-        if (rule == RULE_DIRECT) m_is_direct = true;
-        else if (rule == RULE_PROXY) m_is_direct = false;
+        RouteAction rule = RuleManager::instance().match_ip(ip_h);
+        if (rule == RouteAction::DIRECT) m_is_direct = true;
+        else if (rule == RouteAction::PROXY) m_is_direct = false;
         else m_is_direct = GeoChecker::instance().is_cn_ip(ip_h);
     }
     

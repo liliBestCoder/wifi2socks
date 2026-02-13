@@ -1,3 +1,4 @@
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
 #include "app_listener.h"
 #include "logger.h"
 #include "app_config.h"
@@ -16,7 +17,7 @@ AppListener& AppListener::instance() {
     return inst;
 }
 
-AppListener::AppListener() : m_running(false), m_tcp_socket(INVALID_SOCKET), m_udp_socket(INVALID_SOCKET) {}
+AppListener::AppListener() : m_running(false), m_tcp_socket(nullptr), m_udp_socket(nullptr) {}
 
 AppListener::~AppListener() {
     stop();
@@ -50,13 +51,13 @@ void AppListener::stop() {
     m_running = false;
 
     // Close sockets to unblock listener threads
-    if (m_tcp_socket != INVALID_SOCKET) {
+    if (m_tcp_socket != nullptr) {
         closesocket((SOCKET)m_tcp_socket);
-        m_tcp_socket = INVALID_SOCKET;
+        m_tcp_socket = nullptr;
     }
-    if (m_udp_socket != INVALID_SOCKET) {
+    if (m_udp_socket != nullptr) {
         closesocket((SOCKET)m_udp_socket);
-        m_udp_socket = INVALID_SOCKET;
+        m_udp_socket = nullptr;
     }
 
     if (m_tcp_thread.joinable()) {
@@ -121,7 +122,7 @@ void AppListener::tcp_listener_thread() {
             // The session will manage its own lifetime.
             std::make_shared<ProxyTCP>(client_socket, *dest)->start();
         } else {
-            LOG_WARN("[AppListener] No NAT mapping found for TCP connection from %s:%d. Closing.", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+            LOG_ERROR("[AppListener] No NAT mapping found for TCP connection from %s:%d. Closing.", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
             closesocket(client_socket);
         }
     }
@@ -180,7 +181,7 @@ void AppListener::udp_listener_thread() {
             UdpProxy::handle_client_data(listen_socket, buffer, bytes_read, &client_addr, &(*dest));
 
         } else {
-             LOG_WARN("[AppListener] No NAT mapping for UDP packet from %s:%d.", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+             LOG_ERROR("[AppListener] No NAT mapping for UDP packet from %s:%d.", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
         }
     }
     

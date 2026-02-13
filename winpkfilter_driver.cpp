@@ -1,3 +1,4 @@
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -67,7 +68,7 @@ const USHORT ETHERTYPE_ARP = 0x0806;
 #pragma comment(lib, "iphlpapi.lib")
 
 // Global NAT Manager instance
-static NatManager nat_manager;
+
 
 // Define the NAT target address and port
 const ULONG NAT_TARGET_IP = inet_addr("127.0.0.1");
@@ -272,12 +273,12 @@ void WinPkFilterDriver::run() {
                             if (ip->Proto == IPPROTO_TCP) {
                                 PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                 ck.port = tcp->DstPort;
-                                auto od = nat_manager.get_mapping(ck);
+                                auto od = NatManager::instance().get_mapping(ck);
                                 if (od) { ip->SrcAddr = od->ip; tcp->SrcPort = od->port; ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4); recalculate_tcp_checksum(ip); }
                             } else if (ip->Proto == IPPROTO_UDP) {
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                 ck.port = udp->DstPort;
-                                auto od = nat_manager.get_mapping(ck);
+                                auto od = NatManager::instance().get_mapping(ck);
                                 if (od) { ip->SrcAddr = od->ip; udp->SrcPort = od->port; ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4); udp->Csum = 0; }
                             }
                             packets_to_send.push_back(std::move(p));
@@ -287,13 +288,13 @@ void WinPkFilterDriver::run() {
                                 if (ip->Proto == IPPROTO_TCP) {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     ck.port = tcp->SrcPort; od.port = tcp->DstPort;
-                                    nat_manager.create_tcp_mapping(ck, od);
+                                    NatManager::instance().create_tcp_mapping(ck, od);
                                     ip->DstAddr = NAT_TARGET_IP; tcp->DstPort = htons(NAT_TARGET_PORT);
                                     ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4); recalculate_tcp_checksum(ip);
                                 } else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     ck.port = udp->SrcPort; od.port = udp->DstPort;
-                                    nat_manager.create_or_update_udp_mapping(ck, od);
+                                    NatManager::instance().create_or_update_udp_mapping(ck, od);
                                     ip->DstAddr = NAT_TARGET_IP; udp->DstPort = htons(NAT_TARGET_PORT);
                                     ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4); udp->Csum = 0;
                                 }
