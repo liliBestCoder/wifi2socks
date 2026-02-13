@@ -73,46 +73,65 @@ public:
             return;
         }
 
-        // --- DNS Handling ---
+        bool is_direct = true;
+        bool should_proxy_dns = false;
+
+        // --- 1. DNS Handling (Port 53) ---
         if (ntohs(dest->port) == 53) {
             std::string domain = parse_dns_query_domain(data, len);
             if (!domain.empty()) {
                 Rule rule = RuleManager::instance().match(domain);
                 if (rule == RULE_PROXY) {
-                    LOG_INFO("[DNS] Routing DNS query for '%s' over TCP (DoT).", domain.c_str());
-                    // This is the hook for DNS-over-TCP
-                    // For simplicity, we will create a new TCP proxy session for this.
-                    // This is not the most efficient way (could pool TCP connections to proxy), but it's the most straightforward.
-                    
-                    // The destination for the ProxyTCP is the DNS server we want to use via the proxy.
-                    OriginalDestination dot_dest;
-                    inet_pton(AF_INET, g_config.proxy_dns_server.c_str(), &dot_dest.ip);
-                    dot_dest.port = htons(853); // Standard DoT port
+                    should_proxy_dns = true;
+                    is_direct = false;
+                } else if (rule == RULE_DIRECT) {
+                    is_direct = true;
+                } else {
+                    // Fallback to GeoChecker
+                    is_direct = GeoChecker::instance().is_cn_domain(domain);
+                    should_proxy_dns = !is_direct;
+                }
 
-                    // We need a way to get the response back to the UDP client.
-                    // We can pass a callback to the ProxyTCP session.
+                if (should_proxy_dns) {
+                    LOG_INFO("[DNS] Routing DNS query for '%s' over TCP (DoT).", domain.c_str());
                     auto on_dns_response = [listener_socket, client_addr = *client_addr](const char* dns_resp, int resp_len) {
                         if (resp_len > 0) {
                             sendto(listener_socket, dns_resp, resp_len, 0, (const sockaddr*)&client_addr, sizeof(client_addr));
                         }
                     };
-                    
-                    // Create and start the one-shot DoT proxy session
                     std::vector<uint8_t> query_vec((uint8_t*)data, (uint8_t*)data + len);
                     std::make_shared<DnsOverTcpProxy>(query_vec, on_dns_response)->start();
-                    return; // Done for this packet
+                    return;
                 }
+            }
+        } else {
+            // --- 2. General UDP Handling ---
+            uint32_t ip_h = ntohl(dest->ip);
+            Rule rule = RuleManager::instance().match_ip(ip_h);
+            
+            if (rule == RULE_DIRECT) is_direct = true;
+            else if (rule == RULE_PROXY) is_direct = false; // Note: Generic UDP proxying might need SOCKS5 UDP ASSOCIATE
+            else {
+                is_direct = GeoChecker::instance().is_cn_ip(ip_h);
+            }
+
+            // Special case: QUIC (Port 443)
+            if (ntohs(dest->port) == 443 && !is_direct) {
+                LOG_DEBUG("[UdpProxy] Dropping non-CN QUIC packet to %s", inet_ntoa({.s_addr = dest->ip}));
+                return; 
             }
         }
         
-        // Default: direct UDP forwarding
+        // --- 3. Forwarding ---
+        // For now, if not direct and not handled by DoT, we still use direct as a fallback 
+        // until full UDP proxying (SOCKS5 UDP Associate) is implemented.
+        
         sockaddr_in dest_addr_sock = {};
         dest_addr_sock.sin_family = AF_INET;
         dest_addr_sock.sin_addr.s_addr = dest->ip;
         dest_addr_sock.sin_port = dest->port;
 
         uint64_t dest_key = ((uint64_t)dest->ip << 16) | ntohs(dest->port);
-
         SOCKET remote_socket = get_or_create_remote_socket(dest_key, client_addr);
 
         if (remote_socket != INVALID_SOCKET) {
@@ -120,7 +139,7 @@ public:
             if (bytes_sent == SOCKET_ERROR) {
                 LOG_ERROR("[UdpProxy] sendto to remote failed with error: %d", WSAGetLastError());
             } else {
-                 TrafficManager::instance().report_proxy_tx(bytes_sent, true); // Assuming direct for now
+                 TrafficManager::instance().report_proxy_tx(bytes_sent, is_direct);
             }
         }
     }

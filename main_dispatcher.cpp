@@ -1,4 +1,6 @@
 #include "main_dispatcher.h"
+#include "app_config.h"
+#include "logger.h"
 
 MainDispatcher& MainDispatcher::instance() {
     static MainDispatcher inst;

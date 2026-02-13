@@ -1,5 +1,6 @@
 #include "app_listener.h"
 #include "logger.h"
+#include "app_config.h"
 #include "nat_manager.h"
 #include "worker.h"
 #include "proxy_tcp.h"

@@ -1,5 +1,6 @@
 #include "proxy_tcp.h"
 #include "logger.h"
+#include "app_config.h"
 #include "rule_manager.h"
 #include "tls_parser.h"
 #include "geo_checker.h"
@@ -8,6 +9,34 @@
 
 #include <mswsock.h>
 #include <vector>
+#include <algorithm>
+
+// --- HTTP Parsing Helpers ---
+bool is_http_start(const uint8_t* data, size_t len) {
+    if (len < 4) return false;
+    return (memcmp(data, "GET ", 4) == 0 || memcmp(data, "POST", 4) == 0 || 
+            memcmp(data, "HEAD", 4) == 0 || memcmp(data, "PUT ", 4) == 0 ||
+            memcmp(data, "CONN", 4) == 0); // CONNECT
+}
+
+std::string parse_http_host(const uint8_t* data, size_t len) {
+    std::string s((const char*)data, len);
+    size_t pos = s.find("Host: ");
+    if (pos == std::string::npos) return "";
+    pos += 6;
+    size_t end = s.find("\r\n", pos);
+    if (end == std::string::npos) return "";
+    std::string host = s.substr(pos, end - pos);
+    size_t port_pos = host.find(':');
+    if (port_pos != std::string::npos) host = host.substr(0, port_pos);
+    return host;
+}
+
+bool is_generate_204_request(const uint8_t* data, size_t len) {
+    if (len < 20) return false;
+    // Check for "GET /generate_204"
+    return (memcmp(data, "GET /generate_204", 17) == 0);
+}
 
 // Helper to get ConnectEx function pointer
 LPFN_CONNECTEX get_connect_ex() {
@@ -74,46 +103,85 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
         return;
     }
 
-    m_initial_buffer.insert(m_initial_buffer.end(), buf, buf + len);
+    // Limit buffer size to prevent memory abuse
+    size_t max_len = (g_config.max_sni_len > 0) ? g_config.max_sni_len : 16384;
+    if (m_initial_buffer.size() + len > max_len) {
+        LOG_WARN("[ProxyTCP] Initial buffer exceeded limit. Deciding with current data.");
+        len = (int)(max_len - m_initial_buffer.size());
+    }
 
-    // Try to parse for domain
-    m_detected_domain = TlsParser::parse_client_hello((const char*)m_initial_buffer.data(), m_initial_buffer.size());
-    if (m_detected_domain.empty()) {
-        // Fallback or handle non-TLS protocols if necessary
-        // For now, we assume we need a domain to make a routing decision.
-        // If domain is not found after a certain amount of data, we might need to decide based on IP.
-        LOG_DEBUG("[ProxyTCP] Domain not found yet, need more data.");
-        m_worker->read_async(m_client_socket); // Read more
+    if (len > 0) {
+        m_initial_buffer.insert(m_initial_buffer.end(), buf, buf + len);
+    }
+
+    // 1. Check for /generate_204 Mock (Port 80)
+    if (ntohs(m_original_dest.port) == 80 && is_generate_204_request(m_initial_buffer.data(), m_initial_buffer.size())) {
+        LOG_INFO("[ProxyTCP] Intercepted /generate_204. Sending mock response.");
+        const char* resp204 = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+        send(m_client_socket, resp204, (int)strlen(resp204), 0);
+        close_session();
         return;
     }
-    
-    LOG_INFO("[ProxyTCP] Detected domain: %s", m_detected_domain.c_str());
 
-    // Routing decision
-    Rule rule = RuleManager::instance().match(m_detected_domain);
-    m_is_direct = (rule == RULE_DIRECT);
+    // 2. Try to parse Domain (SNI or Host)
+    bool ready = false;
+    std::string domain = TlsParser::parse_client_hello((const char*)m_initial_buffer.data(), m_initial_buffer.size());
+    if (!domain.empty()) {
+        m_detected_domain = domain;
+        ready = true;
+    } else if (is_http_start(m_initial_buffer.data(), m_initial_buffer.size())) {
+        domain = parse_http_host(m_initial_buffer.data(), m_initial_buffer.size());
+        if (!domain.empty()) {
+            m_detected_domain = domain;
+            ready = true;
+        }
+    }
+
+    // If still not ready, we might need more data, unless we reached the limit
+    if (!ready && m_initial_buffer.size() < max_len) {
+        m_worker->read_async(m_client_socket);
+        return;
+    }
+
+    // 3. Routing Decision (Priority: RuleManager > GeoChecker > IP)
+    if (!m_detected_domain.empty()) {
+        Rule rule = RuleManager::instance().match(m_detected_domain);
+        if (rule == RULE_DIRECT) m_is_direct = true;
+        else if (rule == RULE_PROXY) m_is_direct = false;
+        else {
+            // Fallback to GeoChecker
+            m_is_direct = GeoChecker::instance().is_cn_domain(m_detected_domain);
+        }
+    } else {
+        // No domain detected, check IP
+        uint32_t ip_h = ntohl(m_original_dest.ip);
+        Rule rule = RuleManager::instance().match_ip(ip_h);
+        if (rule == RULE_DIRECT) m_is_direct = true;
+        else if (rule == RULE_PROXY) m_is_direct = false;
+        else {
+            m_is_direct = GeoChecker::instance().is_cn_ip(ip_h);
+        }
+    }
 
     // Switch client socket's read callback to forwarding mode
     m_worker->update_read_callback(m_client_socket, [this](char* buf, int len) { on_client_read(buf, len); });
     
-    // Now that we have the domain, connect to the remote
+    // Connect to remote
     connect_remote();
 }
 
 void ProxyTCP::connect_remote() {
     m_state = CONNECTING;
 
-    sockaddr_in remote_addr;
-    remote_addr.sin_family = AF_INET;
+    sockaddr_in remote_addr;\n    remote_addr.sin_family = AF_INET;
 
     if (m_is_direct) {
-        LOG_INFO("[ProxyTCP] Routing DIRECT for domain %s", m_detected_domain.c_str());
-        // For direct connection, we use the original destination IP and Port
-        remote_addr.sin_addr.s_addr = m_original_dest.ip;
-        remote_addr.sin_port = m_original_dest.port;
+        LOG_INFO("[ProxyTCP] Routing DIRECT for %s (IP: %s)", 
+            m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str(),
+            inet_ntoa({.s_addr = m_original_dest.ip}));
+        remote_addr.sin_addr.s_addr = m_original_dest.ip;\n        remote_addr.sin_port = m_original_dest.port;
     } else {
-        LOG_INFO("[ProxyTCP] Routing PROXY for domain %s", m_detected_domain.c_str());
-        // For proxy connection, resolve the proxy server address
+        LOG_INFO("[ProxyTCP] Routing PROXY for %s", m_detected_domain.empty() ? inet_ntoa({.s_addr = m_original_dest.ip}) : m_detected_domain.c_str());
         inet_pton(AF_INET, g_config.proxy_ip.c_str(), &remote_addr.sin_addr);
         remote_addr.sin_port = htons(g_config.proxy_port);
     }
@@ -122,14 +190,13 @@ void ProxyTCP::connect_remote() {
     u_long mode = 1;
     ioctlsocket(m_remote_socket, FIONBIO, &mode);
     
-    // Bind the socket to a local address before connecting
     sockaddr_in bind_addr = {0};
     bind_addr.sin_family = AF_INET;
     bind_addr.sin_addr.s_addr = INADDR_ANY;
     bind_addr.sin_port = 0;
     bind(m_remote_socket, (SOCKADDR*)&bind_addr, sizeof(bind_addr));
 
-    retain(); // Increment ref count for the remote socket
+    retain();
     m_worker->add_socket(
         m_remote_socket,
         this,
@@ -139,38 +206,24 @@ void ProxyTCP::connect_remote() {
     );
 
     auto connect_ex = get_connect_ex();
-    if (!connect_ex) {
-        LOG_ERROR("[ProxyTCP] Failed to get ConnectEx pointer.");
-        close_session();
-        return;
-    }
-
-    // Use ConnectEx for asynchronous connection
-    if (!connect_ex(m_remote_socket, (SOCKADDR*)&remote_addr, sizeof(remote_addr), NULL, 0, NULL, m_worker->get_overlapped_for_connect(m_remote_socket))) {
+    if (!connect_ex || !connect_ex(m_remote_socket, (SOCKADDR*)&remote_addr, sizeof(remote_addr), NULL, 0, NULL, m_worker->get_overlapped_for_connect(m_remote_socket))) {
         if (WSAGetLastError() != WSA_IO_PENDING) {
-            LOG_ERROR("[ProxyTCP] ConnectEx failed with error: %d", WSAGetLastError());
-            close_session();
+            LOG_ERROR("[ProxyTCP] ConnectEx failed: %d", WSAGetLastError());
+            on_close();
         }
     }
-    // The result of the connection will be delivered via the Worker's IOCP loop,
-    // which will then call on_remote_connect.
 }
 
 void ProxyTCP::on_remote_connect() {
     LOG_DEBUG("[ProxyTCP] Remote connection established.");
     m_state = ESTABLISHED;
-    
-    // Update socket context after connection
     setsockopt(m_remote_socket, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
-
-    // Start reading from the remote end
     m_worker->read_async(m_remote_socket);
 
-    // Send the buffered initial data to the remote
     if (!m_initial_buffer.empty()) {
-        TrafficManager::instance().report_proxy_tx(m_initial_buffer.size(), m_is_direct);
+        TrafficManager::instance().report_proxy_tx((int)m_initial_buffer.size(), m_is_direct);
         m_remote_write_busy = true;
-        m_worker->write_async(m_remote_socket, (char*)m_initial_buffer.data(), m_initial_buffer.size());
+        m_worker->write_async(m_remote_socket, (char*)m_initial_buffer.data(), (int)m_initial_buffer.size());
         m_initial_buffer.clear();
     }
 }
@@ -201,31 +254,23 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
 
 void ProxyTCP::on_client_write(int len) {
     m_client_write_busy = false;
-    // Potentially read more from remote if it was paused
 }
 
 void ProxyTCP::on_remote_write(int len) {
     m_remote_write_busy = false;
-    // After sending the initial buffer, start reading from the client
     if (m_state == ESTABLISHED) {
         m_worker->read_async(m_client_socket);
     }
 }
 
 void ProxyTCP::on_close() {
-    // A socket has been closed (either by peer or by us).
-    // This will trigger the release() call, and when both sockets are closed,
-    // the object will be deleted.
     release();
 }
 
 void ProxyTCP::close_session() {
     if (m_state == CLOSING) return;
     m_state = CLOSING;
-
     LOG_DEBUG("[ProxyTCP] Closing session.");
-
-    // This will cause the on_close callbacks to be triggered if they haven't already.
     if (m_client_socket != INVALID_SOCKET) {
         m_worker->remove_socket(m_client_socket);
         m_client_socket = INVALID_SOCKET;
@@ -242,10 +287,6 @@ void ProxyTCP::retain() {
 
 void ProxyTCP::release() {
     if (--m_ref_count == 0) {
-        // Post a task to the main dispatcher to delete this object safely.
-        // This avoids deleting the object from within its own method call stack.
-        MainDispatcher::instance().queue_task([self = shared_from_this()]() {
-            // The object is deleted when `self` goes out of scope.
-        });
+        MainDispatcher::instance().queue_task([self = shared_from_this()]() {});
     }
 }
