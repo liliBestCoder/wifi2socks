@@ -73,14 +73,32 @@ private:
     std::unordered_map<std::string, uint16_t> geoip_code_cache_;
     std::unordered_map<std::string, uint16_t> geosite_code_cache_;
     std::vector<GeoIPRange> ip_ranges_;
-    std::unordered_map<std::string, uint16_t> domain_exact_;
-    std::unordered_map<std::string, uint16_t> domain_suffix_;
-    std::vector<std::pair<std::string, uint16_t>> domain_keyword_;
-    std::vector<std::pair<std::regex, uint16_t>> domain_regex_;
+
+    // 使用 uint32_t 存储：低 16 位为 code_index，高 16 位为标志位 (1:CN, 2:GOOGLE, 4:TENCENT)
+    std::unordered_map<std::string, uint32_t> domain_exact_;
+    std::unordered_map<std::string, uint32_t> domain_suffix_;
+    
+    struct KeywordEntry {
+        std::string keyword;
+        uint16_t code_index;
+        uint16_t flags;
+    };
+    std::vector<KeywordEntry> domain_keyword_;
+
+    struct RegexEntry {
+        std::regex reg;
+        uint16_t code_index;
+        uint16_t flags;
+    };
+    std::vector<RegexEntry> domain_regex_;
 
     std::set<uint16_t> cn_site_idxs_;
     std::set<uint16_t> google_site_idxs_;
     std::set<uint16_t> tencent_site_idxs_;
     
     uint16_t cn_ip_idx_ = 0xFFFF;
+
+    static const uint32_t FLAG_CN = 0x10000;
+    static const uint32_t FLAG_GOOGLE = 0x20000;
+    static const uint32_t FLAG_TENCENT = 0x40000;
 };

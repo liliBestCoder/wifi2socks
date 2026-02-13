@@ -54,11 +54,16 @@ void GeoChecker::load_data(const std::string& geoip_file, const std::string& geo
 
 void GeoChecker::init(const std::string& geoip_file, const std::string& geosite_file) {
     load_data(geoip_file, geosite_file);
+    LOG_INFO("[Geo] Data initialized. IP ranges: %zu, Exact domains: %zu, Suffix domains: %zu", 
+        ip_ranges_.size(), domain_exact_.size(), domain_suffix_.size());
 }
 
 static bool read_file_to_buffer(const std::string& filepath, std::vector<char>& buffer) {
     std::ifstream file(filepath, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) return false;
+    if (!file.is_open()) {
+        LOG_ERROR("[Geo] Failed to open file: %s", filepath.c_str());
+        return false;
+    }
     std::streamsize size = file.tellg();
     if (size <= 0) return false;
     file.seekg(0, std::ios::beg);
@@ -71,7 +76,10 @@ void GeoChecker::load_geoip(const std::string& filepath) {
     v2ray::core::app::router::routercommon::GeoIPList list;
     std::vector<char> buffer;
     if (!read_file_to_buffer(filepath, buffer)) return;
-    if (!list.ParseFromArray(buffer.data(), (int)buffer.size())) return;
+    if (!list.ParseFromArray(buffer.data(), (int)buffer.size())) {
+        LOG_ERROR("[Geo] Failed to parse GeoIP protobuf from %s", filepath.c_str());
+        return;
+    }
 
     for (int i = 0; i < list.entry_size(); ++i) {
         const auto& entry = list.entry(i);
@@ -94,6 +102,7 @@ void GeoChecker::load_geoip(const std::string& filepath) {
         }
     }
     std::sort(ip_ranges_.begin(), ip_ranges_.end());
+    LOG_INFO("[Geo] Loaded %d GeoIP entries", list.entry_size());
 }
 
 uint16_t GeoChecker::get_or_create_geoip_code(const std::string& code) {
@@ -118,7 +127,7 @@ uint16_t GeoChecker::get_or_create_geosite_code(const std::string& code) {
     static const std::unordered_set<std::string> CN_TAGS = {
         "TENCENT", "QQ", "WECHAT", "ALIBABA", "TAOBAO", "ALIYUN", "TMALL", "DINGTALK",
         "BAIDU", "NETEASE", "163", "JD", "360", "SINA", "SOHU", "BILIBILI", "DOUYIN", 
-        "UNKNOWN", "HUAWEI", "XIAOMI", "OPPO", "VIVO", "MEITUAN"
+        "HUAWEI", "XIAOMI", "OPPO", "VIVO", "MEITUAN"
     };
 
     bool is_cn = (upper_code.find("CN") != std::string::npos && upper_code.find("!CN") == std::string::npos) || CN_TAGS.count(upper_code);
@@ -132,25 +141,49 @@ void GeoChecker::load_geosite(const std::string& filepath) {
     v2ray::core::app::router::routercommon::GeoSiteList list;
     std::vector<char> buffer;
     if (!read_file_to_buffer(filepath, buffer)) return;
-    if (!list.ParseFromArray(buffer.data(), (int)buffer.size())) return;
+    if (!list.ParseFromArray(buffer.data(), (int)buffer.size())) {
+        LOG_ERROR("[Geo] Failed to parse GeoSite protobuf from %s", filepath.c_str());
+        return;
+    }
 
     for (int i = 0; i < list.entry_size(); ++i) {
         const auto& entry = list.entry(i);
         uint16_t idx = get_or_create_geosite_code(entry.country_code());
+        uint32_t flags = 0;
+        if (cn_site_idxs_.count(idx)) flags |= FLAG_CN;
+        if (google_site_idxs_.count(idx)) flags |= FLAG_GOOGLE;
+        if (tencent_site_idxs_.count(idx)) flags |= FLAG_TENCENT;
+
         for (int j = 0; j < entry.domain_size(); ++j) {
             const auto& d = entry.domain(j);
             std::string val = d.value();
             int type = d.type();
             if (type != 1) val = to_lower(val); 
+            
             switch (type) {
-                case 3: domain_exact_[val] = idx; break;
-                case 2: domain_suffix_[val] = idx; break;
-                case 0: domain_keyword_.push_back({val, idx}); break;
-                case 1: try { domain_regex_.push_back({std::regex(val, std::regex::icase | std::regex::optimize), idx}); } catch (...) {} break;
-                default: domain_suffix_[val] = idx; break;
+                case 3: // Exact
+                    domain_exact_[val] = (domain_exact_[val] & 0xFFFF0000) | idx | flags;
+                    domain_exact_[val] |= flags;
+                    break;
+                case 2: // Suffix
+                case 4: // Subdomain (treat as suffix for now)
+                    domain_suffix_[val] = (domain_suffix_[val] & 0xFFFF0000) | idx | flags;
+                    domain_suffix_[val] |= flags;
+                    break;
+                case 0: // Keyword
+                    domain_keyword_.push_back({val, idx, (uint16_t)(flags >> 16)});
+                    break;
+                case 1: // Regex
+                    try { domain_regex_.push_back({std::regex(val, std::regex::icase | std::regex::optimize), idx, (uint16_t)(flags >> 16)}); } catch (...) {}
+                    break;
+                default:
+                    domain_suffix_[val] = (domain_suffix_[val] & 0xFFFF0000) | idx | flags;
+                    domain_suffix_[val] |= flags;
+                    break;
             }
         }
     }
+    LOG_INFO("[Geo] Loaded %d GeoSite entries", list.entry_size());
 }
 
 std::string GeoChecker::query_ip(const std::string& ip_bytes) {
@@ -187,17 +220,20 @@ std::string GeoChecker::query_domain(const std::string& domain) {
     if (!d.empty() && d.back() == '.') d.pop_back();
     
     std::shared_lock<std::shared_mutex> lock(m_mtx);
-    if (domain_exact_.count(d)) return geosite_codes_[domain_exact_[d]];
+    auto it_exact = domain_exact_.find(d);
+    if (it_exact != domain_exact_.end()) return geosite_codes_[it_exact->second & 0xFFFF];
+
     size_t pos = 0;
     while (true) {
         std::string suffix = d.substr(pos);
-        if (domain_suffix_.count(suffix)) return geosite_codes_[domain_suffix_[suffix]];
+        auto it_suffix = domain_suffix_.find(suffix);
+        if (it_suffix != domain_suffix_.end()) return geosite_codes_[it_suffix->second & 0xFFFF];
         size_t next_dot = d.find('.', pos);
         if (next_dot == std::string::npos) break;
         pos = next_dot + 1;
     }
-    for (const auto& kv : domain_keyword_) if (d.find(kv.first) != std::string::npos) return geosite_codes_[kv.second];
-    for (const auto& kv : domain_regex_) if (std::regex_search(d, kv.first)) return geosite_codes_[kv.second];
+    for (const auto& kv : domain_keyword_) if (d.find(kv.keyword) != std::string::npos) return geosite_codes_[kv.code_index];
+    for (const auto& kv : domain_regex_) if (std::regex_search(d, kv.reg)) return geosite_codes_[kv.code_index];
     return "UNKNOWN";
 }
 
@@ -208,35 +244,64 @@ bool GeoChecker::is_cn_domain(const std::string& domain) {
     
     std::shared_lock<std::shared_mutex> lock(m_mtx);
     auto it_exact = domain_exact_.find(d);
-    if (it_exact != domain_exact_.end() && cn_site_idxs_.count(it_exact->second)) return true;
+    if (it_exact != domain_exact_.end() && (it_exact->second & FLAG_CN)) return true;
+
     size_t pos = 0;
     while (true) {
         std::string s = d.substr(pos);
         auto it = domain_suffix_.find(s);
-        if (it != domain_suffix_.end() && cn_site_idxs_.count(it->second)) return true;
+        if (it != domain_suffix_.end() && (it->second & FLAG_CN)) return true;
         size_t next_dot = d.find('.', pos);
         if (next_dot == std::string::npos) break;
         pos = next_dot + 1;
     }
-    for (const auto& kv : domain_keyword_) if (cn_site_idxs_.count(kv.second) && d.find(kv.first) != std::string::npos) return true;
-    for (const auto& kv : domain_regex_) if (cn_site_idxs_.count(kv.second) && std::regex_search(d, kv.first)) return true;
+    for (const auto& kv : domain_keyword_) if ((kv.flags & (FLAG_CN >> 16)) && d.find(kv.keyword) != std::string::npos) return true;
+    for (const auto& kv : domain_regex_) if ((kv.flags & (FLAG_CN >> 16)) && std::regex_search(d, kv.reg)) return true;
+    
+    // 如果还没匹配到，且是 .cn 结尾，认为是中国域名
+    if (d.length() > 3 && d.substr(d.length() - 3) == ".cn") return true;
+
     return false;
 }
 
 bool GeoChecker::is_google_domain(const std::string& domain) {
     if (!m_ready) return false;
     std::string d = to_lower(domain);
+    if (!d.empty() && d.back() == '.') d.pop_back();
+
     std::shared_lock<std::shared_mutex> lock(m_mtx);
     auto it_exact = domain_exact_.find(d);
-    if (it_exact != domain_exact_.end() && google_site_idxs_.count(it_exact->second)) return true;
+    if (it_exact != domain_exact_.end() && (it_exact->second & FLAG_GOOGLE)) return true;
+
+    size_t pos = 0;
+    while (true) {
+        std::string s = d.substr(pos);
+        auto it = domain_suffix_.find(s);
+        if (it != domain_suffix_.end() && (it->second & FLAG_GOOGLE)) return true;
+        size_t next_dot = d.find('.', pos);
+        if (next_dot == std::string::npos) break;
+        pos = next_dot + 1;
+    }
     return false;
 }
 
 bool GeoChecker::is_tencent_domain(const std::string& domain) {
     if (!m_ready) return false;
     std::string d = to_lower(domain);
+    if (!d.empty() && d.back() == '.') d.pop_back();
+
     std::shared_lock<std::shared_mutex> lock(m_mtx);
     auto it_exact = domain_exact_.find(d);
-    if (it_exact != domain_exact_.end() && tencent_site_idxs_.count(it_exact->second)) return true;
+    if (it_exact != domain_exact_.end() && (it_exact->second & FLAG_TENCENT)) return true;
+
+    size_t pos = 0;
+    while (true) {
+        std::string s = d.substr(pos);
+        auto it = domain_suffix_.find(s);
+        if (it != domain_suffix_.end() && (it->second & FLAG_TENCENT)) return true;
+        size_t next_dot = d.find('.', pos);
+        if (next_dot == std::string::npos) break;
+        pos = next_dot + 1;
+    }
     return false;
 }
