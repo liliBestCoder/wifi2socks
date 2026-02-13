@@ -22,17 +22,13 @@ private:
     void on_write(int len);
     void on_close();
 
-    void send_socks5_auth();
-    void send_socks5_connect();
+    void send_http_connect();
     void send_dns_query();
-    void handle_socks5_auth_response(const char* buf, int len);
-    void handle_socks5_connect_response(const char* buf, int len);
     void handle_dns_response(const char* buf, int len);
 
     enum State {
         CONNECTING,
-        SOCKS5_AUTH,
-        SOCKS5_CONNECT,
+        HTTP_CONNECT_SENT,
         DNS_QUERY,
         CLOSED
     };

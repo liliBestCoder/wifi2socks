@@ -60,31 +60,14 @@ void DnsOverTcpProxy::on_connect() {
         [self](int len) { self->on_write(len); },
         [self]() { self->on_close(); }
     );
-    send_socks5_auth();
+    send_http_connect();
 }
 
-void DnsOverTcpProxy::send_socks5_auth() {
-    m_state = SOCKS5_AUTH;
-    unsigned char req[] = { 0x05, 0x01, 0x00 };
-    m_worker->send_async(m_socket, (char*)req, sizeof(req));
-}
-
-void DnsOverTcpProxy::send_socks5_connect() {
-    m_state = SOCKS5_CONNECT;
-    std::vector<unsigned char> req = { 0x05, 0x01, 0x00, 0x01 }; // SOCKS5, CONNECT, RSV, IPv4
-    
-    uint32_t dns_ip;
-    inet_pton(AF_INET, g_config.proxy_dns_server.c_str(), &dns_ip);
-    req.push_back(dns_ip & 0xFF);
-    req.push_back((dns_ip >> 8) & 0xFF);
-    req.push_back((dns_ip >> 16) & 0xFF);
-    req.push_back((dns_ip >> 24) & 0xFF);
-    
-    uint16_t dns_port = htons(53); 
-    req.push_back(dns_port & 0xFF);
-    req.push_back((dns_port >> 8) & 0xFF);
-
-    m_worker->send_async(m_socket, (char*)req.data(), (int)req.size());
+void DnsOverTcpProxy::send_http_connect() {
+    m_state = HTTP_CONNECT_SENT;
+    std::string target = g_config.proxy_dns_server + ":53";
+    std::string req = "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n";
+    m_worker->send_async(m_socket, (char*)req.data(), (int)req.length());
 }
 
 void DnsOverTcpProxy::send_dns_query() {
@@ -106,28 +89,16 @@ void DnsOverTcpProxy::on_read(char* buf, int len) {
         return;
     }
 
-    if (m_state == SOCKS5_AUTH) {
-        handle_socks5_auth_response(buf, len);
-    } else if (m_state == SOCKS5_CONNECT) {
-        handle_socks5_connect_response(buf, len);
+    if (m_state == HTTP_CONNECT_SENT) {
+        std::string resp(buf, len);
+        if (resp.find(" 200 ") != std::string::npos) {
+            send_dns_query();
+        } else {
+            LOG_ERROR("[DoT] Proxy CONNECT failed: %s", resp.c_str());
+            on_close();
+        }
     } else if (m_state == DNS_QUERY) {
         handle_dns_response(buf, len);
-    }
-}
-
-void DnsOverTcpProxy::handle_socks5_auth_response(const char* buf, int len) {
-    if (len >= 2 && (unsigned char)buf[0] == 0x05 && (unsigned char)buf[1] == 0x00) {
-        send_socks5_connect();
-    } else {
-        on_close();
-    }
-}
-
-void DnsOverTcpProxy::handle_socks5_connect_response(const char* buf, int len) {
-    if (len >= 4 && (unsigned char)buf[0] == 0x05 && (unsigned char)buf[1] == 0x00) {
-        send_dns_query();
-    } else {
-        on_close();
     }
 }
 

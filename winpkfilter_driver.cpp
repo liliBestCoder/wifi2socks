@@ -337,32 +337,42 @@ void WinPkFilterDriver::run() {
                     } else {
                         // --- 3. Outbound: Host to Client (RESTORE) ---
                         bool restored = false;
-                        if (ip->SrcAddr == m_gateway_ip) {
+                        if (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) {
+                            USHORT src_port = 0;
                             if (ip->Proto == IPPROTO_TCP) {
                                 PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                if (ntohs(tcp->SrcPort) == NAT_TARGET_PORT) {
-                                    ClientKey ck = { ip->DstAddr, tcp->DstPort };
-                                    auto od = NatManager::instance().get_mapping(ck);
-                                    if (od) {
-                                        ip->SrcAddr = od->ip; tcp->SrcPort = od->port;
+                                src_port = ntohs(tcp->SrcPort);
+                            } else {
+                                PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                src_port = ntohs(udp->SrcPort);
+                            }
+
+                            if (src_port == NAT_TARGET_PORT) {
+                                ClientKey ck = { ip->DstAddr, 0 };
+                                if (ip->Proto == IPPROTO_TCP) {
+                                    PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                    ck.port = tcp->DstPort;
+                                } else {
+                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                    ck.port = udp->DstPort;
+                                }
+
+                                auto od = NatManager::instance().get_mapping(ck);
+                                if (od) {
+                                    ip->SrcAddr = od->ip;
+                                    if (ip->Proto == IPPROTO_TCP) {
+                                        PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                        tcp->SrcPort = od->port;
                                         ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
                                         recalculate_tcp_checksum(ip);
-                                        packets_to_send.push_back(std::move(p));
-                                        restored = true;
-                                    }
-                                }
-                            } else if (ip->Proto == IPPROTO_UDP) {
-                                PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                if (ntohs(udp->SrcPort) == NAT_TARGET_PORT) {
-                                    ClientKey ck = { ip->DstAddr, udp->DstPort };
-                                    auto od = NatManager::instance().get_mapping(ck);
-                                    if (od) {
-                                        ip->SrcAddr = od->ip; udp->SrcPort = od->port;
+                                    } else {
+                                        PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                        udp->SrcPort = od->port;
                                         ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
                                         recalculate_udp_checksum(ip);
-                                        packets_to_send.push_back(std::move(p));
-                                        restored = true;
                                     }
+                                    packets_to_send.push_back(std::move(p));
+                                    restored = true;
                                 }
                             }
                         }
