@@ -21,6 +21,7 @@ private:
     void on_client_initial_read(char* buf, int len);
     void connect_remote();
     void on_remote_connect();
+    void on_proxy_connect_response(char* buf, int len);
 
     void on_client_read(char* buf, int len);
     void on_remote_read(char* buf, int len);
@@ -36,6 +37,7 @@ private:
     enum State {
         INITIAL,
         CONNECTING,
+        AWAITING_CONNECT_RESPONSE,
         ESTABLISHED,
         CLOSING
     };
