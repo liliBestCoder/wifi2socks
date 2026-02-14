@@ -10,7 +10,7 @@
 #include <iphlpapi.h>
 
 #include <vector>
-#include <mutex>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 
@@ -40,7 +40,7 @@ private:
 
     std::vector<RawPacket> m_storage;
     std::vector<RawPacket*> m_pool;
-    std::mutex m_mutex;
+    std::atomic_flag m_lock = ATOMIC_FLAG_INIT;
 };
 
 struct PacketPoolDeleter {
