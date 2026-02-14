@@ -426,15 +426,13 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
 }
 
 void ProxyTCP::close_session() {
-    if (m_state == CLOSING) return;
-    m_state = CLOSING;
+    if (m_state.exchange(CLOSING) == CLOSING) return;
+    
     LOG_INFO("[ProxyTCP] Closing session for %s", m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str());
     if (m_client_socket != INVALID_SOCKET) {
         WorkerPool::instance().remove_socket(m_client_socket);
-        m_client_socket = INVALID_SOCKET;
     }
     if (m_remote_socket != INVALID_SOCKET) {
         WorkerPool::instance().remove_socket(m_remote_socket);
-        m_remote_socket = INVALID_SOCKET;
     }
 }
