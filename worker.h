@@ -91,7 +91,10 @@ public:
     // 全局控制方法，现在它们会将任务投递给共享 IOCP
     void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int)> on_write, std::function<void()> on_close, bool is_udp = false);
     void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
-    void connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect);
+    void connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect, 
+                      std::function<void(char*, int, sockaddr_in*)> on_read = nullptr,
+                      std::function<void(int)> on_write = nullptr,
+                      std::function<void()> on_close = nullptr);
     bool send_async(SOCKET s, std::vector<uint8_t>&& data);
     bool send_async(SOCKET s, char* buf, int len);
     void read_async(SOCKET s);

@@ -83,6 +83,7 @@ USHORT checksum(USHORT* buffer, int size) {
     return (USHORT)(~cksum);
 }
 
+#pragma pack(push, 1)
 typedef struct _PSEUDO_HEADER {
     ULONG   SrcAddr;
     ULONG   DstAddr;
@@ -90,6 +91,7 @@ typedef struct _PSEUDO_HEADER {
     UCHAR   Proto;
     USHORT  Len;
 } PSEUDO_HEADER, *PPSEUDO_HEADER;
+#pragma pack(pop)
 
 USHORT recalculate_tcp_checksum(PIP_HEADER ip_header) {
     PTCP_HEADER tcp_header = (PTCP_HEADER)((UCHAR*)ip_header + (ip_header->Ver_HLen & 0x0F) * 4);

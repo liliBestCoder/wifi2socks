@@ -45,19 +45,16 @@ void DnsOverTcpProxy::start() {
     proxy_addr.sin_port = htons(g_config.proxy_port);
 
     auto self = shared_from_this();
-    WorkerPool::instance().connect_async(m_socket, proxy_addr, [self]() {
-        self->on_connect();
-    });
+    WorkerPool::instance().connect_async(
+        m_socket, proxy_addr, 
+        [self]() { self->on_connect(); },
+        [self](char* buf, int len, sockaddr_in*) { self->on_read(buf, len); },
+        nullptr,
+        [self]() { self->on_close(); }
+    );
 }
 
 void DnsOverTcpProxy::on_connect() {
-    auto self = shared_from_this();
-    WorkerPool::instance().add_socket(
-        m_socket,
-        [self](char* buf, int len, sockaddr_in*) { self->on_read(buf, len); },
-        nullptr, // on_write no longer needed
-        [self]() { self->on_close(); }
-    );
     send_http_connect();
 }
 

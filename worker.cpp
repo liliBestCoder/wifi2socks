@@ -152,14 +152,17 @@ void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in
     IO_CONTEXT* io = new IO_CONTEXT();
     io->type = IO_TASK;
     io->task = [this, s, on_read, on_write, on_close, is_udp]() {
-        SocketContext* ctx = new SocketContext();
-        ctx->sock = s;
+        SocketContext* ctx = find_context(s);
+        if (!ctx) {
+            ctx = new SocketContext();
+            ctx->sock = s;
+            register_context(s, ctx);
+            CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx, 0);
+        }
         ctx->on_read = on_read;
         ctx->on_write = on_write; 
         ctx->on_close = on_close;
         ctx->is_udp = is_udp;
-        register_context(s, ctx);
-        CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx, 0);
         if (on_read) post_read(ctx);
     };
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io);
@@ -173,11 +176,14 @@ void WorkerPool::remove_socket(SOCKET s, std::function<void()> on_done) {
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io);
 }
 
-void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect) {
+void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect, 
+                                  std::function<void(char*, int, sockaddr_in*)> on_read,
+                                  std::function<void(int)> on_write,
+                                  std::function<void()> on_close) {
     // 首先投递一个创建上下文并绑定 IOCP 的任务
     IO_CONTEXT* init_task = new IO_CONTEXT();
     init_task->type = IO_TASK;
-    init_task->task = [this, s, addr, on_connect]() {
+    init_task->task = [this, s, addr, on_connect, on_read, on_write, on_close]() {
         struct sockaddr_in bindAddr;
         memset(&bindAddr, 0, sizeof(bindAddr));
         bindAddr.sin_family = AF_INET;
@@ -185,10 +191,16 @@ void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()>
         bindAddr.sin_port = 0;
         bind(s, (sockaddr*)&bindAddr, sizeof(bindAddr));
 
-        SocketContext* ctx = new SocketContext();
-        ctx->sock = s;
-        register_context(s, ctx);
-        CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx, 0);
+        SocketContext* ctx = find_context(s);
+        if (!ctx) {
+            ctx = new SocketContext();
+            ctx->sock = s;
+            register_context(s, ctx);
+            CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx, 0);
+        }
+        ctx->on_read = on_read;
+        ctx->on_write = on_write;
+        ctx->on_close = on_close;
 
         // 获取 ConnectEx 指针 (通常在全局初始化或 Worker 构造中完成，这里简化处理)
         LPFN_CONNECTEX ConnectExPtr = nullptr;
@@ -205,12 +217,17 @@ void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()>
             ctx->pending_io++;
             BOOL ret = ConnectExPtr(s, (sockaddr*)&addr, sizeof(addr), NULL, 0, NULL, &io->overlapped);
             if (!ret && WSAGetLastError() != ERROR_IO_PENDING) {
+                LOG_ERROR("[WorkerPool] ConnectEx failed immediately: %d", WSAGetLastError());
                 ctx->pending_io--;
                 unregister_context(s);
                 closesocket(s);
                 delete ctx;
                 delete io;
+            } else {
+                LOG_DEBUG("[WorkerPool] ConnectEx initiated for socket %d", (int)s);
             }
+        } else {
+            LOG_ERROR("[WorkerPool] Failed to get ConnectEx pointer: %d", WSAGetLastError());
         }
     };
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)init_task);
