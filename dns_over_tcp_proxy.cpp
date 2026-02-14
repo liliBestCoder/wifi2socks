@@ -11,7 +11,6 @@
 DnsOverTcpProxy::DnsOverTcpProxy(const std::vector<uint8_t>& query_payload, ResponseCallback callback)
     : m_state(CONNECTING),
       m_socket(INVALID_SOCKET),
-      m_worker(nullptr),
       m_query_payload(query_payload),
       m_callback(callback),
       m_expected_len(0),

@@ -66,7 +66,9 @@ void Worker::loop() {
                 ctx->on_remove_done = io->task;
                 WorkerPool::instance().unregister_context(io->sock);
                 closesocket(io->sock);
-                if (ctx->pending_io == 0) {
+                
+                // 释放初始的 Pool 所有权引用
+                if (ctx->pending_io.fetch_sub(1) == 1) {
                     if (ctx->on_remove_done) ctx->on_remove_done();
                     delete ctx;
                 }
@@ -82,8 +84,6 @@ void Worker::loop() {
             delete io;
             continue;
         }
-
-        ctx->pending_io--;
 
         if (!ctx->closing) {
             if (ret) {
@@ -118,8 +118,8 @@ void Worker::loop() {
 
         delete io;
 
-        // 最终清理：当所有 pending IO 都返回且连接已标记关闭
-        if (ctx->closing && ctx->pending_io == 0) {
+        // 最终清理：所有操作（包括初始引用）都完成后删除
+        if (ctx->pending_io.fetch_sub(1) == 1) {
             if (ctx->on_remove_done) ctx->on_remove_done();
             delete ctx;
         }

@@ -21,7 +21,6 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
       m_client_socket(client_socket),
       m_remote_socket(INVALID_SOCKET),
       m_original_dest(dest),
-      m_worker(nullptr),
       m_is_direct(false),
       m_ref_count(0)
 {

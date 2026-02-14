@@ -59,7 +59,7 @@ struct SocketContext {
     void* user_data;                    
 
     SocketContext() : magic(MAGIC_VAL), sock(INVALID_SOCKET), read_pending(false), 
-                     closing(false), is_udp(false), pending_io(0), user_data(nullptr) {
+                     closing(false), is_udp(false), pending_io(1), user_data(nullptr) {
     }
     
     ~SocketContext() {

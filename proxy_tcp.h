@@ -44,7 +44,6 @@ private:
     SOCKET m_client_socket;
     SOCKET m_remote_socket;
     OriginalDestination m_original_dest;
-    Worker* m_worker;
 
     std::vector<uint8_t> m_initial_buffer; // Buffer for data received before ESTABLISHED
     

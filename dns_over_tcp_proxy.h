@@ -35,7 +35,6 @@ private:
 
     State m_state;
     SOCKET m_socket;
-    Worker* m_worker;
     std::vector<uint8_t> m_query_payload;
     ResponseCallback m_callback;
     std::vector<uint8_t> m_read_buffer;
