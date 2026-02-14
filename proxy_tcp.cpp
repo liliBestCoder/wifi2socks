@@ -223,7 +223,7 @@ void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
         if (!m_initial_buffer.empty()) {
             LOG_DEBUG("[ProxyTCP] Sending initial buffer (%zu bytes) to proxy tunnel", m_initial_buffer.size());
             TrafficManager::instance().report_proxy_tx((int)m_initial_buffer.size(), m_is_direct);
-            WorkerPool::instance().send_async(m_remote_socket, std::move(m_initial_buffer));
+            WorkerPool::instance().send_async(m_remote_socket, m_initial_buffer.data(), m_initial_buffer.size());
             m_initial_buffer.clear();
         }
 
@@ -257,7 +257,7 @@ void ProxyTCP::on_remote_connect() {
         if (!m_initial_buffer.empty()) {
             LOG_DEBUG("[ProxyTCP] Sending initial buffer (%zu bytes) to direct remote", m_initial_buffer.size());
             TrafficManager::instance().report_proxy_tx((int)m_initial_buffer.size(), m_is_direct);
-            WorkerPool::instance().send_async(m_remote_socket, std::move(m_initial_buffer));
+            WorkerPool::instance().send_async(m_remote_socket, m_initial_buffer.data(), m_initial_buffer.size());
             m_initial_buffer.clear();
         }
     } else {

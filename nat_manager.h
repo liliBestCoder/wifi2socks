@@ -39,9 +39,12 @@ private:
     NatManager();
     ~NatManager();
 
-    std::unordered_map<uint64_t, OriginalDestination> m_tcp_map;
-    std::unordered_map<uint64_t, std::pair<OriginalDestination, uint64_t>> m_udp_map;
-    
-    mutable std::shared_mutex m_tcp_mtx;
-    mutable std::shared_mutex m_udp_mtx;
+    struct Shard {
+        std::unordered_map<uint64_t, OriginalDestination> tcp_map;
+        std::unordered_map<uint64_t, std::pair<OriginalDestination, uint64_t>> udp_map;
+        mutable std::shared_mutex mtx;
+    };
+
+    static const size_t NUM_SHARDS = 32;
+    Shard m_shards[NUM_SHARDS];
 };

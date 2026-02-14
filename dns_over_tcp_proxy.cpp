@@ -81,7 +81,7 @@ void DnsOverTcpProxy::send_dns_query() {
     tcp_pkt.insert(tcp_pkt.end(), m_query_payload.begin(), m_query_payload.end());
 
     TrafficManager::instance().report_proxy_tx((int)tcp_pkt.size(), false);
-    WorkerPool::instance().send_async(m_socket, std::move(tcp_pkt));
+    WorkerPool::instance().send_async(m_socket, tcp_pkt.data(), tcp_pkt.size());
 }
 
 void DnsOverTcpProxy::on_read(char* buf, int len) {

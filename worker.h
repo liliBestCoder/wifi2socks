@@ -31,12 +31,13 @@ struct IO_CONTEXT {
     IO_TYPE type;
     SOCKET sock;
     std::function<void()> task; 
-    std::vector<uint8_t> buf;
+    uint8_t buf[131072]; // 128KB fixed buffer to avoid vector allocations/zeroing
+    size_t data_len;
     sockaddr_in remote_addr;
     int remote_addr_len;
     std::shared_ptr<SocketContext> parent;
 
-    IO_CONTEXT() : type(IO_READ), sock(INVALID_SOCKET), remote_addr_len(0), parent(nullptr) {
+    IO_CONTEXT() : type(IO_READ), sock(INVALID_SOCKET), data_len(0), remote_addr_len(0), parent(nullptr) {
         memset(&overlapped, 0, sizeof(OVERLAPPED));
     }
 };
@@ -89,7 +90,7 @@ public:
     void connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect, 
                       std::function<void(char*, int, sockaddr_in*)> on_read = nullptr,
                       std::function<void(int)> on_write = nullptr);
-    bool send_async(SOCKET s, std::vector<uint8_t>&& data);
+    bool send_async(SOCKET s, const uint8_t* data, size_t len);
     bool send_async(SOCKET s, char* buf, int len);
     void read_async(SOCKET s);
     void update_read_callback(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read);
@@ -117,7 +118,7 @@ private:
 
     // 内部方法
     void post_read(const std::shared_ptr<SocketContext>& ctx);
-    void post_write(const std::shared_ptr<SocketContext>& ctx, std::vector<uint8_t>&& data);
+    void post_write(const std::shared_ptr<SocketContext>& ctx, const uint8_t* data, size_t len);
     void register_context(SOCKET s, std::shared_ptr<SocketContext> ctx);
     void unregister_context(SOCKET s);
 };

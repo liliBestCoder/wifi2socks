@@ -12,8 +12,9 @@ NatManager::NatManager() {}
 NatManager::~NatManager() {}
 
 void NatManager::create_tcp_mapping(uint64_t key, const OriginalDestination& dest) {
-    std::unique_lock lock(m_tcp_mtx);
-    m_tcp_map[key] = dest;
+    auto& shard = m_shards[key % NUM_SHARDS];
+    std::unique_lock lock(shard.mtx);
+    shard.tcp_map[key] = dest;
     uint32_t ip = static_cast<uint32_t>(key >> 16);
     uint16_t port = static_cast<uint16_t>(key & 0xFFFF);
     LOG_DEBUG("[NAT] Created TCP mapping: %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d",
@@ -22,35 +23,29 @@ void NatManager::create_tcp_mapping(uint64_t key, const OriginalDestination& des
 }
 
 void NatManager::remove_tcp_mapping(uint64_t key) {
-    std::unique_lock lock(m_tcp_mtx);
-    m_tcp_map.erase(key);
+    auto& shard = m_shards[key % NUM_SHARDS];
+    std::unique_lock lock(shard.mtx);
+    shard.tcp_map.erase(key);
 }
 
 void NatManager::create_or_update_udp_mapping(uint64_t key, const OriginalDestination& dest) {
-    std::unique_lock lock(m_udp_mtx);
-    m_udp_map[key] = { dest, GetTickCount64() };
+    auto& shard = m_shards[key % NUM_SHARDS];
+    std::unique_lock lock(shard.mtx);
+    shard.udp_map[key] = { dest, GetTickCount64() };
 }
 
 std::optional<OriginalDestination> NatManager::get_mapping(uint64_t key) {
-    // Try TCP first
-    {
-        std::shared_lock lock(m_tcp_mtx);
-        auto it = m_tcp_map.find(key);
-        if (it != m_tcp_map.end()) {
-            return it->second;
-        }
+    auto& shard = m_shards[key % NUM_SHARDS];
+    std::shared_lock lock(shard.mtx);
+    
+    auto it_tcp = shard.tcp_map.find(key);
+    if (it_tcp != shard.tcp_map.end()) {
+        return it_tcp->second;
     }
 
-    // Then try UDP
-    {
-        std::shared_lock lock(m_udp_mtx);
-        auto it = m_udp_map.find(key);
-        if (it != m_udp_map.end()) {
-            // Update activity timestamp
-            // Note: Since we have a shared_lock, we'd need a unique_lock to update.
-            // For simplicity in this lookup, we skip the update or use a separate atomic if needed.
-            return it->second.first;
-        }
+    auto it_udp = shard.udp_map.find(key);
+    if (it_udp != shard.udp_map.end()) {
+        return it_udp->second.first;
     }
 
     return std::nullopt;

@@ -18,13 +18,14 @@ IO_CONTEXT* acquire_io_context() {
     memset(&io->overlapped, 0, sizeof(OVERLAPPED));
     io->task = nullptr;
     io->parent = nullptr;
+    io->data_len = 0;
     return io;
 }
 
 void release_io_context(IO_CONTEXT* io) {
     if (!io) return;
     std::lock_guard<std::mutex> lock(g_io_pool_mtx);
-    if (g_io_pool.size() < 2048) {
+    if (g_io_pool.size() < 4096) { // Increased pool size for high throughput
         g_io_pool.push_back(io);
     } else {
         delete io;
@@ -44,7 +45,7 @@ void Worker::start(int core_index) {
     if (m_running) return;
     m_running = true;
     m_thread = std::thread(&Worker::loop, this);
-    SetThreadPriority(m_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
+    SetThreadPriority(m_thread.native_handle(), THREAD_PRIORITY_HIGHEST);
 
     if (core_index >= 0) {
         DWORD_PTR mask = (static_cast<DWORD_PTR>(1) << (core_index % (sizeof(DWORD_PTR) * 8)));
@@ -111,7 +112,7 @@ void Worker::loop() {
                 if (io->type == IO_READ) {
                     ctx->read_pending = false;
                     if (bytesTransferred > 0) {
-                        if (ctx->on_read) ctx->on_read((char*)io->buf.data(), (int)bytesTransferred, ctx->is_udp ? &io->remote_addr : nullptr);
+                        if (ctx->on_read) ctx->on_read((char*)io->buf, (int)bytesTransferred, ctx->is_udp ? &io->remote_addr : nullptr);
                         WorkerPool::instance().post_read(ctx);
                     } else {
                         if (ctx->on_read) ctx->on_read(nullptr, 0, nullptr);
@@ -228,23 +229,22 @@ void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()>
             io->parent = ctx;
             io->task = on_connect;
             BOOL ret = ConnectExPtr(s, (sockaddr*)&addr, sizeof(addr), NULL, 0, NULL, &io->overlapped);
-            if (!ret && WSAGetLastError() != WSA_IO_PENDING) {
-                LOG_ERROR("[WorkerPool] ConnectEx failed immediately: %d", WSAGetLastError());
+            if (!ret && WSAGetLastError() != ERROR_IO_PENDING) {
                 if (io->task) io->task();
                 release_io_context(io);
             }
         } else {
-            LOG_ERROR("[WorkerPool] Failed to get ConnectEx pointer: %d", WSAGetLastError());
+            LOG_ERROR("[WorkerPool] Failed to get ConnectEx pointer.");
         }
     };
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)init_task);
 }
 
-bool WorkerPool::send_async(SOCKET s, std::vector<uint8_t>&& data) {
-    if (data.empty()) return true;
+bool WorkerPool::send_async(SOCKET s, const uint8_t* data, size_t len) {
+    if (len == 0) return true;
     auto ctx = find_context(s);
     if (ctx && !ctx->closing) {
-        post_write(ctx, std::move(data));
+        post_write(ctx, data, len);
         return true;
     }
     return false;
@@ -252,7 +252,7 @@ bool WorkerPool::send_async(SOCKET s, std::vector<uint8_t>&& data) {
 
 bool WorkerPool::send_async(SOCKET s, char* buf, int len) {
     if (len <= 0) return true;
-    return send_async(s, std::vector<uint8_t>(buf, buf + len));
+    return send_async(s, (const uint8_t*)buf, (size_t)len);
 }
 
 void WorkerPool::read_async(SOCKET s) {
@@ -309,11 +309,10 @@ void WorkerPool::post_read(const std::shared_ptr<SocketContext>& ctx) {
     io->type = IO_READ;
     io->sock = ctx->sock;
     io->parent = ctx;
-    io->buf.resize(131072); // 128KB
 
     WSABUF wsaBuf;
-    wsaBuf.buf = (char*)io->buf.data();
-    wsaBuf.len = (ULONG)io->buf.size();
+    wsaBuf.buf = (char*)io->buf;
+    wsaBuf.len = sizeof(io->buf);
 
     DWORD bytes = 0, flags = 0;
     int ret;
@@ -330,18 +329,21 @@ void WorkerPool::post_read(const std::shared_ptr<SocketContext>& ctx) {
     }
 }
 
-void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, std::vector<uint8_t>&& data) {
-    if (!ctx || ctx->closing || data.empty()) return;
+void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, const uint8_t* data, size_t len) {
+    if (!ctx || ctx->closing || len == 0) return;
 
     IO_CONTEXT* io = acquire_io_context();
     io->type = IO_WRITE;
     io->sock = ctx->sock;
     io->parent = ctx;
-    io->buf = std::move(data);
+    
+    size_t copy_len = (std::min)(len, sizeof(io->buf));
+    memcpy(io->buf, data, copy_len);
+    io->data_len = copy_len;
 
     WSABUF wsaBuf;
-    wsaBuf.buf = (char*)io->buf.data();
-    wsaBuf.len = (ULONG)io->buf.size();
+    wsaBuf.buf = (char*)io->buf;
+    wsaBuf.len = (ULONG)io->data_len;
 
     DWORD bytes = 0;
     int ret = WSASend(ctx->sock, &wsaBuf, 1, &bytes, 0, &io->overlapped, NULL);
