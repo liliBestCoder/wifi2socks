@@ -49,7 +49,6 @@ struct SocketContext {
     std::function<void(int)> on_write; 
     std::function<void()> on_remove_done; 
     
-    std::atomic<bool> read_pending;
     std::atomic<bool> closing;          
     bool is_udp;
     

@@ -4,6 +4,8 @@
 #include <iostream>
 #include <algorithm>
 
+const int CONCURRENT_READ_COUNT = 4;
+
 // --- IO_CONTEXT Pool ---
 static std::mutex g_io_pool_mtx;
 static std::vector<IO_CONTEXT*> g_io_pool;
@@ -110,7 +112,6 @@ void Worker::loop() {
         if (!ctx->closing) {
             if (ret) {
                 if (io->type == IO_READ) {
-                    ctx->read_pending = false;
                     if (bytesTransferred > 0) {
                         if (ctx->on_read) ctx->on_read((char*)io->buf, (int)bytesTransferred, ctx->is_udp ? &io->remote_addr : nullptr);
                         WorkerPool::instance().post_read(ctx);
@@ -122,11 +123,14 @@ void Worker::loop() {
                 } else if (io->type == IO_CONNECT) {
                     setsockopt(ctx->sock, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
                     if (io->task) io->task();
-                    WorkerPool::instance().post_read(ctx);
+                    if (ctx->on_read) {
+                        for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
+                            WorkerPool::instance().post_read(ctx);
+                        }
+                    }
                 }
             } else {
                 if (io->type == IO_READ) {
-                    ctx->read_pending = false;
                     if (ctx->on_read) ctx->on_read(nullptr, -1, nullptr);
                 } else if (io->type == IO_WRITE && ctx->on_write) {
                     ctx->on_write(-1);
@@ -181,7 +185,11 @@ void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in
         ctx->on_read = on_read;
         ctx->on_write = on_write; 
         ctx->is_udp = is_udp;
-        if (on_read) post_read(ctx);
+        if (on_read) {
+            for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
+                post_read(ctx);
+            }
+        }
     };
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io);
 }
@@ -303,7 +311,6 @@ void WorkerPool::unregister_context(SOCKET s) {
 
 void WorkerPool::post_read(const std::shared_ptr<SocketContext>& ctx) {
     if (!ctx || ctx->closing) return;
-    if (ctx->read_pending.exchange(true)) return;
 
     IO_CONTEXT* io = acquire_io_context();
     io->type = IO_READ;
@@ -324,7 +331,6 @@ void WorkerPool::post_read(const std::shared_ptr<SocketContext>& ctx) {
     }
 
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        ctx->read_pending = false;
         release_io_context(io);
     }
 }
