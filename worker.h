@@ -16,19 +16,28 @@
 
 // IOCP Operation Types
 enum IO_TYPE {
-    IO_READ,    // Zero-byte read completed
-    IO_WRITE,   // Async Write completed
-    IO_CONNECT,  // ConnectEx completed
+    IO_READ,    
+    IO_WRITE,   
+    IO_CONNECT, 
     IO_REMOVE
 };
 
-// Extended OVERLAPPED to hold context
+struct SocketContext;
+
+// Extended OVERLAPPED to hold context for a SINGLE asynchronous operation
 struct IO_CONTEXT {
     OVERLAPPED overlapped;
     IO_TYPE type;
     SOCKET sock;
     std::function<void()> on_done;
     std::vector<uint8_t> buf;
+    sockaddr_in remote_addr;
+    int remote_addr_len;
+    SocketContext* parent;
+
+    IO_CONTEXT() : type(IO_READ), sock(INVALID_SOCKET), remote_addr_len(0), parent(nullptr) {
+        memset(&overlapped, 0, sizeof(OVERLAPPED));
+    }
 };
 
 struct SocketContext {
@@ -40,58 +49,19 @@ struct SocketContext {
     std::function<void(char*, int, sockaddr_in*)> on_read;
     std::function<void(int)> on_write; 
     std::function<void()> on_close; 
-    std::function<void()> on_remove_done; // Callback for when context is finally deleted
+    std::function<void()> on_remove_done; 
     
-    IO_CONTEXT read_io;    
-    IO_CONTEXT write_io;   
-    IO_CONTEXT connect_io; 
-    
-    bool read_pending;     
-    bool write_pending;    
+    std::atomic<bool> read_pending;
     bool paused;           
-    bool closing;          // Scheme A: Mark for deletion
+    bool closing;          
     
-    // UDP Support
     bool is_udp;
-    char buffer[4096];
-    WSABUF wsaBuf;
-    WSABUF wsaWriteBuf;    
-    sockaddr_in remote_addr;
-    int remote_addr_len;
-
-    std::queue<std::vector<uint8_t>> write_queue; // Added for multiple pending writes
     
     std::atomic<int> pending_io;        // Number of outstanding overlapped operations
     void* user_data;                    // User-defined context data
 
-    SocketContext() : pending_io(0), closing(false), user_data(nullptr) {
-        magic = MAGIC_VAL;
-        
-        memset(&read_io.overlapped, 0, sizeof(OVERLAPPED));
-        read_io.type = IO_READ;
-        read_io.sock = INVALID_SOCKET;
-        
-        memset(&write_io.overlapped, 0, sizeof(OVERLAPPED));
-        write_io.type = IO_WRITE;
-        write_io.sock = INVALID_SOCKET;
-        
-        memset(&connect_io.overlapped, 0, sizeof(OVERLAPPED));
-        connect_io.type = IO_CONNECT;
-        connect_io.sock = INVALID_SOCKET;
-
-        read_pending = false;
-        write_pending = false;
-        paused = false;
-        sock = INVALID_SOCKET;
-        
-        is_udp = false;
-        memset(buffer, 0, sizeof(buffer));
-        wsaBuf.buf = buffer;
-        wsaBuf.len = sizeof(buffer);
-        wsaWriteBuf.buf = NULL;
-        wsaWriteBuf.len = 0;
-        memset(&remote_addr, 0, sizeof(remote_addr));
-        remote_addr_len = sizeof(remote_addr);
+    SocketContext() : magic(MAGIC_VAL), sock(INVALID_SOCKET), read_pending(false), 
+                     paused(false), closing(false), is_udp(false), pending_io(0), user_data(nullptr) {
     }
     
     ~SocketContext() {
@@ -107,8 +77,6 @@ public:
     void start(int core_index);
     void stop();
     
-    // Thread-safe methods
-    // on_write signature changed to take int status/bytes
     void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int)> on_write, std::function<void()> on_close, bool is_udp = false);
     void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
     
@@ -117,26 +85,19 @@ public:
 
     void connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect);
     
-    // NEW: Async Send using IOCP
-    // Returns true if operation posted (or queued), false if socket not found/closed.
-    // The callback on_write passed in add_socket will be called when done.
     bool send_async(SOCKET s, char* buf, int len);
     bool send_async(SOCKET s, std::vector<uint8_t>&& data);
     void read_async(SOCKET s);
     void update_read_callback(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read);
 
     void queue_task(std::function<void()> task);
-
     void set_socket_user_data(SOCKET s, void* user_data);
 
 private:
     void loop();
     void post_read(SocketContext* ctx);
-    void post_write(SocketContext* ctx, std::vector<uint8_t>&& data); 
+    void post_write(SocketContext* ctx, std::vector<uint8_t>&& data);
     
-    void retain_context(SocketContext* ctx);
-    void release_context(SocketContext* ctx);
-
     HANDLE m_iocp;
     std::thread m_thread;
     std::mutex m_mtx;
