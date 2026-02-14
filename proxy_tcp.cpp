@@ -48,7 +48,7 @@ void ProxyTCP::start() {
     WorkerPool::instance().add_socket(
         m_client_socket,
         [self](char* buf, int len, sockaddr_in*) { self->on_client_initial_read(buf, len); },
-        nullptr,
+        [self](int len) { self->on_write_complete(self->m_client_socket, len); },
         false
     );
 }
@@ -196,14 +196,14 @@ void ProxyTCP::connect_remote() {
             m_remote_socket, remote_addr, 
             [self]() { self->on_remote_connect(); },
             [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); },
-            nullptr
+            [self](int len) { self->on_write_complete(self->m_remote_socket, len); }
         );
     } else {
         WorkerPool::instance().connect_async(
             m_remote_socket, remote_addr, 
             [self]() { self->on_remote_connect(); },
             [self](char* b, int l, sockaddr_in*) { self->on_proxy_connect_response(b, l); },
-            nullptr
+            [self](int len) { self->on_write_complete(self->m_remote_socket, len); }
         );
     }
 }
@@ -291,7 +291,11 @@ void ProxyTCP::on_client_read(char* buf, int len) {
     TrafficManager::instance().report_proxy_tx(len, m_is_direct);
     
     if (m_state == ESTABLISHED) {
-        WorkerPool::instance().send_async(m_remote_socket, buf, len);
+        {
+            std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
+            m_remote_send_queue.emplace_back(buf, buf + len);
+        }
+        try_send(m_remote_socket);
     } else {
         m_initial_buffer.insert(m_initial_buffer.end(), buf, buf + len);
     }
@@ -304,9 +308,69 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
         return;
     }
     TrafficManager::instance().report_proxy_rx(len, m_is_direct);
-    
+
     if (m_state == ESTABLISHED) {
-        WorkerPool::instance().send_async(m_client_socket, buf, len);
+        {
+            std::lock_guard<std::mutex> lock(m_client_queue_mutex);
+            m_client_send_queue.emplace_back(buf, buf + len);
+        }
+        try_send(m_client_socket);
+    }
+}
+
+void ProxyTCP::try_send(SOCKET socket) {
+    if (socket == m_remote_socket) {
+        std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
+        if (m_remote_write_in_progress || m_remote_send_queue.empty()) {
+            return;
+        }
+        m_remote_write_in_progress = true;
+        const auto& buffer_to_send = m_remote_send_queue.front();
+        WorkerPool::instance().send_async(m_remote_socket, (const uint8_t*)buffer_to_send.data(), buffer_to_send.size());
+
+    } else if (socket == m_client_socket) {
+        std::lock_guard<std::mutex> lock(m_client_queue_mutex);
+        if (m_client_write_in_progress || m_client_send_queue.empty()) {
+            return;
+        }
+        m_client_write_in_progress = true;
+        const auto& buffer_to_send = m_client_send_queue.front();
+        WorkerPool::instance().send_async(m_client_socket, (const uint8_t*)buffer_to_send.data(), buffer_to_send.size());
+    }
+}
+
+void ProxyTCP::on_write_complete(SOCKET socket, int len) {
+    if (len <= 0) {
+        LOG_ERROR("[ProxyTCP] Write operation failed or wrote 0 bytes, closing session. Socket: %llu", socket);
+        close_session();
+        return;
+    }
+
+    auto self = shared_from_this();
+    if (socket == m_remote_socket) {
+        {
+            std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
+            if (!m_remote_send_queue.empty()) {
+                m_remote_send_queue.pop_front();
+            }
+            m_remote_write_in_progress = false;
+        }
+        // Schedule next send without holding the lock
+        WorkerPool::instance().queue_task([self, socket]() {
+            self->try_send(socket);
+        });
+
+    } else if (socket == m_client_socket) {
+        {
+            std::lock_guard<std::mutex> lock(m_client_queue_mutex);
+            if (!m_client_send_queue.empty()) {
+                m_client_send_queue.pop_front();
+            }
+            m_client_write_in_progress = false;
+        }
+        WorkerPool::instance().queue_task([self, socket]() {
+            self->try_send(socket);
+        });
     }
 }
 
