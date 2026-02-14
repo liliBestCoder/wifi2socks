@@ -55,6 +55,8 @@ public:
     bool is_google_domain(const std::string& domain);
     bool is_tencent_domain(const std::string& domain);
 
+    static bool is_private_ip(const uint32_t ip_host);
+
 private:
     void load_data(const std::string& geoip_file, const std::string& geosite_file);
     void load_geoip(const std::string& filepath);

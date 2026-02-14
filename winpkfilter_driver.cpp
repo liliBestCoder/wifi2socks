@@ -228,9 +228,9 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
 
     m_running = true; m_tx_running = true;
     m_tx_thread = std::thread(&WinPkFilterDriver::tx_run, this);
-    SetThreadPriority(m_tx_thread.native_handle(), THREAD_PRIORITY_HIGHEST);
+    SetThreadPriority(m_tx_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
     m_worker_thread = std::thread(&WinPkFilterDriver::run, this);
-    SetThreadPriority(m_worker_thread.native_handle(), THREAD_PRIORITY_HIGHEST);
+    SetThreadPriority(m_worker_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
     return true;
 }
 
@@ -247,6 +247,9 @@ void WinPkFilterDriver::run() {
         bool has_packets = true;
         while (m_running && has_packets) {
             std::vector<Packet> captured_packets;
+            std::vector<Packet> packets_to_send;
+            std::vector<Packet> packets_to_mstcp;
+
             m_read_request->dwPacketsNumber = BATCH_SIZE;
             m_read_request->dwPacketsSuccess = 0;
             
@@ -313,14 +316,21 @@ void WinPkFilterDriver::run() {
                         bool intercepted = false;
                         if ((ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) && ip->SrcAddr != m_gateway_ip) {
                             bool should_intercept = false;
+                            uint32_t dst_ip_h = ntohl(ip->DstAddr);
+
                             if (ip->Proto == IPPROTO_TCP) {
-                                if (ip->DstAddr != m_gateway_ip) should_intercept = true;
-                                else {
+                                if (ip->DstAddr != m_gateway_ip) {
+                                    // Skip interception for private IPs (LAN traffic)
+                                    if (!GeoChecker::is_private_ip(dst_ip_h)) {
+                                        should_intercept = true;
+                                    }
+                                } else {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     if (ntohs(tcp->DstPort) == 53) should_intercept = true;
                                 }
                             } else {
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                // For UDP, we currently only intercept DNS (port 53)
                                 if (ntohs(udp->DstPort) == 53) should_intercept = true;
                             }
 
@@ -413,22 +423,26 @@ void WinPkFilterDriver::run() {
                     }
                 } else { p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p)); }
             }
-        }
-        if (!packets_to_send.empty()) send_packets_to_adapter(std::move(packets_to_send));
-        if (!packets_to_mstcp.empty()) {
-            size_t processed = 0;
-            m_mstcp_request->hAdapterHandle = m_adapter_handle;
-            while (processed < packets_to_mstcp.size()) {
-                size_t current_batch = (std::min)(packets_to_mstcp.size() - processed, (size_t)BATCH_SIZE);
-                m_mstcp_request->dwPacketsNumber = (DWORD)current_batch;
-                m_mstcp_request->dwPacketsSuccess = 0;
-                for (size_t i = 0; i < current_batch; ++i) {
-                    m_mstcp_request->EthPacket[i].Buffer = packets_to_mstcp[processed + i].data.get();
+
+            // Flush batches immediately to reduce latency
+            if (!packets_to_send.empty()) send_packets_to_adapter(std::move(packets_to_send));
+            if (!packets_to_mstcp.empty()) {
+                size_t processed = 0;
+                m_mstcp_request->hAdapterHandle = m_adapter_handle;
+                while (processed < packets_to_mstcp.size()) {
+                    size_t current_batch = (std::min)(packets_to_mstcp.size() - processed, (size_t)BATCH_SIZE);
+                    m_mstcp_request->dwPacketsNumber = (DWORD)current_batch;
+                    m_mstcp_request->dwPacketsSuccess = 0;
+                    for (size_t i = 0; i < current_batch; ++i) {
+                        m_mstcp_request->EthPacket[i].Buffer = packets_to_mstcp[processed + i].data.get();
+                    }
+                    m_ndis_api.SendPacketsToMstcp(m_mstcp_request);
+                    processed += current_batch;
                 }
-                m_ndis_api.SendPacketsToMstcp(m_mstcp_request);
-                processed += current_batch;
             }
         }
+    }
+}
     }
 }
 

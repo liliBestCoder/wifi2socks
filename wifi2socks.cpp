@@ -108,7 +108,11 @@ int main() {
     std::string adapter_name = find_adapter_by_ip(g_config.tap_ip);
     static WinPkFilterDriver pk_driver;
     
-    WorkerPool::instance().init(8);
+    int worker_count = std::thread::hardware_concurrency();
+    if (worker_count == 0) worker_count = 4;
+    WorkerPool::instance().init(worker_count);
+    LOG_INFO("[CORE] Worker pool initialized with %d workers.", worker_count);
+
     UdpProxy::initialize();
 
     // LwIP stack and netif initialization has been removed.

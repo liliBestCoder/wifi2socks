@@ -206,7 +206,19 @@ bool is_common_cn_range(uint32_t ip) {
     return (first == 112 || first == 223 || first == 36 || first == 180 || first == 183);
 }
 
+bool GeoChecker::is_private_ip(const uint32_t ip_h) {
+    uint8_t b1 = (uint8_t)(ip_h >> 24);
+    uint8_t b2 = (uint8_t)(ip_h >> 16);
+    if (b1 == 10) return true; // 10.0.0.0/8
+    if (b1 == 172 && (b2 >= 16 && b2 <= 31)) return true; // 172.16.0.0/12
+    if (b1 == 192 && b2 == 168) return true; // 192.168.0.0/16
+    if (b1 == 127) return true; // 127.0.0.0/8
+    if (b1 == 169 && b2 == 254) return true; // 169.254.0.0/16
+    return false;
+}
+
 bool GeoChecker::is_cn_ip(uint32_t ip_host) {
+    if (is_private_ip(ip_host)) return true;
     if (!m_ready || cn_ip_idx_ == 0xFFFF) return false;
     std::shared_lock<std::shared_mutex> lock(m_mtx);
     auto it = std::lower_bound(ip_ranges_.begin(), ip_ranges_.end(), ip_host, [](const GeoIPRange& r, uint32_t val) { return r.end_ip < val; });
