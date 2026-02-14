@@ -175,14 +175,6 @@ private:
             new_socket,
             [this, new_socket](char* buf, int len, const sockaddr_in* from) { this->on_remote_read(new_socket, buf, len, from); },
             nullptr,
-            [this, dest_key]() {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                auto it = m_remote_sockets.find(dest_key);
-                if (it != m_remote_sockets.end()) {
-                    m_reverse_routes.erase(it->second);
-                    m_remote_sockets.erase(it);
-                }
-            },
             true
         );
 

@@ -34,7 +34,7 @@ struct IO_CONTEXT {
     std::vector<uint8_t> buf;
     sockaddr_in remote_addr;
     int remote_addr_len;
-    SocketContext* parent;
+    std::shared_ptr<SocketContext> parent;
 
     IO_CONTEXT() : type(IO_READ), sock(INVALID_SOCKET), remote_addr_len(0), parent(nullptr) {
         memset(&overlapped, 0, sizeof(OVERLAPPED));
@@ -48,18 +48,16 @@ struct SocketContext {
     
     std::function<void(char*, int, sockaddr_in*)> on_read;
     std::function<void(int)> on_write; 
-    std::function<void()> on_close; 
     std::function<void()> on_remove_done; 
     
     std::atomic<bool> read_pending;
     std::atomic<bool> closing;          
     bool is_udp;
     
-    std::atomic<int> pending_io;        
     void* user_data;                    
 
     SocketContext() : magic(MAGIC_VAL), sock(INVALID_SOCKET), read_pending(false), 
-                     closing(false), is_udp(false), pending_io(1), user_data(nullptr) {
+                     closing(false), is_udp(false), user_data(nullptr) {
     }
     
     ~SocketContext() {
@@ -89,12 +87,11 @@ public:
     void init(int count);
     
     // 全局控制方法，现在它们会将任务投递给共享 IOCP
-    void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int)> on_write, std::function<void()> on_close, bool is_udp = false);
+    void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int)> on_write, bool is_udp = false);
     void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
     void connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect, 
                       std::function<void(char*, int, sockaddr_in*)> on_read = nullptr,
-                      std::function<void(int)> on_write = nullptr,
-                      std::function<void()> on_close = nullptr);
+                      std::function<void(int)> on_write = nullptr);
     bool send_async(SOCKET s, std::vector<uint8_t>&& data);
     bool send_async(SOCKET s, char* buf, int len);
     void read_async(SOCKET s);
@@ -102,7 +99,7 @@ public:
     void queue_task(std::function<void()> task);
     
     HANDLE get_shared_iocp() const { return m_shared_iocp; }
-    SocketContext* find_context(SOCKET s);
+    std::shared_ptr<SocketContext> find_context(SOCKET s);
 
     void for_each_worker(std::function<void(Worker*)> callback);
 
@@ -114,12 +111,12 @@ private:
     std::vector<Worker*> m_workers;
     std::atomic<size_t> m_next_idx;
 
-    std::unordered_map<SOCKET, SocketContext*> m_global_sockets;
+    std::unordered_map<SOCKET, std::shared_ptr<SocketContext>> m_global_sockets;
     std::mutex m_global_mtx;
 
     // 内部方法
-    void post_read(SocketContext* ctx);
-    void post_write(SocketContext* ctx, std::vector<uint8_t>&& data);
-    void register_context(SOCKET s, SocketContext* ctx);
+    void post_read(const std::shared_ptr<SocketContext>& ctx);
+    void post_write(const std::shared_ptr<SocketContext>& ctx, std::vector<uint8_t>&& data);
+    void register_context(SOCKET s, std::shared_ptr<SocketContext> ctx);
     void unregister_context(SOCKET s);
 };

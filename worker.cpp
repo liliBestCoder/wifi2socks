@@ -60,17 +60,17 @@ void Worker::loop() {
 
         // 处理 Socket 移除逻辑
         if (io->type == IO_REMOVE) {
-            SocketContext* ctx = WorkerPool::instance().find_context(io->sock);
+            std::shared_ptr<SocketContext> ctx = WorkerPool::instance().find_context(io->sock);
             if (ctx) {
                 ctx->closing = true;
                 ctx->on_remove_done = io->task;
                 WorkerPool::instance().unregister_context(io->sock);
                 closesocket(io->sock);
                 
-                // 释放初始的 Pool 所有权引用
-                if (ctx->pending_io.fetch_sub(1) == 1) {
+                // 如果除了当前的 ctx 局部变量外没有其他地方持有引用（包括没有挂起的 IO）
+                // 则立即调用完成回调
+                if (ctx.use_count() == 1) {
                     if (ctx->on_remove_done) ctx->on_remove_done();
-                    delete ctx;
                 }
             } else if (io->task) {
                 io->task();
@@ -79,7 +79,8 @@ void Worker::loop() {
             continue;
         }
 
-        SocketContext* ctx = (SocketContext*)completionKey;
+        // 注意：这里我们不再通过 completionKey 转换，而是直接从 io->parent 获取 shared_ptr
+        std::shared_ptr<SocketContext> ctx = io->parent;
         if (!ctx || ctx->magic != SocketContext::MAGIC_VAL) {
             delete io;
             continue;
@@ -123,10 +124,10 @@ void Worker::loop() {
 
         delete io;
 
-        // 最终清理：所有操作（包括初始引用）都完成后删除
-        if (ctx->pending_io.fetch_sub(1) == 1) {
+        // 如果 ctx 已经标记为 closing，且这是最后一个引用的 IO 操作（即将被销毁）
+        // 则执行 on_remove_done
+        if (ctx->closing && ctx.use_count() == 1) {
             if (ctx->on_remove_done) ctx->on_remove_done();
-            delete ctx;
         }
     }
 }
@@ -153,20 +154,19 @@ void WorkerPool::init(int count) {
     }
 }
 
-void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int)> on_write, std::function<void()> on_close, bool is_udp) {
+void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int)> on_write, bool is_udp) {
     IO_CONTEXT* io = new IO_CONTEXT();
     io->type = IO_TASK;
-    io->task = [this, s, on_read, on_write, on_close, is_udp]() {
-        SocketContext* ctx = find_context(s);
+    io->task = [this, s, on_read, on_write, is_udp]() {
+        std::shared_ptr<SocketContext> ctx = find_context(s);
         if (!ctx) {
-            ctx = new SocketContext();
+            ctx = std::make_shared<SocketContext>();
             ctx->sock = s;
             register_context(s, ctx);
-            CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx, 0);
+            CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx.get(), 0);
         }
         ctx->on_read = on_read;
         ctx->on_write = on_write; 
-        ctx->on_close = on_close;
         ctx->is_udp = is_udp;
         if (on_read) post_read(ctx);
     };
@@ -183,12 +183,11 @@ void WorkerPool::remove_socket(SOCKET s, std::function<void()> on_done) {
 
 void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect, 
                                   std::function<void(char*, int, sockaddr_in*)> on_read,
-                                  std::function<void(int)> on_write,
-                                  std::function<void()> on_close) {
+                                  std::function<void(int)> on_write) {
     // 首先投递一个创建上下文并绑定 IOCP 的任务
     IO_CONTEXT* init_task = new IO_CONTEXT();
     init_task->type = IO_TASK;
-    init_task->task = [this, s, addr, on_connect, on_read, on_write, on_close]() {
+    init_task->task = [this, s, addr, on_connect, on_read, on_write]() {
         struct sockaddr_in bindAddr;
         memset(&bindAddr, 0, sizeof(bindAddr));
         bindAddr.sin_family = AF_INET;
@@ -196,16 +195,15 @@ void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()>
         bindAddr.sin_port = 0;
         bind(s, (sockaddr*)&bindAddr, sizeof(bindAddr));
 
-        SocketContext* ctx = find_context(s);
+        std::shared_ptr<SocketContext> ctx = find_context(s);
         if (!ctx) {
-            ctx = new SocketContext();
+            ctx = std::make_shared<SocketContext>();
             ctx->sock = s;
             register_context(s, ctx);
-            CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx, 0);
+            CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx.get(), 0);
         }
         ctx->on_read = on_read;
         ctx->on_write = on_write;
-        ctx->on_close = on_close;
 
         // 获取 ConnectEx 指针 (通常在全局初始化或 Worker 构造中完成，这里简化处理)
         LPFN_CONNECTEX ConnectExPtr = nullptr;
@@ -219,14 +217,12 @@ void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()>
             io->sock = s;
             io->parent = ctx;
             io->task = on_connect;
-            ctx->pending_io++;
             BOOL ret = ConnectExPtr(s, (sockaddr*)&addr, sizeof(addr), NULL, 0, NULL, &io->overlapped);
             if (!ret && WSAGetLastError() != ERROR_IO_PENDING) {
                 LOG_ERROR("[WorkerPool] ConnectEx failed immediately: %d", WSAGetLastError());
                 if (io->task) io->task();
-                ctx->pending_io--;
                 delete io;
-                // 注意：不要在这里 delete ctx，让上层回调决定是否 remove_socket
+                // 注意：不要在这里 unregister_context，让上层回调决定是否 remove_socket
             } else {
                 LOG_DEBUG("[WorkerPool] ConnectEx initiated for socket %d", (int)s);
             }
@@ -242,7 +238,7 @@ bool WorkerPool::send_async(SOCKET s, std::vector<uint8_t>&& data) {
     io_task->type = IO_TASK;
     io_task->buf = std::move(data);
     io_task->task = [this, s, moved_io = io_task]() mutable {
-        SocketContext* ctx = find_context(s);
+        auto ctx = find_context(s);
         if (ctx && !ctx->closing) {
             post_write(ctx, std::move(moved_io->buf));
         }
@@ -258,7 +254,7 @@ void WorkerPool::read_async(SOCKET s) {
     IO_CONTEXT* io_task = new IO_CONTEXT();
     io_task->type = IO_TASK;
     io_task->task = [this, s]() {
-        SocketContext* ctx = find_context(s);
+        auto ctx = find_context(s);
         if (ctx) post_read(ctx);
     };
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io_task);
@@ -268,7 +264,7 @@ void WorkerPool::update_read_callback(SOCKET s, std::function<void(char*, int, s
     IO_CONTEXT* io_task = new IO_CONTEXT();
     io_task->type = IO_TASK;
     io_task->task = [this, s, on_read]() {
-        SocketContext* ctx = find_context(s);
+        auto ctx = find_context(s);
         if (ctx) ctx->on_read = on_read;
     };
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io_task);
@@ -281,13 +277,13 @@ void WorkerPool::queue_task(std::function<void()> task) {
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io);
 }
 
-SocketContext* WorkerPool::find_context(SOCKET s) {
+std::shared_ptr<SocketContext> WorkerPool::find_context(SOCKET s) {
     std::lock_guard<std::mutex> lock(m_global_mtx);
     auto it = m_global_sockets.find(s);
     return (it != m_global_sockets.end()) ? it->second : nullptr;
 }
 
-void WorkerPool::register_context(SOCKET s, SocketContext* ctx) {
+void WorkerPool::register_context(SOCKET s, std::shared_ptr<SocketContext> ctx) {
     std::lock_guard<std::mutex> lock(m_global_mtx);
     m_global_sockets[s] = ctx;
 }
@@ -297,7 +293,7 @@ void WorkerPool::unregister_context(SOCKET s) {
     m_global_sockets.erase(s);
 }
 
-void WorkerPool::post_read(SocketContext* ctx) {
+void WorkerPool::post_read(const std::shared_ptr<SocketContext>& ctx) {
     if (!ctx || ctx->closing || ctx->magic != SocketContext::MAGIC_VAL) return;
     if (ctx->read_pending.exchange(true)) return;
 
@@ -311,7 +307,6 @@ void WorkerPool::post_read(SocketContext* ctx) {
     wsaBuf.buf = (char*)io->buf.data();
     wsaBuf.len = (ULONG)io->buf.size();
 
-    ctx->pending_io++;
     DWORD bytes = 0, flags = 0;
     int ret;
     if (ctx->is_udp) {
@@ -322,13 +317,12 @@ void WorkerPool::post_read(SocketContext* ctx) {
     }
 
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        ctx->pending_io--;
         ctx->read_pending = false;
         delete io;
     }
 }
 
-void WorkerPool::post_write(SocketContext* ctx, std::vector<uint8_t>&& data) {
+void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, std::vector<uint8_t>&& data) {
     if (!ctx || ctx->closing || ctx->magic != SocketContext::MAGIC_VAL || data.empty()) return;
 
     IO_CONTEXT* io = new IO_CONTEXT();
@@ -341,12 +335,10 @@ void WorkerPool::post_write(SocketContext* ctx, std::vector<uint8_t>&& data) {
     wsaBuf.buf = (char*)io->buf.data();
     wsaBuf.len = (ULONG)io->buf.size();
 
-    ctx->pending_io++;
     DWORD bytes = 0;
     int ret = WSASend(ctx->sock, &wsaBuf, 1, &bytes, 0, &io->overlapped, NULL);
 
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        ctx->pending_io--;
         if (ctx->on_write) ctx->on_write(-1);
         delete io;
     }

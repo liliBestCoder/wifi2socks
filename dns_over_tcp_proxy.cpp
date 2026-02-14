@@ -48,8 +48,7 @@ void DnsOverTcpProxy::start() {
         m_socket, proxy_addr, 
         [self]() { self->on_connect(); },
         [self](char* buf, int len, sockaddr_in*) { self->on_read(buf, len); },
-        nullptr,
-        [self]() { self->on_close(); }
+        nullptr
     );
 }
 

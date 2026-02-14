@@ -45,8 +45,8 @@ void ProxyTCP::start() {
     WorkerPool::instance().add_socket(
         m_client_socket,
         [self](char* buf, int len, sockaddr_in*) { self->on_client_initial_read(buf, len); },
-        nullptr, 
-        nullptr
+        nullptr,
+        false
     );
 }
 
@@ -157,7 +157,6 @@ void ProxyTCP::connect_remote() {
             m_remote_socket, remote_addr, 
             [self]() { self->on_remote_connect(); },
             [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); },
-            nullptr,
             nullptr
         );
     } else {
@@ -165,7 +164,6 @@ void ProxyTCP::connect_remote() {
             m_remote_socket, remote_addr, 
             [self]() { self->on_remote_connect(); },
             [self](char* b, int l, sockaddr_in*) { self->on_proxy_connect_response(b, l); },
-            nullptr,
             nullptr
         );
     }
