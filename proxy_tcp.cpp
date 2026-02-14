@@ -43,16 +43,9 @@ ProxyTCP::~ProxyTCP() {
 }
 
 void ProxyTCP::start() {
-    m_worker = WorkerPool::instance().get_next_worker();
-    if (!m_worker) {
-        LOG_ERROR("[ProxyTCP] No available workers. Closing session.");
-        close_session();
-        return;
-    }
-
     auto self = shared_from_this();
     retain(); 
-    m_worker->add_socket(
+    WorkerPool::instance().add_socket(
         m_client_socket,
         [self](char* buf, int len, sockaddr_in*) { self->on_client_initial_read(buf, len); },
         nullptr, 
@@ -87,13 +80,11 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
     bool ready_to_decide = false;
     std::string domain = parse_tls_sni(m_initial_buffer.data(), m_initial_buffer.size());
     if (!domain.empty()) {
-        m_detected_domain = domain;
-        ready_to_decide = true;
+        m_detected_domain = domain;\n        ready_to_decide = true;
     } else if (is_http_start(m_initial_buffer.data(), m_initial_buffer.size())) {
         domain = parse_http_host(m_initial_buffer.data(), m_initial_buffer.size());
         if (!domain.empty()) {
-            m_detected_domain = domain;
-            ready_to_decide = true;
+            m_detected_domain = domain;\n            ready_to_decide = true;
         }
     }
 
@@ -122,7 +113,7 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
     }
     
     auto self = shared_from_this();
-    m_worker->update_read_callback(m_client_socket, [self](char* b, int l, sockaddr_in*) { self->on_client_read(b, l); });
+    WorkerPool::instance().update_read_callback(m_client_socket, [self](char* b, int l, sockaddr_in*) { self->on_client_read(b, l); });
     
     connect_remote();
 }
@@ -135,18 +126,15 @@ void ProxyTCP::connect_remote() {
     remote_addr.sin_family = AF_INET;
 
     char ip_str[INET_ADDRSTRLEN];
-    struct in_addr addr;
-    addr.s_addr = m_original_dest.ip;
+    struct in_addr addr;\n    addr.s_addr = m_original_dest.ip;
     inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
 
     if (m_is_direct) {
         LOG_INFO("[ProxyTCP] Routing DIRECT for %s (IP: %s)", m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str(), ip_str);
-        remote_addr.sin_addr.s_addr = m_original_dest.ip;
-        remote_addr.sin_port = m_original_dest.port;
+        remote_addr.sin_addr.s_addr = m_original_dest.ip;\n        remote_addr.sin_port = m_original_dest.port;
     } else {
         LOG_INFO("[ProxyTCP] Routing PROXY for %s (IP: %s)", m_detected_domain.empty() ? "(Domain unknown)" : m_detected_domain.c_str(), ip_str);
-        inet_pton(AF_INET, g_config.proxy_ip.c_str(), &remote_addr.sin_addr);
-        remote_addr.sin_port = htons(g_config.proxy_port);
+        inet_pton(AF_INET, g_config.proxy_ip.c_str(), &remote_addr.sin_addr);\n        remote_addr.sin_port = htons(g_config.proxy_port);
     }
     
     m_remote_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -162,7 +150,7 @@ void ProxyTCP::connect_remote() {
     u_long mode = 1;
     ioctlsocket(m_remote_socket, FIONBIO, &mode);
     
-    m_worker->connect_async(m_remote_socket, remote_addr, [self]() {
+    WorkerPool::instance().connect_async(m_remote_socket, remote_addr, [self]() {
         self->on_remote_connect();
     });
 }
@@ -181,12 +169,11 @@ void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
 
         if (!m_initial_buffer.empty()) {
             TrafficManager::instance().report_proxy_tx((int)m_initial_buffer.size(), m_is_direct);
-            m_worker->send_async(m_remote_socket, std::move(m_initial_buffer));
-            m_initial_buffer.clear();
+            WorkerPool::instance().send_async(m_remote_socket, std::move(m_initial_buffer));\n            m_initial_buffer.clear();
         }
 
         auto self = shared_from_this();
-        m_worker->update_read_callback(m_remote_socket, [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); });
+        WorkerPool::instance().update_read_callback(m_remote_socket, [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); });
 
     } else {
         if (response.length() > 200) response.resize(200);
@@ -203,26 +190,23 @@ void ProxyTCP::on_remote_connect() {
 
     if (m_is_direct) {
         m_state = ESTABLISHED;
-        m_worker->add_socket(
+        WorkerPool::instance().add_socket(
             m_remote_socket,
             [self](char* buf, int len, sockaddr_in*) { self->on_remote_read(buf, len); },
-            nullptr, 
-            [self]() { self->on_close(); }
+            nullptr, \n            [self]() { self->on_close(); }
         );
 
         if (!m_initial_buffer.empty()) {
             TrafficManager::instance().report_proxy_tx((int)m_initial_buffer.size(), m_is_direct);
-            m_worker->send_async(m_remote_socket, std::move(m_initial_buffer));
-            m_initial_buffer.clear();
+            WorkerPool::instance().send_async(m_remote_socket, std::move(m_initial_buffer));\n            m_initial_buffer.clear();
         }
     } else {
         m_state = AWAITING_CONNECT_RESPONSE;
 
-        m_worker->add_socket(
+        WorkerPool::instance().add_socket(
             m_remote_socket,
             [self](char* buf, int len, sockaddr_in*) { self->on_proxy_connect_response(buf, len); },
-            nullptr, 
-            [self]() { self->on_close(); }
+            nullptr, \n            [self]() { self->on_close(); }
         );
 
         std::string target_host;
@@ -230,17 +214,15 @@ void ProxyTCP::on_remote_connect() {
         if (!m_detected_domain.empty()) {
             target_host = m_detected_domain;
         } else {
-            struct in_addr addr;
-            addr.s_addr = m_original_dest.ip;
-            inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
-            target_host = ip_str;
+            struct in_addr addr;\n            addr.s_addr = m_original_dest.ip;
+            inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);\n            target_host = ip_str;
         }
 
         uint16_t target_port = ntohs(m_original_dest.port);
         std::string connect_req = "CONNECT " + target_host + ":" + std::to_string(target_port) + " HTTP/1.1\r\nHost: " + target_host + ":" + std::to_string(target_port) + "\r\n\r\n";
 
         LOG_DEBUG("[ProxyTCP] Sending CONNECT request to proxy for %s:%d", target_host.c_str(), target_port);
-        m_worker->send_async(m_remote_socket, (char*)connect_req.data(), (int)connect_req.length());
+        WorkerPool::instance().send_async(m_remote_socket, (char*)connect_req.data(), (int)connect_req.length());
     }
 }
 
@@ -252,7 +234,7 @@ void ProxyTCP::on_client_read(char* buf, int len) {
     TrafficManager::instance().report_proxy_tx(len, m_is_direct);
     
     if (m_state == ESTABLISHED) {
-        m_worker->send_async(m_remote_socket, buf, len);
+        WorkerPool::instance().send_async(m_remote_socket, buf, len);
     } else {
         m_initial_buffer.insert(m_initial_buffer.end(), buf, buf + len);
     }
@@ -266,7 +248,7 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
     TrafficManager::instance().report_proxy_rx(len, m_is_direct);
     
     if (m_state == ESTABLISHED) {
-        m_worker->send_async(m_client_socket, buf, len);
+        WorkerPool::instance().send_async(m_client_socket, buf, len);
     }
 }
 
@@ -279,11 +261,11 @@ void ProxyTCP::close_session() {
     m_state = CLOSING;
     LOG_DEBUG("[ProxyTCP] Closing session.");
     if (m_client_socket != INVALID_SOCKET) {
-        m_worker->remove_socket(m_client_socket);
+        WorkerPool::instance().remove_socket(m_client_socket);
         m_client_socket = INVALID_SOCKET;
     }
     if (m_remote_socket != INVALID_SOCKET) {
-        m_worker->remove_socket(m_remote_socket);
+        WorkerPool::instance().remove_socket(m_remote_socket);
         m_remote_socket = INVALID_SOCKET;
     }
 }

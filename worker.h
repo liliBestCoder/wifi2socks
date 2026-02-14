@@ -11,7 +11,7 @@
 #include <thread>
 #include <mutex>
 #include <functional>
-#include <map>
+#include <unordered_map>
 #include <atomic>
 
 // IOCP Operation Types
@@ -20,17 +20,17 @@ enum IO_TYPE {
     IO_WRITE,   
     IO_CONNECT, 
     IO_REMOVE,
-    IO_TASK     // Added for event-driven task execution
+    IO_TASK     // 通过 IOCP 投递的控制任务
 };
 
 struct SocketContext;
 
-// Extended OVERLAPPED to hold context for a SINGLE asynchronous operation
+// 动态分配的 IO 上下文，对应一次异步操作
 struct IO_CONTEXT {
     OVERLAPPED overlapped;
     IO_TYPE type;
     SOCKET sock;
-    std::function<void()> task; // Added to carry tasks via IOCP
+    std::function<void()> task; 
     std::vector<uint8_t> buf;
     sockaddr_in remote_addr;
     int remote_addr_len;
@@ -46,23 +46,20 @@ struct SocketContext {
     uint32_t magic;
     SOCKET sock;
     
-    // Callbacks
     std::function<void(char*, int, sockaddr_in*)> on_read;
     std::function<void(int)> on_write; 
     std::function<void()> on_close; 
     std::function<void()> on_remove_done; 
     
     std::atomic<bool> read_pending;
-    bool paused;           
-    bool closing;          
-    
+    std::atomic<bool> closing;          
     bool is_udp;
     
-    std::atomic<int> pending_io;        // Number of outstanding overlapped operations
-    void* user_data;                    // User-defined context data
+    std::atomic<int> pending_io;        
+    void* user_data;                    
 
     SocketContext() : magic(MAGIC_VAL), sock(INVALID_SOCKET), read_pending(false), 
-                     paused(false), closing(false), is_udp(false), pending_io(0), user_data(nullptr) {
+                     closing(false), is_udp(false), pending_io(0), user_data(nullptr) {
     }
     
     ~SocketContext() {
@@ -72,56 +69,52 @@ struct SocketContext {
 
 class Worker {
 public:
-    Worker(HANDLE iocp); // Constructor now takes shared IOCP handle
+    Worker(HANDLE iocp);
     ~Worker();
     
     void start(int core_index);
     void stop();
     
-    void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int)> on_write, std::function<void()> on_close, bool is_udp = false);
-    void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
-    
-    void pause_read(SOCKET s);
-    void resume_read(SOCKET s);
-
-    void connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect);
-    
-    bool send_async(SOCKET s, char* buf, int len);
-    bool send_async(SOCKET s, std::vector<uint8_t>&& data);
-    void read_async(SOCKET s);
-    void update_read_callback(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read);
-
-    void queue_task(std::function<void()> task);
-    void set_socket_user_data(SOCKET s, void* user_data);
-
 private:
     void loop();
-    void post_read(SocketContext* ctx);
-    void post_write(SocketContext* ctx, std::vector<uint8_t>&& data);
-    
     HANDLE m_iocp;
     std::thread m_thread;
-    std::mutex m_mtx;
-    std::map<SOCKET, SocketContext*> m_sockets; 
     std::atomic<bool> m_running;
-    
-    LPFN_CONNECTEX m_lpfnConnectEx;
 };
 
 class WorkerPool {
 public:
     static WorkerPool& instance();
     void init(int count);
-    Worker* get_next_worker();
     
-    void for_each_worker(std::function<void(Worker*)> callback);
+    // 全局控制方法，现在它们会将任务投递给共享 IOCP
+    void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int)> on_write, std::function<void()> on_close, bool is_udp = false);
+    void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
+    void connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect);
+    bool send_async(SOCKET s, std::vector<uint8_t>&& data);
+    bool send_async(SOCKET s, char* buf, int len);
+    void read_async(SOCKET s);
+    void update_read_callback(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read);
+    void queue_task(std::function<void()> task);
+    
     HANDLE get_shared_iocp() const { return m_shared_iocp; }
+    SocketContext* find_context(SOCKET s);
+
+    void for_each_worker(std::function<void(Worker*)> callback);
 
 private:
-    WorkerPool() : m_shared_iocp(NULL), m_next_idx(0) {}
-    ~WorkerPool();
+    WorkerPool() : m_shared_iocp(NULL), m_next_idx(0) {}\n    ~WorkerPool();
 
     HANDLE m_shared_iocp;
     std::vector<Worker*> m_workers;
     std::atomic<size_t> m_next_idx;
+
+    std::unordered_map<SOCKET, SocketContext*> m_global_sockets;
+    std::mutex m_global_mtx;
+
+    // 内部方法
+    void post_read(SocketContext* ctx);
+    void post_write(SocketContext* ctx, std::vector<uint8_t>&& data);
+    void register_context(SOCKET s, SocketContext* ctx);
+    void unregister_context(SOCKET s);
 };

@@ -91,8 +91,7 @@ int main() {
     }
     
     static DhcpServer dhcp_server(g_config.tap_ip);
-    g_dhcp_server_ptr = &dhcp_server;
-    dhcp_server.start();
+    g_dhcp_server_ptr = &dhcp_server;\n    dhcp_server.start();
 
     TrafficManager::instance().start();
 
@@ -108,7 +107,7 @@ int main() {
     int worker_count = std::thread::hardware_concurrency();
     if (worker_count == 0) worker_count = 4;
     WorkerPool::instance().init(worker_count);
-    LOG_INFO("[CORE] Worker pool initialized with %d workers.", worker_count);
+    LOG_INFO("[CORE] Worker pool initialized with %d workers sharing one IOCP.", worker_count);
 
     UdpProxy::initialize();
 
