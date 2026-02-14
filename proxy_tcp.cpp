@@ -56,56 +56,81 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
         return;
     }
 
-    size_t max_len = (g_config.max_sni_len > 0) ? g_config.max_sni_len : 16384;
-    if (m_initial_buffer.size() + len > max_len) {
-        LOG_INFO("[ProxyTCP] Initial buffer exceeded limit. Deciding with current data.");
-        len = (int)(max_len - m_initial_buffer.size());
+    size_t max_buf_len = (g_config.max_sni_len > 0) ? g_config.max_sni_len : 16384;
+    if (m_initial_buffer.size() + len > max_buf_len) {
+        len = (int)(max_buf_len - m_initial_buffer.size());
     }
-
     if (len > 0) {
         m_initial_buffer.insert(m_initial_buffer.end(), (const uint8_t*)buf, (const uint8_t*)buf + len);
     }
 
-    if (ntohs(m_original_dest.port) == 80 && is_generate_204_request(m_initial_buffer.data(), m_initial_buffer.size())) {
-        LOG_INFO("[ProxyTCP] Intercepted /generate_204. Sending mock response.");
-        const char* resp204 = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
-        send(m_client_socket, resp204, (int)strlen(resp204), 0);
-        close_session();
-        return;
-    }
-
-    bool ready_to_decide = false;
-    std::string domain = parse_tls_sni(m_initial_buffer.data(), m_initial_buffer.size());
-    if (!domain.empty()) {
-        m_detected_domain = domain;
-        ready_to_decide = true;
-    } else if (is_http_start(m_initial_buffer.data(), m_initial_buffer.size())) {
-        domain = parse_http_host(m_initial_buffer.data(), m_initial_buffer.size());
-        if (!domain.empty()) {
-            m_detected_domain = domain;
-            ready_to_decide = true;
+    // --- 1. Check for generate_204 ---
+    if (ntohs(m_original_dest.port) == 80) {
+        if (is_generate_204_request(m_initial_buffer.data(), m_initial_buffer.size())) {
+            LOG_INFO("[ProxyTCP] Intercepted /generate_204. Sending mock response.");
+            const char* resp204 = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+            send(m_client_socket, resp204, (int)strlen(resp204), 0);
+            close_session();
+            return;
+        } else if (m_initial_buffer.size() < 17 && memcmp(m_initial_buffer.data(), "GET /generate_204", m_initial_buffer.size()) == 0) {
+            return; // Wait for more to confirm
         }
     }
 
-    if (!ready_to_decide && m_initial_buffer.size() < max_len) {
-        return;
+    // --- 2. Protocol Readiness Check (borrowed from user suggestion) ---
+    bool ready = false;
+    if (m_initial_buffer.size() >= 5 && m_initial_buffer[0] == 0x16) {
+        // TLS: Check if we have the full ClientHello record
+        uint16_t tls_len = ((uint16_t)m_initial_buffer[3] << 8) | m_initial_buffer[4];
+        if (m_initial_buffer.size() >= (size_t)5 + tls_len) ready = true;
+    }
+    else if (is_http_start(m_initial_buffer.data(), m_initial_buffer.size())) {
+        // HTTP: Wait for Host header or 1KB
+        std::string host = parse_http_host(m_initial_buffer.data(), m_initial_buffer.size());
+        if (!host.empty() || m_initial_buffer.size() > 1024) ready = true;
+    }
+    else if (m_initial_buffer.size() > 64) {
+        // Unknown protocol: Decide after 64 bytes
+        ready = true;
     }
 
-    if (!m_detected_domain.empty()) {
-        RouteAction rule = RuleManager::instance().match_domain(m_detected_domain);
+    if (!ready && m_initial_buffer.size() < max_buf_len) {
+        return; // Continue buffering
+    }
+
+    // --- 3. Parsing and Routing Decision ---
+    std::string sni = parse_tls_sni(m_initial_buffer.data(), m_initial_buffer.size());
+    if (sni.empty()) sni = parse_http_host(m_initial_buffer.data(), m_initial_buffer.size());
+
+    if (!sni.empty()) {
+        m_detected_domain = sni;
+        RouteAction rule = RuleManager::instance().match_domain(sni);
         if (rule == RouteAction::DIRECT) m_is_direct = true;
         else if (rule == RouteAction::PROXY) m_is_direct = false;
-        else m_is_direct = GeoChecker::instance().is_cn_domain(m_detected_domain);
+        else if (rule == RouteAction::BLOCK) {
+            LOG_INFO("[ProxyTCP] Domain %s blocked by rule.", sni.c_str());
+            close_session();
+            return;
+        }
+        else {
+            // PASS: Check GeoIP and special domains
+            m_is_direct = GeoChecker::instance().is_cn_domain(sni) || 
+                          GeoChecker::instance().is_tencent_domain(sni);
+        }
     } else {
         uint32_t ip_h = ntohl(m_original_dest.ip);
         RouteAction rule = RuleManager::instance().match_ip(ip_h);
         
-        if (GeoChecker::is_private_ip(ip_h)) {
-            m_is_direct = true;
-        } else if (rule == RouteAction::DIRECT) {
+        if (GeoChecker::is_private_ip(ip_h) || rule == RouteAction::DIRECT) {
             m_is_direct = true;
         } else if (rule == RouteAction::PROXY) {
             m_is_direct = false;
+        } else if (rule == RouteAction::BLOCK) {
+            char ip_buf[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &m_original_dest.ip, ip_buf, INET_ADDRSTRLEN);
+            LOG_INFO("[ProxyTCP] IP %s blocked by rule.", ip_buf);
+            close_session();
+            return;
         } else {
             m_is_direct = GeoChecker::instance().is_cn_ip(ip_h);
         }
