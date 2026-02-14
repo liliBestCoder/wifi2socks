@@ -70,43 +70,57 @@ const USHORT ETHERTYPE_ARP = 0x0806;
 
 const USHORT NAT_TARGET_PORT = 3080;
 
-// Efficient checksum calculation for small headers
-static USHORT fast_checksum(USHORT* buffer, int size) {
-    unsigned long cksum = 0;
-    while (size > 1) {
-        cksum += *buffer++;
-        size -= sizeof(USHORT);
+// Standard 1's complement sum
+static uint32_t csum_partial(const void* data, int len, uint32_t start_sum) {
+    const uint16_t* ptr = (const uint16_t*)data;
+    uint32_t sum = start_sum;
+    while (len > 1) {
+        sum += *ptr++;
+        len -= 2;
     }
-    if (size) cksum += *(UCHAR*)buffer;
-    cksum = (cksum >> 16) + (cksum & 0xffff);
-    cksum += (cksum >> 16);
-    return (USHORT)(~cksum);
+    if (len > 0) {
+        sum += *(const uint8_t*)ptr;
+    }
+    return sum;
 }
 
-// RFC 1071 Incremental Checksum Update
-// NewSum = ~(~OldSum + ~Old + New)
-static void update_csum_32(USHORT& csum, ULONG old_val, ULONG new_val) {
-    uint32_t sum = (~ntohs(csum)) & 0xFFFF;
-    // Subtract old (using 1's complement addition of inverse)
-    sum += (~old_val) & 0xFFFF;
-    if (sum > 0xFFFF) sum -= 0xFFFF;
-    sum += (~old_val) >> 16;
-    if (sum > 0xFFFF) sum -= 0xFFFF;
-    // Add new
-    sum += new_val & 0xFFFF;
-    if (sum > 0xFFFF) sum -= 0xFFFF;
-    sum += new_val >> 16;
-    if (sum > 0xFFFF) sum -= 0xFFFF;
-    csum = htons(~((USHORT)sum));
+static uint16_t csum_finalize(uint32_t sum) {
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    uint16_t result = (uint16_t)(~sum);
+    if (result == 0) return 0xFFFF;
+    return result;
 }
 
-static void update_csum_16(USHORT& csum, USHORT old_val, USHORT new_val) {
-    uint32_t sum = (~ntohs(csum)) & 0xFFFF;
-    sum += (USHORT)(~old_val);
-    if (sum > 0xFFFF) sum -= 0xFFFF;
-    sum += new_val;
-    if (sum > 0xFFFF) sum -= 0xFFFF;
-    csum = htons(~((USHORT)sum));
+static void recalculate_ip_checksum(PIP_HEADER ip) {
+    ip->Csum = 0;
+    ip->Csum = csum_finalize(csum_partial(ip, (ip->Ver_HLen & 0x0F) * 4, 0));
+}
+
+static void recalculate_tcp_udp_checksum(PIP_HEADER ip) {
+    int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
+    int payload_len = ntohs(ip->Len) - ip_hdr_len;
+    if (payload_len < 0) return;
+
+    // Pseudo-header sum
+    uint32_t sum = 0;
+    sum += (ip->SrcAddr & 0xFFFF);
+    sum += (ip->SrcAddr >> 16);
+    sum += (ip->DstAddr & 0xFFFF);
+    sum += (ip->DstAddr >> 16);
+    sum += htons((uint16_t)ip->Proto);
+    sum += htons((uint16_t)payload_len);
+
+    if (ip->Proto == IPPROTO_TCP) {
+        PTCP_HEADER tcp = (PTCP_HEADER)((uint8_t*)ip + ip_hdr_len);
+        tcp->Csum = 0;
+        tcp->Csum = csum_finalize(csum_partial(tcp, payload_len, sum));
+    } else if (ip->Proto == IPPROTO_UDP) {
+        PUDP_HEADER udp = (PUDP_HEADER)((uint8_t*)ip + ip_hdr_len);
+        udp->Csum = 0;
+        udp->Csum = csum_finalize(csum_partial(udp, payload_len, sum));
+    }
 }
 
 WinPkFilterDriver::WinPkFilterDriver()
@@ -296,44 +310,28 @@ void WinPkFilterDriver::run() {
                             }
 
                             if (should_intercept) {
-                                uint16_t original_dst_port = 0;
-                                ULONG old_dst_ip = ip->DstAddr;
-                                USHORT old_dst_port = 0;
+                                OriginalDestination od(ip->DstAddr, 0, ip->SrcAddr);
+                                uint64_t mapping_key = 0;
 
                                 if (ip->Proto == IPPROTO_TCP) {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    original_dst_port = tcp->DstPort;
-                                    old_dst_port = tcp->DstPort;
-                                    
-                                    OriginalDestination od(ip->DstAddr, original_dst_port, ip->SrcAddr);
-                                    uint64_t mapping_key = NatManager::make_key(ip->SrcAddr, tcp->SrcPort);
+                                    od.port = tcp->DstPort;
+                                    mapping_key = NatManager::make_key(ip->SrcAddr, tcp->SrcPort);
                                     NatManager::instance().create_tcp_mapping(mapping_key, od);
-                                    
                                     ip->DstAddr = m_gateway_ip; 
                                     tcp->DstPort = htons(NAT_TARGET_PORT);
-                                    
-                                    // Incremental Checksum Updates
-                                    update_csum_32(ip->Csum, old_dst_ip, ip->DstAddr);
-                                    update_csum_32(tcp->Csum, old_dst_ip, ip->DstAddr);
-                                    update_csum_16(tcp->Csum, old_dst_port, tcp->DstPort);
                                 } else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    original_dst_port = udp->DstPort;
-                                    old_dst_port = udp->DstPort;
-
-                                    OriginalDestination od(ip->DstAddr, original_dst_port, ip->SrcAddr);
-                                    uint64_t mapping_key = NatManager::make_key(ip->SrcAddr, udp->SrcPort);
+                                    od.port = udp->DstPort;
+                                    mapping_key = NatManager::make_key(ip->SrcAddr, udp->SrcPort);
                                     NatManager::instance().create_or_update_udp_mapping(mapping_key, od);
-                                    
                                     ip->DstAddr = m_gateway_ip; 
                                     udp->DstPort = htons(NAT_TARGET_PORT);
-                                    
-                                    update_csum_32(ip->Csum, old_dst_ip, ip->DstAddr);
-                                    if (udp->Csum != 0) {
-                                        update_csum_32(udp->Csum, old_dst_ip, ip->DstAddr);
-                                        update_csum_16(udp->Csum, old_dst_port, udp->DstPort);
-                                    }
                                 }
+                                
+                                recalculate_ip_checksum(ip);
+                                recalculate_tcp_udp_checksum(ip);
+                                
                                 packets_to_mstcp.push_back(std::move(p));
                                 intercepted = true;
                             }
@@ -353,34 +351,18 @@ void WinPkFilterDriver::run() {
 
                                 auto od = NatManager::instance().get_mapping(mapping_key);
                                 if (od) {
-                                    ULONG old_src_ip = ip->SrcAddr;
-                                    ULONG old_dst_ip = ip->DstAddr;
                                     ip->SrcAddr = od->ip;
-                                    ip->DstAddr = od->original_client_ip; 
-                                    
                                     if (ip->Proto == IPPROTO_TCP) {
                                         PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                        USHORT old_src_port = tcp->SrcPort;
                                         tcp->SrcPort = od->port;
-                                        
-                                        update_csum_32(ip->Csum, old_src_ip, ip->SrcAddr);
-                                        update_csum_32(ip->Csum, old_dst_ip, ip->DstAddr);
-                                        update_csum_32(tcp->Csum, old_src_ip, ip->SrcAddr);
-                                        update_csum_32(tcp->Csum, old_dst_ip, ip->DstAddr);
-                                        update_csum_16(tcp->Csum, old_src_port, tcp->SrcPort);
                                     } else {
                                         PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                        USHORT old_src_port = udp->SrcPort;
                                         udp->SrcPort = od->port;
-                                        
-                                        update_csum_32(ip->Csum, old_src_ip, ip->SrcAddr);
-                                        update_csum_32(ip->Csum, old_dst_ip, ip->DstAddr);
-                                        if (udp->Csum != 0) {
-                                            update_csum_32(udp->Csum, old_src_ip, ip->SrcAddr);
-                                            update_csum_32(udp->Csum, old_dst_ip, ip->DstAddr);
-                                            update_csum_16(udp->Csum, old_src_port, udp->SrcPort);
-                                        }
                                     }
+                                    
+                                    recalculate_ip_checksum(ip);
+                                    recalculate_tcp_udp_checksum(ip);
+                                    
                                     packets_to_send.push_back(std::move(p));
                                     restored = true;
                                 }
@@ -401,7 +383,9 @@ void WinPkFilterDriver::run() {
                     size_t current_batch = (std::min)(packets_to_mstcp.size() - processed, (size_t)BATCH_SIZE);
                     m_mstcp_request->dwPacketsNumber = (DWORD)current_batch;
                     m_mstcp_request->dwPacketsSuccess = 0;
-                    for (size_t i = 0; i < current_batch; ++i) m_mstcp_request->EthPacket[i].Buffer = packets_to_mstcp[processed + i].data.get();
+                    for (size_t i = 0; i < current_batch; ++i) {
+                        m_mstcp_request->EthPacket[i].Buffer = packets_to_mstcp[processed + i].data.get();
+                    }
                     m_ndis_api.SendPacketsToMstcp(m_mstcp_request);
                     processed += current_batch;
                 }
