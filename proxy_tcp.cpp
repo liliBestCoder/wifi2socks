@@ -116,6 +116,14 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
             // PASS: Check GeoIP and special domains
             m_is_direct = GeoChecker::instance().is_cn_domain(sni) || 
                           GeoChecker::instance().is_tencent_domain(sni);
+            
+            // Fallback: If domain check is not sure, check destination IP
+            if (!m_is_direct) {
+                uint32_t ip_h = ntohl(m_original_dest.ip);
+                if (GeoChecker::instance().is_cn_ip(ip_h)) {
+                    m_is_direct = true;
+                }
+            }
         }
     } else {
         uint32_t ip_h = ntohl(m_original_dest.ip);

@@ -206,13 +206,13 @@ bool is_common_cn_range(uint32_t ip) {
     uint8_t first = (uint8_t)(ip >> 24);
     // 扩展国内常用 IP 段，确保测速和常用服务不被误代理
     // 包含联通、移动、电信、教育网及腾讯/阿里等云服务商段
-    return (first == 112 || first == 223 || first == 36 || first == 180 || first == 183 ||
-            first == 125 || first == 120 || first == 123 || first == 182 || first == 218 ||
-            first == 219 || first == 221 || first == 222 || first == 119 || first == 117 ||
-            first == 114 || first == 115 || first == 113 || first == 111 || first == 106 ||
-            first == 101 || first == 103 || first == 61  || first == 60  || first == 59  ||
-            first == 58  || first == 42  || first == 43  || first == 39  || first == 27  ||
-            first == 14  || first == 1  );
+    // 参考常用国内 IP 段列表进行补充
+    return (first == 14  || first == 27  || first == 36  || first == 39  || first == 42  || 
+            first == 43  || first == 45  || first == 47  || first == 49  || first == 58  || 
+            first == 59  || first == 60  || first == 61  || first == 101 || first == 103 || 
+            first == 106 || (first >= 110 && first <= 126) || first == 139 || first == 171 || 
+            first == 175 || first == 180 || first == 182 || first == 183 || first == 210 || 
+            first == 211 || (first >= 218 && first <= 223));
 }
 
 bool GeoChecker::is_private_ip(const uint32_t ip_h) {
@@ -228,25 +228,24 @@ bool GeoChecker::is_private_ip(const uint32_t ip_h) {
 
 bool GeoChecker::is_cn_ip(uint32_t ip_host) {
     if (is_private_ip(ip_host)) return true;
-    if (!m_ready || cn_ip_idx_ == 0xFFFF) return false;
     
-    std::shared_lock<std::shared_mutex> lock(m_mtx);
-    // 使用 std::lower_bound 查找第一个 end_ip >= ip_host 的区间
-    auto it = std::lower_bound(ip_ranges_.begin(), ip_ranges_.end(), ip_host, 
-        [](const GeoIPRange& r, uint32_t val) { 
-            return r.end_ip < val; 
-        });
+    // 如果数据库准备好了且有 CN 索引，先查数据库
+    if (m_ready && cn_ip_idx_ != 0xFFFF) {
+        std::shared_lock<std::shared_mutex> lock(m_mtx);
+        // 使用 std::lower_bound 查找第一个 end_ip >= ip_host 的区间
+        auto it = std::lower_bound(ip_ranges_.begin(), ip_ranges_.end(), ip_host, 
+            [](const GeoIPRange& r, uint32_t val) { 
+                return r.end_ip < val; 
+            });
 
-    bool found = (it != ip_ranges_.end() && ip_host >= it->start_ip && ip_host <= it->end_ip);
-    
-    if (found) {
-        return it->code_index == cn_ip_idx_;
+        if (it != ip_ranges_.end() && ip_host >= it->start_ip && ip_host <= it->end_ip) {
+            return it->code_index == cn_ip_idx_;
+        }
     }
 
-    // 数据库未命中的兜底逻辑
+    // 数据库未命中或数据库未加载时的兜底逻辑
     bool is_common = is_common_cn_range(ip_host);
     if (!is_common) {
-        // 如果测速还是慢，请关注控制台这个日志，确认 IP 字节序是否正确
         LOG_DEBUG("[Geo] IP 0x%08X not found in database and failed common range check.", ip_host);
     }
     return is_common;
@@ -319,6 +318,10 @@ bool GeoChecker::is_google_domain(const std::string& domain) {
         if (next_dot == std::string::npos) break;
         pos = next_dot + 1;
     }
+    
+    for (const auto& kv : domain_keyword_) if ((kv.flags & (FLAG_GOOGLE >> 16)) && d.find(kv.keyword) != std::string::npos) return true;
+    for (const auto& kv : domain_regex_) if ((kv.flags & (FLAG_GOOGLE >> 16)) && std::regex_search(d, kv.reg)) return true;
+
     return false;
 }
 
@@ -340,5 +343,9 @@ bool GeoChecker::is_tencent_domain(const std::string& domain) {
         if (next_dot == std::string::npos) break;
         pos = next_dot + 1;
     }
+
+    for (const auto& kv : domain_keyword_) if ((kv.flags & (FLAG_TENCENT >> 16)) && d.find(kv.keyword) != std::string::npos) return true;
+    for (const auto& kv : domain_regex_) if ((kv.flags & (FLAG_TENCENT >> 16)) && std::regex_search(d, kv.reg)) return true;
+
     return false;
 }
