@@ -238,13 +238,23 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
 void WinPkFilterDriver::run() {
     m_read_request->hAdapterHandle = m_adapter_handle;
 
+    std::vector<Packet> captured_packets;
+    captured_packets.reserve(BATCH_SIZE);
+    std::vector<Packet> packets_to_send;
+    packets_to_send.reserve(BATCH_SIZE);
+    std::vector<Packet> packets_to_mstcp;
+    packets_to_mstcp.reserve(BATCH_SIZE);
+
     while (m_running) {
         WaitForSingleObject(m_wait_event, INFINITE);
         if (!m_running) break;
 
         bool has_packets = true;
         while (m_running && has_packets) {
-            std::vector<Packet> captured_packets;
+            captured_packets.clear();
+            packets_to_send.clear();
+            packets_to_mstcp.clear();
+
             m_read_request->dwPacketsNumber = BATCH_SIZE;
             m_read_request->dwPacketsSuccess = 0;
             
@@ -263,9 +273,6 @@ void WinPkFilterDriver::run() {
             }
             
             if (captured_packets.empty()) continue;
-
-            std::vector<Packet> packets_to_send;
-            std::vector<Packet> packets_to_mstcp;
 
             for (auto& p : captured_packets) {
                 char* buffer = (char*)p.data->m_IBuffer;
@@ -318,22 +325,18 @@ void WinPkFilterDriver::run() {
                         bool intercepted = false;
                         if ((ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) && ip->SrcAddr != m_gateway_ip) {
                             bool should_intercept = false;
-                            uint32_t dst_ip_h = ntohl(ip->DstAddr);
-
+                            
                             if (ip->Proto == IPPROTO_TCP) {
                                 if (ip->DstAddr != m_gateway_ip) {
-                                    // Skip interception for private IPs (LAN traffic)
-                                    if (!GeoChecker::is_private_ip(dst_ip_h)) {
-                                        should_intercept = true;
-                                    } else {
-                                        LOG_DEBUG("[Driver] Skipping private IP: %u.%u.%u.%u", (dst_ip_h >> 24) & 0xFF, (dst_ip_h >> 16) & 0xFF, (dst_ip_h >> 8) & 0xFF, dst_ip_h & 0xFF);
-                                    }
+                                    // Intercept all TCP traffic to redirect, including LAN
+                                    should_intercept = true;
                                 } else {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     if (ntohs(tcp->DstPort) == 53) should_intercept = true;
                                 }
                             } else {
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                // For UDP, we currently only intercept DNS (port 53)
                                 if (ntohs(udp->DstPort) == 53) should_intercept = true;
                             }
 
@@ -353,17 +356,23 @@ void WinPkFilterDriver::run() {
                                 if (ip->Proto == IPPROTO_TCP) {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     mapping_key = NatManager::make_key(ip->SrcAddr, tcp->SrcPort);
+                                    
                                     NatManager::instance().create_tcp_mapping(mapping_key, od);
+                                    
                                     ip->DstAddr = m_gateway_ip; 
                                     tcp->DstPort = htons(NAT_TARGET_PORT);
+                                    
                                     ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
                                     recalculate_tcp_checksum(ip);
                                 } else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     mapping_key = NatManager::make_key(ip->SrcAddr, udp->SrcPort);
+
                                     NatManager::instance().create_or_update_udp_mapping(mapping_key, od);
+                                    
                                     ip->DstAddr = m_gateway_ip; 
                                     udp->DstPort = htons(NAT_TARGET_PORT);
+                                    
                                     ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
                                     recalculate_udp_checksum(ip);
                                 }
@@ -398,7 +407,8 @@ void WinPkFilterDriver::run() {
                                 auto od = NatManager::instance().get_mapping(mapping_key);
                                 if (od) {
                                     ip->SrcAddr = od->ip;
-                                    ip->DstAddr = od->original_client_ip;
+                                    ip->DstAddr = od->original_client_ip; // Restore client destination IP
+                                    
                                     if (ip->Proto == IPPROTO_TCP) {
                                         PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                         tcp->SrcPort = od->port;
