@@ -62,4 +62,12 @@ private:
     std::deque<std::vector<char>> m_remote_send_queue;
     std::atomic<bool> m_remote_write_in_progress{false};
     std::mutex m_remote_queue_mutex;
+
+    // Backpressure Control
+    static const size_t HIGH_WATER_MARK = 8 * 1024 * 1024; // 8MB
+    static const size_t LOW_WATER_MARK = 2 * 1024 * 1024;  // 2MB
+    std::atomic<bool> m_client_read_paused{false};
+    std::atomic<bool> m_remote_read_paused{false};
+    std::atomic<size_t> m_client_send_queue_size{0};
+    std::atomic<size_t> m_remote_send_queue_size{0};
 };

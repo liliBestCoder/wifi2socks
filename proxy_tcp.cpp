@@ -284,18 +284,31 @@ void ProxyTCP::on_remote_connect() {
 
 void ProxyTCP::on_client_read(char* buf, int len) {
     if (len <= 0) {
-        LOG_DEBUG("[ProxyTCP] Client closed connection.");
+        LOG_DEBUG("[ProxyTCP] Client closed connection or read error.");
         close_session();
         return;
     }
+
+    // This read operation has completed. If not paused, post another one to keep the pipeline full.
+    if (!m_client_read_paused) {
+        WorkerPool::instance().read_async(m_client_socket);
+    }
+
     TrafficManager::instance().report_proxy_tx(len, m_is_direct);
     
     if (m_state == ESTABLISHED) {
+        size_t new_size;
         {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
             m_remote_send_queue.emplace_back(buf, buf + len);
+            new_size = (m_remote_send_queue_size += len);
         }
+
         try_send(m_remote_socket);
+
+        if (new_size > HIGH_WATER_MARK && !m_client_read_paused.exchange(true)) {
+            LOG_DEBUG("[ProxyTCP] Backpressure applied on client read. Queue size: %zu", new_size);
+        }
     } else {
         m_initial_buffer.insert(m_initial_buffer.end(), buf, buf + len);
     }
@@ -303,18 +316,29 @@ void ProxyTCP::on_client_read(char* buf, int len) {
 
 void ProxyTCP::on_remote_read(char* buf, int len) {
     if (len <= 0) {
-        LOG_DEBUG("[ProxyTCP] Remote closed connection.");
+        LOG_DEBUG("[ProxyTCP] Remote closed connection or read error.");
         close_session();
         return;
     }
+    
+    if (!m_remote_read_paused) {
+        WorkerPool::instance().read_async(m_remote_socket);
+    }
+
     TrafficManager::instance().report_proxy_rx(len, m_is_direct);
 
     if (m_state == ESTABLISHED) {
+        size_t new_size;
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
             m_client_send_queue.emplace_back(buf, buf + len);
+            new_size = (m_client_send_queue_size += len);
         }
         try_send(m_client_socket);
+
+        if (new_size > HIGH_WATER_MARK && !m_remote_read_paused.exchange(true)) {
+            LOG_DEBUG("[ProxyTCP] Backpressure applied on remote read. Queue size: %zu", new_size);
+        }
     }
 }
 
@@ -348,26 +372,53 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
 
     auto self = shared_from_this();
     if (socket == m_remote_socket) {
+        size_t new_size;
+        size_t sent_size = 0;
         {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
             if (!m_remote_send_queue.empty()) {
+                sent_size = m_remote_send_queue.front().size();
                 m_remote_send_queue.pop_front();
             }
+            new_size = (m_remote_send_queue_size -= sent_size);
             m_remote_write_in_progress = false;
         }
-        // Schedule next send without holding the lock
+
+        if (m_client_read_paused && new_size < LOW_WATER_MARK) {
+            if (m_client_read_paused.exchange(false)) {
+                 LOG_DEBUG("[ProxyTCP] Backpressure relieved on client read. Queue size: %zu", new_size);
+                for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
+                    WorkerPool::instance().read_async(m_client_socket);
+                }
+            }
+        }
+        
         WorkerPool::instance().queue_task([self, socket]() {
             self->try_send(socket);
         });
 
     } else if (socket == m_client_socket) {
+        size_t new_size;
+        size_t sent_size = 0;
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
             if (!m_client_send_queue.empty()) {
+                sent_size = m_client_send_queue.front().size();
                 m_client_send_queue.pop_front();
             }
+            new_size = (m_client_send_queue_size -= sent_size);
             m_client_write_in_progress = false;
         }
+
+        if (m_remote_read_paused && new_size < LOW_WATER_MARK) {
+            if (m_remote_read_paused.exchange(false)) {
+                LOG_DEBUG("[ProxyTCP] Backpressure relieved on remote read. Queue size: %zu", new_size);
+                for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
+                    WorkerPool::instance().read_async(m_remote_socket);
+                }
+            }
+        }
+        
         WorkerPool::instance().queue_task([self, socket]() {
             self->try_send(socket);
         });

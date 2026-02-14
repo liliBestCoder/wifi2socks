@@ -114,7 +114,6 @@ void Worker::loop() {
                 if (io->type == IO_READ) {
                     if (bytesTransferred > 0) {
                         if (ctx->on_read) ctx->on_read((char*)io->buf, (int)bytesTransferred, ctx->is_udp ? &io->remote_addr : nullptr);
-                        WorkerPool::instance().post_read(ctx);
                     } else {
                         if (ctx->on_read) ctx->on_read(nullptr, 0, nullptr);
                     }
