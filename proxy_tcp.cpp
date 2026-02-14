@@ -26,9 +26,12 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
     u_long mode = 1;
     ioctlsocket(m_client_socket, FIONBIO, &mode);
 
-    int buf_size = 64 * 1024; // 64KB
+    int buf_size = 1024 * 1024; // 1MB
     setsockopt(m_client_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
     setsockopt(m_client_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
+
+    BOOL nodelay = TRUE;
+    setsockopt(m_client_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
 }
 
 ProxyTCP::~ProxyTCP() {
@@ -178,9 +181,12 @@ void ProxyTCP::connect_remote() {
         return;
     }
     
-    int buf_size = 64 * 1024; // 64KB
+    int buf_size = 1024 * 1024; // 1MB
     setsockopt(m_remote_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
     setsockopt(m_remote_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
+
+    BOOL nodelay = TRUE;
+    setsockopt(m_remote_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
 
     u_long mode = 1;
     ioctlsocket(m_remote_socket, FIONBIO, &mode);

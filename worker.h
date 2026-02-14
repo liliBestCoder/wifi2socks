@@ -108,8 +108,12 @@ private:
     std::vector<Worker*> m_workers;
     std::atomic<size_t> m_next_idx;
 
-    std::unordered_map<SOCKET, std::shared_ptr<SocketContext>> m_global_sockets;
-    std::mutex m_global_mtx;
+    struct Shard {
+        std::unordered_map<SOCKET, std::shared_ptr<SocketContext>> sockets;
+        std::mutex mtx;
+    };
+    static const size_t NUM_SHARDS = 32;
+    Shard m_shards[NUM_SHARDS];
 
     // 内部方法
     void post_read(const std::shared_ptr<SocketContext>& ctx);

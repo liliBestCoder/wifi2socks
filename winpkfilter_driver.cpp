@@ -326,14 +326,20 @@ void WinPkFilterDriver::run() {
                             
                             if (ip->Proto == IPPROTO_TCP) {
                                 if (ip->DstAddr != m_gateway_ip) {
-                                    should_intercept = true;
+                                    // 仅拦截非国内 IP，实现真正的驱动级直连
+                                    if (!GeoChecker::instance().is_cn_ip(ntohl(ip->DstAddr))) {
+                                        should_intercept = true;
+                                    }
                                 } else {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     if (ntohs(tcp->DstPort) == 53) should_intercept = true;
                                 }
                             } else {
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                if (ntohs(udp->DstPort) == 53) should_intercept = true;
+                                // 拦截 53 端口 DNS 流量或非国内 UDP 流量
+                                if (ntohs(udp->DstPort) == 53 || !GeoChecker::instance().is_cn_ip(ntohl(ip->DstAddr))) {
+                                    should_intercept = true;
+                                }
                             }
 
                             if (should_intercept) {
