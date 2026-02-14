@@ -73,7 +73,11 @@ public:
             std::string domain = parse_dns_query_domain(data, len);
             if (!domain.empty()) {
                 RouteAction rule = RuleManager::instance().match_domain(domain);
-                bool should_proxy_dns = (rule == RouteAction::PROXY) || (rule == RouteAction::PASS && !GeoChecker::instance().is_cn_domain(domain));
+                bool is_cn = GeoChecker::instance().is_cn_domain(domain);
+                bool should_proxy_dns = (rule == RouteAction::PROXY) || (rule == RouteAction::PASS && !is_cn);
+
+                LOG_DEBUG("[DNS] Query for '%s'. Rule: %d, IsCN: %d, ShouldProxy: %d", 
+                          domain.c_str(), (int)rule, is_cn, should_proxy_dns);
 
                 if (should_proxy_dns) {
                     LOG_INFO("[DNS] Routing DNS query for '%s' over TCP (DoT).", domain.c_str());

@@ -99,25 +99,36 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
     std::string sni = parse_tls_sni(m_initial_buffer.data(), m_initial_buffer.size());
     if (sni.empty()) sni = parse_http_host(m_initial_buffer.data(), m_initial_buffer.size());
 
+    LOG_DEBUG("[ProxyTCP] Parsing complete. Detected SNI/Host: '%s'", sni.c_str());
+
     if (!sni.empty()) {
         m_detected_domain = sni;
         RouteAction rule = RuleManager::instance().match_domain(sni);
-        if (rule == RouteAction::DIRECT) m_is_direct = true;
-        else if (rule == RouteAction::PROXY) m_is_direct = false;
+        LOG_DEBUG("[ProxyTCP] Domain '%s' matched rule: %d (0=PASS, 1=PROXY, 2=DIRECT, 3=BLOCK)", sni.c_str(), (int)rule);
+
+        if (rule == RouteAction::DIRECT) {
+            m_is_direct = true;
+        }
+        else if (rule == RouteAction::PROXY) {
+            m_is_direct = false;
+        }
         else if (rule == RouteAction::BLOCK) {
             LOG_INFO("[ProxyTCP] Domain %s blocked by rule.", sni.c_str());
             close_session();
             return;
         }
-        else {
-            // PASS: Check GeoIP and special domains
-            m_is_direct = GeoChecker::instance().is_cn_domain(sni) || 
-                          GeoChecker::instance().is_tencent_domain(sni);
+        else { // PASS
+            bool is_cn = GeoChecker::instance().is_cn_domain(sni);
+            bool is_tencent = GeoChecker::instance().is_tencent_domain(sni);
+            LOG_DEBUG("[ProxyTCP] Rule PASS for '%s'. GeoIP CN: %d, Tencent: %d", sni.c_str(), is_cn, is_tencent);
+            m_is_direct = is_cn || is_tencent;
             
             // Fallback: If domain check is not sure, check destination IP
             if (!m_is_direct) {
                 uint32_t ip_h = ntohl(m_original_dest.ip);
-                if (GeoChecker::instance().is_cn_ip(ip_h)) {
+                bool is_cn_ip = GeoChecker::instance().is_cn_ip(ip_h);
+                LOG_DEBUG("[ProxyTCP] Domain not CN/Tencent, falling back to IP check. IP is CN: %d", is_cn_ip);
+                if (is_cn_ip) {
                     m_is_direct = true;
                 }
             }
@@ -125,22 +136,30 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
     } else {
         uint32_t ip_h = ntohl(m_original_dest.ip);
         RouteAction rule = RuleManager::instance().match_ip(ip_h);
+        char ip_buf[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &m_original_dest.ip, ip_buf, INET_ADDRSTRLEN);
+        LOG_DEBUG("[ProxyTCP] No domain detected. Matching IP %s. Rule: %d", ip_buf, (int)rule);
+
         
         if (GeoChecker::is_private_ip(ip_h) || rule == RouteAction::DIRECT) {
             m_is_direct = true;
         } else if (rule == RouteAction::PROXY) {
             m_is_direct = false;
         } else if (rule == RouteAction::BLOCK) {
-            char ip_buf[INET_ADDRSTRLEN];
-            inet_ntop(AF_INET, &m_original_dest.ip, ip_buf, INET_ADDRSTRLEN);
             LOG_INFO("[ProxyTCP] IP %s blocked by rule.", ip_buf);
             close_session();
             return;
         } else {
-            m_is_direct = GeoChecker::instance().is_cn_ip(ip_h);
+            bool is_cn_ip = GeoChecker::instance().is_cn_ip(ip_h);
+            LOG_DEBUG("[ProxyTCP] IP rule PASS for %s. GeoIP CN: %d", ip_buf, is_cn_ip);
+            m_is_direct = is_cn_ip;
         }
     }
     
+    LOG_INFO("[ProxyTCP] Final routing decision for '%s': %s",
+        m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str(),
+        m_is_direct ? "DIRECT" : "PROXY");
+
     auto self = shared_from_this();
     WorkerPool::instance().update_read_callback(m_client_socket, [self](char* b, int l, sockaddr_in*) { self->on_client_read(b, l); });
     
