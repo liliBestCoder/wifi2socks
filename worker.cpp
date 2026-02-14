@@ -314,7 +314,7 @@ void Worker::loop() {
             }
         }
 
-        DWORD timeout = INFINITE;
+        DWORD timeout = 1; // 1ms for better responsiveness
         {
             std::lock_guard<std::mutex> lock(m_mtx);
             if (!m_task_queue.empty()) timeout = 0;

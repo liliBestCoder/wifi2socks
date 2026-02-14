@@ -13,6 +13,7 @@
 #include "app_config.h"
 #include "logger.h"
 #include "nat_manager.h"
+#include "geo_checker.h"
 
 // --- Protocol Header Definitions ---
 #include <pshpack1.h>
@@ -241,9 +242,6 @@ void WinPkFilterDriver::run() {
         WaitForSingleObject(m_wait_event, INFINITE);
         if (!m_running) break;
 
-        std::vector<Packet> packets_to_send;
-        std::vector<Packet> packets_to_mstcp;
-
         bool has_packets = true;
         while (m_running && has_packets) {
             std::vector<Packet> captured_packets;
@@ -441,8 +439,6 @@ void WinPkFilterDriver::run() {
                 }
             }
         }
-    }
-}
     }
 }
 

@@ -111,15 +111,19 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
         else m_is_direct = GeoChecker::instance().is_cn_domain(m_detected_domain);
     } else {
         uint32_t ip_h = ntohl(m_original_dest.ip);
-        bool is_priv = GeoChecker::is_private_ip(ip_h);
         RouteAction rule = RuleManager::instance().match_ip(ip_h);
         
-        LOG_DEBUG("[ProxyTCP] Checking IP %u.%u.%d.%d: is_priv=%d, rule=%d", 
-            (ip_h >> 24) & 0xFF, (ip_h >> 16) & 0xFF, (ip_h >> 8) & 0xFF, ip_h & 0xFF, is_priv, (int)rule);
-
-        if (rule == RouteAction::DIRECT) m_is_direct = true;
-        else if (rule == RouteAction::PROXY) m_is_direct = false;
-        else m_is_direct = GeoChecker::instance().is_cn_ip(ip_h);
+        if (GeoChecker::is_private_ip(ip_h)) {
+            LOG_INFO("[ProxyTCP] Routing DIRECT for private IP: %u.%u.%u.%u", 
+                (ip_h >> 24) & 0xFF, (ip_h >> 16) & 0xFF, (ip_h >> 8) & 0xFF, ip_h & 0xFF);
+            m_is_direct = true;
+        } else if (rule == RouteAction::DIRECT) {
+            m_is_direct = true;
+        } else if (rule == RouteAction::PROXY) {
+            m_is_direct = false;
+        } else {
+            m_is_direct = GeoChecker::instance().is_cn_ip(ip_h);
+        }
     }
     
     auto self = shared_from_this();
