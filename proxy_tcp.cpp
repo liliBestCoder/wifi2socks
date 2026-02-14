@@ -178,8 +178,7 @@ void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
         // The tunnel is ready, now we can send the initial data that we buffered
         if (!m_initial_buffer.empty()) {
             TrafficManager::instance().report_proxy_tx((int)m_initial_buffer.size(), m_is_direct);
-            m_remote_write_busy = true;
-            m_worker->send_async(m_remote_socket, (char*)m_initial_buffer.data(), (int)m_initial_buffer.size());
+            m_worker->send_async(m_remote_socket, std::move(m_initial_buffer));
             m_initial_buffer.clear();
         }
 
@@ -208,14 +207,13 @@ void ProxyTCP::on_remote_connect() {
         m_worker->add_socket(
             m_remote_socket,
             [self](char* buf, int len, sockaddr_in*) { self->on_remote_read(buf, len); },
-            [self](int len) { self->on_remote_write(len); },
+            nullptr, // No need for on_write callback
             [self]() { self->on_close(); }
         );
 
         if (!m_initial_buffer.empty()) {
             TrafficManager::instance().report_proxy_tx((int)m_initial_buffer.size(), m_is_direct);
-            m_remote_write_busy = true;
-            m_worker->send_async(m_remote_socket, (char*)m_initial_buffer.data(), (int)m_initial_buffer.size());
+            m_worker->send_async(m_remote_socket, std::move(m_initial_buffer));
             m_initial_buffer.clear();
         }
     } else {
@@ -225,7 +223,7 @@ void ProxyTCP::on_remote_connect() {
         m_worker->add_socket(
             m_remote_socket,
             [self](char* buf, int len, sockaddr_in*) { self->on_proxy_connect_response(buf, len); },
-            [self](int len) { self->on_remote_write(len); },
+            nullptr, // No need for on_write callback
             [self]() { self->on_close(); }
         );
 
@@ -244,7 +242,6 @@ void ProxyTCP::on_remote_connect() {
 
         LOG_DEBUG("[ProxyTCP] Sending CONNECT request to proxy for %s:%d", target_host.c_str(), target_port);
 
-        m_remote_write_busy = true;
         m_worker->send_async(m_remote_socket, (char*)connect_req.data(), (int)connect_req.length());
     }
 }
