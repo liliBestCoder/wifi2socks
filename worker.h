@@ -42,8 +42,6 @@ struct IO_CONTEXT {
 };
 
 struct SocketContext {
-    static const uint32_t MAGIC_VAL = 0xCAFEBABE;
-    uint32_t magic;
     SOCKET sock;
     
     std::function<void(char*, int, sockaddr_in*)> on_read;
@@ -56,12 +54,11 @@ struct SocketContext {
     
     void* user_data;                    
 
-    SocketContext() : magic(MAGIC_VAL), sock(INVALID_SOCKET), read_pending(false), 
+    SocketContext() : sock(INVALID_SOCKET), read_pending(false), 
                      closing(false), is_udp(false), user_data(nullptr) {
     }
     
     ~SocketContext() {
-        magic = 0xDEADBEEF;
     }
 };
 

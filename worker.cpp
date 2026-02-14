@@ -81,7 +81,7 @@ void Worker::loop() {
 
         // 注意：这里我们不再通过 completionKey 转换，而是直接从 io->parent 获取 shared_ptr
         std::shared_ptr<SocketContext> ctx = io->parent;
-        if (!ctx || ctx->magic != SocketContext::MAGIC_VAL) {
+        if (!ctx) {
             delete io;
             continue;
         }
@@ -294,7 +294,7 @@ void WorkerPool::unregister_context(SOCKET s) {
 }
 
 void WorkerPool::post_read(const std::shared_ptr<SocketContext>& ctx) {
-    if (!ctx || ctx->closing || ctx->magic != SocketContext::MAGIC_VAL) return;
+    if (!ctx || ctx->closing) return;
     if (ctx->read_pending.exchange(true)) return;
 
     IO_CONTEXT* io = new IO_CONTEXT();
@@ -323,7 +323,7 @@ void WorkerPool::post_read(const std::shared_ptr<SocketContext>& ctx) {
 }
 
 void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, std::vector<uint8_t>&& data) {
-    if (!ctx || ctx->closing || ctx->magic != SocketContext::MAGIC_VAL || data.empty()) return;
+    if (!ctx || ctx->closing || data.empty()) return;
 
     IO_CONTEXT* io = new IO_CONTEXT();
     io->type = IO_WRITE;
