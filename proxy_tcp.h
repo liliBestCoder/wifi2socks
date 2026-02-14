@@ -4,6 +4,7 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <atomic>
 
 #include "worker.h"
 #include "nat_manager.h"
@@ -26,9 +27,6 @@ private:
     void on_client_read(char* buf, int len);
     void on_remote_read(char* buf, int len);
     
-    void on_client_write(int len);
-    void on_remote_write(int len);
-
     void on_close();
 
     // The core function to gracefully close the session.

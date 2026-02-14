@@ -11,13 +11,10 @@
 #include <vector>
 #include <algorithm>
 
-
-
 bool is_generate_204_request(const uint8_t* data, size_t len) {
     if (len < 20) return false;
     return (memcmp(data, "GET /generate_204", 17) == 0);
 }
-
 
 ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
     : m_state(INITIAL),
@@ -178,27 +175,21 @@ void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
     }
 
     std::string response(buf, len);
-    // Be lenient with the response check, just look for 200
     if (response.find(" 200 ") != std::string::npos) {
         LOG_INFO("[ProxyTCP] CONNECT tunnel established for %s", m_detected_domain.c_str());
         m_state = ESTABLISHED;
 
-        // The tunnel is ready, now we can send the initial data that we buffered
         if (!m_initial_buffer.empty()) {
             TrafficManager::instance().report_proxy_tx((int)m_initial_buffer.size(), m_is_direct);
             m_worker->send_async(m_remote_socket, std::move(m_initial_buffer));
             m_initial_buffer.clear();
         }
 
-        // Now that the tunnel is established, switch to normal data forwarding
         auto self = shared_from_this();
         m_worker->update_read_callback(m_remote_socket, [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); });
 
     } else {
-        // Truncate for logging
-        if (response.length() > 200) {
-            response.resize(200);
-        }
+        if (response.length() > 200) response.resize(200);
         LOG_ERROR("[ProxyTCP] Proxy CONNECT request failed. Response: %s", response.c_str());
         close_session();
     }
@@ -225,7 +216,6 @@ void ProxyTCP::on_remote_connect() {
             m_initial_buffer.clear();
         }
     } else {
-        // We are connected to the proxy, now send the HTTP CONNECT request
         m_state = AWAITING_CONNECT_RESPONSE;
 
         m_worker->add_socket(
@@ -247,11 +237,9 @@ void ProxyTCP::on_remote_connect() {
         }
 
         uint16_t target_port = ntohs(m_original_dest.port);
-
         std::string connect_req = "CONNECT " + target_host + ":" + std::to_string(target_port) + " HTTP/1.1\r\nHost: " + target_host + ":" + std::to_string(target_port) + "\r\n\r\n";
 
         LOG_DEBUG("[ProxyTCP] Sending CONNECT request to proxy for %s:%d", target_host.c_str(), target_port);
-
         m_worker->send_async(m_remote_socket, (char*)connect_req.data(), (int)connect_req.length());
     }
 }
@@ -266,7 +254,6 @@ void ProxyTCP::on_client_read(char* buf, int len) {
     if (m_state == ESTABLISHED) {
         m_worker->send_async(m_remote_socket, buf, len);
     } else {
-        // Still connecting, buffer the data to be sent once established
         m_initial_buffer.insert(m_initial_buffer.end(), buf, buf + len);
     }
 }
@@ -281,12 +268,6 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
     if (m_state == ESTABLISHED) {
         m_worker->send_async(m_client_socket, buf, len);
     }
-}
-
-void ProxyTCP::on_client_write(int len) {
-}
-
-void ProxyTCP::on_remote_write(int len) {
 }
 
 void ProxyTCP::on_close() {

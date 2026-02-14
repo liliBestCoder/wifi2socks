@@ -54,8 +54,7 @@ std::string find_adapter_by_ip(const std::string& target_ip) {
                         std::string name = pCurr->AdapterName;
                         LOG_INFO("MATCH FOUND BY IP: %s", name.c_str());
                         free(pAddresses);
-                        // 修正为 \\Device\\ 格式
-                        return "\\\\Device\\\\\\" + name;
+                        return "\\\\Device\\\\" + name;
                     }
                 }
             }
@@ -70,7 +69,6 @@ int main() {
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
 
-    // Increase process and thread priority for better performance
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
@@ -101,7 +99,6 @@ int main() {
     GeoChecker::instance().init();
     LOG_INFO("[CORE] GeoChecker Initialized.");
 
-    // IMPORTANT: PacketPool must be initialized before the driver starts
     PacketPool::instance().init(8192);
     PacketMonitor::instance().start();
 
@@ -115,17 +112,8 @@ int main() {
 
     UdpProxy::initialize();
 
-    // LwIP stack and netif initialization has been removed.
-    // The new NAT logic is self-contained within the WinPkFilterDriver.
-    
     if (!adapter_name.empty()) {
-        // The driver's get_adapter_mac is no longer needed here as the driver handles its own setup.
         LOG_INFO("[CORE] Adapter found: %s", adapter_name.c_str());
-    }
-    
-    // The driver now handles packet processing internally for NAT.
-    // We no longer need to pass a complex packet handler.
-    if (!adapter_name.empty()) {
         if (!pk_driver.start_batch(adapter_name, [](std::vector<WinPkFilterDriver::Packet>&&) {})) {
             LOG_ERROR("[CORE] Failed to start WinPkFilter driver with internal NAT.");
         } else {
@@ -133,10 +121,7 @@ int main() {
         }
     }
 
-    // Start the new application listener on 0.0.0.0:3080.
-    // This will handle incoming TCP connections and UDP packets redirected by the driver.
     AppListener::instance().start("0.0.0.0", 3080);
-
     SimpleHttpServer::instance().start(g_config.http_api_port);
 
     uint64_t last_keepalive = 0;
@@ -151,9 +136,6 @@ int main() {
 
         MainDispatcher::instance().process_pending();
         
-        // LwIP timeout checks are no longer needed.
-        // The old NatTable cleanup is also removed; NatManager has its own.
-
         uint64_t now = GetTickCount64();
 
         if (now - last_stats > 1000) {
@@ -169,7 +151,7 @@ int main() {
             last_keepalive = now;
         }
 
-        WaitForSingleObject(MainDispatcher::instance().get_event_handle(), 100); // Wait with a timeout
+        WaitForSingleObject(MainDispatcher::instance().get_event_handle(), 100);
     }
     return 0;
 }

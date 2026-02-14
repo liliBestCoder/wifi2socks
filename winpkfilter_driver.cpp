@@ -307,7 +307,6 @@ void WinPkFilterDriver::run() {
                 } else if (ether_type == ETHERTYPE_IP) {
                     PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
 
-                    // --- 1. Global UDP Exemption (DHCP, Discovery, etc.) ---
                     if (ip->Proto == IPPROTO_UDP) {
                         PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                         USHORT sport = ntohs(udp->SrcPort);
@@ -321,14 +320,12 @@ void WinPkFilterDriver::run() {
                     }
 
                     if (!p.outbound) {
-                        // --- 2. Inbound: Client to Host (INTERCEPT) ---
                         bool intercepted = false;
                         if ((ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) && ip->SrcAddr != m_gateway_ip) {
                             bool should_intercept = false;
                             
                             if (ip->Proto == IPPROTO_TCP) {
                                 if (ip->DstAddr != m_gateway_ip) {
-                                    // Intercept all TCP traffic to redirect, including LAN
                                     should_intercept = true;
                                 } else {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
@@ -336,7 +333,6 @@ void WinPkFilterDriver::run() {
                                 }
                             } else {
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                // For UDP, we currently only intercept DNS (port 53)
                                 if (ntohs(udp->DstPort) == 53) should_intercept = true;
                             }
 
@@ -354,25 +350,17 @@ void WinPkFilterDriver::run() {
                                 uint64_t mapping_key = 0;
 
                                 if (ip->Proto == IPPROTO_TCP) {
-                                    PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    mapping_key = NatManager::make_key(ip->SrcAddr, tcp->SrcPort);
-                                    
+                                    mapping_key = NatManager::make_key(ip->SrcAddr, ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
                                     NatManager::instance().create_tcp_mapping(mapping_key, od);
-                                    
                                     ip->DstAddr = m_gateway_ip; 
-                                    tcp->DstPort = htons(NAT_TARGET_PORT);
-                                    
+                                    ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort = htons(NAT_TARGET_PORT);
                                     ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
                                     recalculate_tcp_checksum(ip);
                                 } else {
-                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    mapping_key = NatManager::make_key(ip->SrcAddr, udp->SrcPort);
-
+                                    mapping_key = NatManager::make_key(ip->SrcAddr, ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
                                     NatManager::instance().create_or_update_udp_mapping(mapping_key, od);
-                                    
                                     ip->DstAddr = m_gateway_ip; 
-                                    udp->DstPort = htons(NAT_TARGET_PORT);
-                                    
+                                    ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort = htons(NAT_TARGET_PORT);
                                     ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
                                     recalculate_udp_checksum(ip);
                                 }
@@ -382,33 +370,21 @@ void WinPkFilterDriver::run() {
                         }
                         if (!intercepted) packets_to_mstcp.push_back(std::move(p));
                     } else {
-                        // --- 3. Outbound: Host to Client (RESTORE) ---
                         bool restored = false;
                         if (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) {
                             USHORT src_port = 0;
                             if (ip->Proto == IPPROTO_TCP) {
-                                PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                src_port = ntohs(tcp->SrcPort);
+                                src_port = ntohs(((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
                             } else {
-                                PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                src_port = ntohs(udp->SrcPort);
+                                src_port = ntohs(((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
                             }
 
                             if (src_port == NAT_TARGET_PORT) {
-                                uint64_t mapping_key = 0;
-                                if (ip->Proto == IPPROTO_TCP) {
-                                    PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    mapping_key = NatManager::make_key(ip->DstAddr, tcp->DstPort);
-                                } else {
-                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    mapping_key = NatManager::make_key(ip->DstAddr, udp->DstPort);
-                                }
-
+                                uint64_t mapping_key = NatManager::make_key(ip->DstAddr, ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort);
                                 auto od = NatManager::instance().get_mapping(mapping_key);
                                 if (od) {
                                     ip->SrcAddr = od->ip;
-                                    ip->DstAddr = od->original_client_ip; // Restore client destination IP
-                                    
+                                    ip->DstAddr = od->original_client_ip;
                                     if (ip->Proto == IPPROTO_TCP) {
                                         PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                         tcp->SrcPort = od->port;
@@ -427,12 +403,11 @@ void WinPkFilterDriver::run() {
                         }
                         if (!restored) packets_to_send.push_back(std::move(p));
                     }
-                } else { 
-                    p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p)); 
+                } else {
+                    p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p));
                 }
             }
 
-            // Flush batches immediately to reduce latency
             if (!packets_to_send.empty()) send_packets_to_adapter(std::move(packets_to_send));
             if (!packets_to_mstcp.empty()) {
                 size_t processed = 0;

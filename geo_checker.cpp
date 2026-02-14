@@ -35,7 +35,6 @@ GeoChecker::~GeoChecker() {
 }
 
 void GeoChecker::load_data(const std::string& geoip_file, const std::string& geosite_file) {
-    // We use unique_lock here as we are building the database
     std::unique_lock<std::shared_mutex> lock(m_mtx);
     
     ip_ranges_.clear();
@@ -167,7 +166,7 @@ void GeoChecker::load_geosite(const std::string& filepath) {
                     domain_exact_[val] |= flags;
                     break;
                 case 2: // Suffix
-                case 4: // Subdomain (treat as suffix for now)
+                case 4: // Subdomain
                     domain_suffix_[val] = (domain_suffix_[val] & 0xFFFF0000) | idx | flags;
                     domain_suffix_[val] |= flags;
                     break;
@@ -271,7 +270,6 @@ bool GeoChecker::is_cn_domain(const std::string& domain) {
     for (const auto& kv : domain_keyword_) if ((kv.flags & (FLAG_CN >> 16)) && d.find(kv.keyword) != std::string::npos) return true;
     for (const auto& kv : domain_regex_) if ((kv.flags & (FLAG_CN >> 16)) && std::regex_search(d, kv.reg)) return true;
     
-    // 如果还没匹配到，且是 .cn 结尾，认为是中国域名
     if (d.length() > 3 && d.substr(d.length() - 3) == ".cn") return true;
 
     return false;
