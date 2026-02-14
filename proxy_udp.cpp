@@ -116,8 +116,8 @@ public:
         dest_addr_sock.sin_family = AF_INET;
 
         if (is_direct && dport == 53) {
-            LOG_DEBUG("[DNS] Relaying DNS query for direct route to: %s", g_config.direct_dns_ip.c_str());
-            inet_pton(AF_INET, g_config.direct_dns_ip.c_str(), &dest_addr_sock.sin_addr);
+            LOG_DEBUG("[DNS] Relaying DNS query for direct route to: %s", g_config.direct_dns_server.c_str());
+            inet_pton(AF_INET, g_config.direct_dns_server.c_str(), &dest_addr_sock.sin_addr);
             dest_addr_sock.sin_port = htons(53);
         }
         else {
@@ -139,6 +139,8 @@ public:
 private:
     void on_remote_read(SOCKET remote_socket, char* buf, int len, const sockaddr_in* from_addr) {
         if (len <= 0) {
+            // Re-post a read even on error to keep the loop alive for UDP
+            WorkerPool::instance().read_async(remote_socket);
             return;
         }
 
@@ -163,6 +165,9 @@ private:
         } else {
             LOG_ERROR("[UdpProxy] Received a UDP packet on a remote socket but could not find a reverse route.");
         }
+        
+        // Post another read to continue receiving packets on this remote socket
+        WorkerPool::instance().read_async(remote_socket);
     }
     
     SOCKET get_or_create_remote_socket(uint64_t dest_key, const sockaddr_in* client_addr) {
