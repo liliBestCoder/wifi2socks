@@ -54,6 +54,14 @@ void DnsOverTcpProxy::start() {
 }
 
 void DnsOverTcpProxy::on_connect() {
+    int error = 0;
+    int len = sizeof(error);
+    getsockopt(m_socket, SOL_SOCKET, SO_ERROR, (char*)&error, &len);
+    if (error != 0) {
+        LOG_ERROR("[DoT] Connection failed with error %d", error);
+        on_close();
+        return;
+    }
     send_http_connect();
 }
 

@@ -201,6 +201,15 @@ void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
 }
 
 void ProxyTCP::on_remote_connect() {
+    int error = 0;
+    int len = sizeof(error);
+    getsockopt(m_remote_socket, SOL_SOCKET, SO_ERROR, (char*)&error, &len);
+    if (error != 0) {
+        LOG_ERROR("[ProxyTCP] Remote connection failed with error %d", error);
+        close_session();
+        return;
+    }
+
     LOG_INFO("[ProxyTCP] Remote connection established for %s", m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str());
 
     auto self = shared_from_this();

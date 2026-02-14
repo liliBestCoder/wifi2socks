@@ -101,6 +101,7 @@ void Worker::loop() {
                 } else if (io->type == IO_WRITE) {
                     if (ctx->on_write) ctx->on_write((int)bytesTransferred);
                 } else if (io->type == IO_CONNECT) {
+                    // 成功连接，更新上下文
                     setsockopt(ctx->sock, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
                     if (io->task) io->task();
                     WorkerPool::instance().post_read(ctx);
@@ -112,6 +113,10 @@ void Worker::loop() {
                     if (ctx->on_read) ctx->on_read(nullptr, -1, nullptr);
                 } else if (io->type == IO_WRITE && ctx->on_write) {
                     ctx->on_write(-1);
+                } else if (io->type == IO_CONNECT) {
+                    // 连接失败，也要执行任务以便上层清理
+                    LOG_ERROR("[Worker] ConnectEx async failure: %d", WSAGetLastError());
+                    if (io->task) io->task();
                 }
             }
         }
@@ -218,11 +223,10 @@ void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()>
             BOOL ret = ConnectExPtr(s, (sockaddr*)&addr, sizeof(addr), NULL, 0, NULL, &io->overlapped);
             if (!ret && WSAGetLastError() != ERROR_IO_PENDING) {
                 LOG_ERROR("[WorkerPool] ConnectEx failed immediately: %d", WSAGetLastError());
+                if (io->task) io->task();
                 ctx->pending_io--;
-                unregister_context(s);
-                closesocket(s);
-                delete ctx;
                 delete io;
+                // 注意：不要在这里 delete ctx，让上层回调决定是否 remove_socket
             } else {
                 LOG_DEBUG("[WorkerPool] ConnectEx initiated for socket %d", (int)s);
             }
