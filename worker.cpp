@@ -1,5 +1,6 @@
 #include "worker.h"
 #include "logger.h"
+#include "app_config.h"
 #include <iostream>
 #include <algorithm>
 
@@ -149,7 +150,8 @@ void WorkerPool::init(int count) {
 
 void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int)> on_write, std::function<void()> on_close, bool is_udp) {
     IO_CONTEXT* io = new IO_CONTEXT();
-    io->type = IO_TASK;\n    io->task = [this, s, on_read, on_write, on_close, is_udp]() {
+    io->type = IO_TASK;
+    io->task = [this, s, on_read, on_write, on_close, is_udp]() {
         SocketContext* ctx = new SocketContext();
         ctx->sock = s;
         ctx->on_read = on_read;
@@ -237,7 +239,8 @@ void WorkerPool::read_async(SOCKET s) {
     io_task->task = [this, s]() {
         SocketContext* ctx = find_context(s);
         if (ctx) post_read(ctx);
-    };\n    PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io_task);
+    };
+    PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io_task);
 }
 
 void WorkerPool::update_read_callback(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read) {
@@ -246,7 +249,8 @@ void WorkerPool::update_read_callback(SOCKET s, std::function<void(char*, int, s
     io_task->task = [this, s, on_read]() {
         SocketContext* ctx = find_context(s);
         if (ctx) ctx->on_read = on_read;
-    };\n    PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io_task);
+    };
+    PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io_task);
 }
 
 void WorkerPool::queue_task(std::function<void()> task) {

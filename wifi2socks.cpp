@@ -91,7 +91,8 @@ int main() {
     }
     
     static DhcpServer dhcp_server(g_config.tap_ip);
-    g_dhcp_server_ptr = &dhcp_server;\n    dhcp_server.start();
+    g_dhcp_server_ptr = &dhcp_server;
+    dhcp_server.start();
 
     TrafficManager::instance().start();
 

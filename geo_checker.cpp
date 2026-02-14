@@ -1,6 +1,7 @@
 #define NOMINMAX
 #include "geo_checker.h"
 #include "logger.h"
+#include "app_config.h"
 #include <stdexcept>
 #include <algorithm>
 #include <cctype>

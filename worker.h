@@ -83,6 +83,7 @@ private:
 };
 
 class WorkerPool {
+    friend class Worker;
 public:
     static WorkerPool& instance();
     void init(int count);
@@ -103,7 +104,8 @@ public:
     void for_each_worker(std::function<void(Worker*)> callback);
 
 private:
-    WorkerPool() : m_shared_iocp(NULL), m_next_idx(0) {}\n    ~WorkerPool();
+    WorkerPool() : m_shared_iocp(NULL), m_next_idx(0) {}
+    ~WorkerPool();
 
     HANDLE m_shared_iocp;
     std::vector<Worker*> m_workers;

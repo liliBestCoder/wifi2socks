@@ -18,20 +18,16 @@
 // A manager to handle all UDP proxy operations.
 class UdpProxyManager {
 public:
-    UdpProxyManager() : m_worker(nullptr) {}
+    UdpProxyManager() {}
 
     void initialize() {
-        m_worker = WorkerPool::instance().get_next_worker(); 
-        if (!m_worker) {
-            LOG_ERROR("[UdpProxy] Could not get a worker for UDP operations.");
-        }
     }
 
     void shutdown() {
         std::lock_guard<std::mutex> lock(m_mutex);
         for (auto const& [key, val] : m_remote_sockets) {
             if (val != INVALID_SOCKET) {
-                m_worker->remove_socket(val);
+                WorkerPool::instance().remove_socket(val);
             }
         }
         m_remote_sockets.clear();
@@ -69,11 +65,6 @@ public:
 
 
     void handle_data(SOCKET listener_socket, const char* data, int len, const sockaddr_in* client_addr, const OriginalDestination* dest) {
-        if (!m_worker) {
-            LOG_ERROR("[UdpProxy] Not initialized. Dropping packet.");
-            return;
-        }
-
         bool is_direct = true;
         uint16_t dport = ntohs(dest->port);
 
@@ -180,7 +171,7 @@ private:
         u_long mode = 1;
         ioctlsocket(new_socket, FIONBIO, &mode);
         
-        m_worker->add_socket(
+        WorkerPool::instance().add_socket(
             new_socket,
             [this, new_socket](char* buf, int len, const sockaddr_in* from) { this->on_remote_read(new_socket, buf, len, from); },
             nullptr,
@@ -198,14 +189,13 @@ private:
         m_remote_sockets[dest_key] = new_socket;
         m_reverse_routes[new_socket] = *client_addr;
         
-        m_worker->read_async(new_socket);
+        WorkerPool::instance().read_async(new_socket);
 
         LOG_DEBUG("[UdpProxy] Created new remote UDP socket for dest key %llu", dest_key);
 
         return new_socket;
     }
 
-    Worker* m_worker;
     std::mutex m_mutex;
     std::unordered_map<uint64_t, SOCKET> m_remote_sockets;
     std::unordered_map<SOCKET, sockaddr_in> m_reverse_routes;

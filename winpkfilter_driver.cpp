@@ -150,7 +150,8 @@ WinPkFilterDriver::WinPkFilterDriver()
     for (int i = 0; i < BATCH_SIZE; ++i) m_read_buffers[i] = nullptr;
     m_write_request = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
     m_write_request->dwPacketsNumber = BATCH_SIZE;
-    m_mstcp_request = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));\n    m_mstcp_request->dwPacketsNumber = BATCH_SIZE;
+    m_mstcp_request = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
+    m_mstcp_request->dwPacketsNumber = BATCH_SIZE;
     for (int i = 0; i < BATCH_SIZE; ++i) m_write_buffers[i] = nullptr; 
     m_send_buffer = new INTERMEDIATE_BUFFER();
     memset(m_adapter_mac, 0, 6);
@@ -161,7 +162,8 @@ WinPkFilterDriver::~WinPkFilterDriver() {
     if (m_tx_event) CloseHandle(m_tx_event);
     for (int i = 0; i < BATCH_SIZE; ++i) {
         if (m_read_buffers[i]) PacketPool::instance().release(m_read_buffers[i]);
-    }\n    free(m_read_request);
+    }
+    free(m_read_request);
     free(m_write_request);
     free(m_mstcp_request);
     delete m_send_buffer;
@@ -180,12 +182,14 @@ std::vector<std::pair<std::string, std::string>> WinPkFilterDriver::get_adapters
     return result;
 }
 
-bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacketHandler handler) {\n    LOG_INFO("[Driver] Initializing WinPkFilter (Batch Mode) on: %s", adapter_name.c_str());
+bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacketHandler handler) {
+    LOG_INFO("[Driver] Initializing WinPkFilter (Batch Mode) on: %s", adapter_name.c_str());
     if (!m_ndis_api.IsDriverLoaded()) return false;
 
     for (int i = 0; i < BATCH_SIZE; ++i) {
         if (!m_read_buffers[i]) {
-            m_read_buffers[i] = PacketPool::instance().acquire();\n            m_read_request->EthPacket[i].Buffer = m_read_buffers[i];
+            m_read_buffers[i] = PacketPool::instance().acquire();
+            m_read_request->EthPacket[i].Buffer = m_read_buffers[i];
         }
     }
 
@@ -197,7 +201,16 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
     std::transform(target_lower.begin(), target_lower.end(), target_lower.begin(), ::tolower);
 
     for (UINT i = 0; i < adapters.m_nAdapterCount; ++i) {
-        std::string current_name = (char*)adapters.m_szAdapterNameList[i];\n        std::string current_lower = current_name;\n        std::transform(current_lower.begin(), current_lower.end(), current_lower.begin(), ::tolower);\n        if (current_lower.find(target_lower) != std::string::npos || target_lower.find(current_lower) != std::string::npos) {\n            m_adapter_handle = adapters.m_nAdapterHandle[i];\n            found = true;\n            LOG_INFO("[Driver] Matched adapter: %s", current_name.c_str());\n            break;\n        }\n    }
+        std::string current_name = (char*)adapters.m_szAdapterNameList[i];
+        std::string current_lower = current_name;
+        std::transform(current_lower.begin(), current_lower.end(), current_lower.begin(), ::tolower);
+        if (current_lower.find(target_lower) != std::string::npos || target_lower.find(current_lower) != std::string::npos) {
+            m_adapter_handle = adapters.m_nAdapterHandle[i];
+            found = true;
+            LOG_INFO("[Driver] Matched adapter: %s", current_name.c_str());
+            break;
+        }
+    }
 
     if (!found) return false;
 
@@ -208,7 +221,10 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
     m_wait_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     if (!m_ndis_api.SetPacketEvent(m_adapter_handle, m_wait_event)) return false;
 
-    ADAPTER_MODE mode;\n    mode.dwFlags = MSTCP_FLAG_SENT_RECEIVE | MSTCP_FLAG_SENT_TUNNEL | MSTCP_FLAG_RECV_TUNNEL;\n    mode.hAdapterHandle = m_adapter_handle;\n    if (!m_ndis_api.SetAdapterMode(&mode)) return false;
+    ADAPTER_MODE mode;
+    mode.dwFlags = MSTCP_FLAG_SENT_RECEIVE | MSTCP_FLAG_SENT_TUNNEL | MSTCP_FLAG_RECV_TUNNEL;
+    mode.hAdapterHandle = m_adapter_handle;
+    if (!m_ndis_api.SetAdapterMode(&mode)) return false;
 
     m_running = true; m_tx_running = true;
     m_tx_thread = std::thread(&WinPkFilterDriver::tx_run, this);
@@ -238,14 +254,17 @@ void WinPkFilterDriver::run() {
             packets_to_send.clear();
             packets_to_mstcp.clear();
 
-            m_read_request->dwPacketsNumber = BATCH_SIZE;\n            m_read_request->dwPacketsSuccess = 0;
+            m_read_request->dwPacketsNumber = BATCH_SIZE;
+            m_read_request->dwPacketsSuccess = 0;
             
             if (m_ndis_api.ReadPackets(m_read_request) && m_read_request->dwPacketsSuccess > 0) {
                 for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
                     PINTERMEDIATE_BUFFER filled_buf = m_read_request->EthPacket[i].Buffer;
-                    bool outbound = (filled_buf->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);\n                    captured_packets.push_back({ RawPacketPtr(filled_buf), outbound });
+                    bool outbound = (filled_buf->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
+                    captured_packets.push_back({ RawPacketPtr(filled_buf), outbound });
                     
-                    m_read_buffers[i] = PacketPool::instance().acquire();\n                    m_read_request->EthPacket[i].Buffer = m_read_buffers[i];
+                    m_read_buffers[i] = PacketPool::instance().acquire();
+                    m_read_request->EthPacket[i].Buffer = m_read_buffers[i];
                 }
             } else {
                 has_packets = false;
@@ -254,9 +273,13 @@ void WinPkFilterDriver::run() {
             if (captured_packets.empty()) continue;
 
             for (auto& p : captured_packets) {
-                char* buffer = (char*)p.data->m_IBuffer;\n                size_t length = p.data->m_Length;
+                char* buffer = (char*)p.data->m_IBuffer;
+                size_t length = p.data->m_Length;
                 
-                if (length < 14) { \n                    p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p)); \n                    continue; \n                }
+                if (length < 14) { 
+                    p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p)); 
+                    continue; 
+                }
 
                 USHORT ether_type = ntohs(*(USHORT*)(buffer + 12));
 
@@ -286,7 +309,12 @@ void WinPkFilterDriver::run() {
                         PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                         USHORT sport = ntohs(udp->SrcPort);
                         USHORT dport = ntohs(udp->DstPort);
-                        if (sport == 67 || sport == 68 || dport == 67 || dport == 68 ||\n                            sport == 137 || sport == 138 || dport == 137 || dport == 138 ||\n                            dport == 5353 || dport == 5355 || dport == 1900) {\n                            p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p));\n                            continue;\n                        }
+                        if (sport == 67 || sport == 68 || dport == 67 || dport == 68 ||
+                            sport == 137 || sport == 138 || dport == 137 || dport == 138 ||
+                            dport == 5353 || dport == 5355 || dport == 1900) {
+                            p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p));
+                            continue;
+                        }
                     }
 
                     if (!p.outbound) {
@@ -309,9 +337,11 @@ void WinPkFilterDriver::run() {
                             if (should_intercept) {
                                 uint16_t original_dst_port = 0;
                                 if (ip->Proto == IPPROTO_TCP) {
-                                    PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);\n                                    original_dst_port = tcp->DstPort;
+                                    PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                    original_dst_port = tcp->DstPort;
                                 } else {
-                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);\n                                    original_dst_port = udp->DstPort;
+                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                    original_dst_port = udp->DstPort;
                                 }
 
                                 OriginalDestination od(ip->DstAddr, original_dst_port, ip->SrcAddr);
@@ -321,12 +351,18 @@ void WinPkFilterDriver::run() {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     mapping_key = NatManager::make_key(ip->SrcAddr, tcp->SrcPort);
                                     NatManager::instance().create_tcp_mapping(mapping_key, od);
-                                    ip->DstAddr = m_gateway_ip; \n                                    tcp->DstPort = htons(NAT_TARGET_PORT);\n                                    ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);\n                                    recalculate_tcp_checksum(ip);
+                                    ip->DstAddr = m_gateway_ip; 
+                                    tcp->DstPort = htons(NAT_TARGET_PORT);
+                                    ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
+                                    recalculate_tcp_checksum(ip);
                                 } else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     mapping_key = NatManager::make_key(ip->SrcAddr, udp->SrcPort);
                                     NatManager::instance().create_or_update_udp_mapping(mapping_key, od);
-                                    ip->DstAddr = m_gateway_ip; \n                                    udp->DstPort = htons(NAT_TARGET_PORT);\n                                    ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);\n                                    recalculate_udp_checksum(ip);
+                                    ip->DstAddr = m_gateway_ip; 
+                                    udp->DstPort = htons(NAT_TARGET_PORT);
+                                    ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
+                                    recalculate_udp_checksum(ip);
                                 }
                                 packets_to_mstcp.push_back(std::move(p));
                                 intercepted = true;
@@ -338,17 +374,21 @@ void WinPkFilterDriver::run() {
                         if (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) {
                             USHORT src_port = 0;
                             if (ip->Proto == IPPROTO_TCP) {
-                                PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);\n                                src_port = ntohs(tcp->SrcPort);
+                                PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                src_port = ntohs(tcp->SrcPort);
                             } else {
-                                PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);\n                                src_port = ntohs(udp->SrcPort);
+                                PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                src_port = ntohs(udp->SrcPort);
                             }
 
                             if (src_port == NAT_TARGET_PORT) {
                                 uint64_t mapping_key = 0;
                                 if (ip->Proto == IPPROTO_TCP) {
-                                    PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);\n                                    mapping_key = NatManager::make_key(ip->DstAddr, tcp->DstPort);
+                                    PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                    mapping_key = NatManager::make_key(ip->DstAddr, tcp->DstPort);
                                 } else {
-                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);\n                                    mapping_key = NatManager::make_key(ip->DstAddr, udp->DstPort);
+                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                    mapping_key = NatManager::make_key(ip->DstAddr, udp->DstPort);
                                 }
 
                                 auto od = NatManager::instance().get_mapping(mapping_key);
@@ -356,11 +396,15 @@ void WinPkFilterDriver::run() {
                                     ip->SrcAddr = od->ip;
                                     ip->DstAddr = od->original_client_ip; 
                                     if (ip->Proto == IPPROTO_TCP) {
-                                        PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);\n                                        tcp->SrcPort = od->port;
-                                        ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);\n                                        recalculate_tcp_checksum(ip);
+                                        PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                        tcp->SrcPort = od->port;
+                                        ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
+                                        recalculate_tcp_checksum(ip);
                                     } else {
-                                        PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);\n                                        udp->SrcPort = od->port;
-                                        ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);\n                                        recalculate_udp_checksum(ip);
+                                        PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                        udp->SrcPort = od->port;
+                                        ip->Csum = 0; ip->Csum = checksum((USHORT*)ip, (ip->Ver_HLen & 0x0F) * 4);
+                                        recalculate_udp_checksum(ip);
                                     }
                                     packets_to_send.push_back(std::move(p));
                                     restored = true;
@@ -369,7 +413,9 @@ void WinPkFilterDriver::run() {
                         }
                         if (!restored) packets_to_send.push_back(std::move(p));
                     }
-                } else { \n                    p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p)); \n                }
+                } else { 
+                    p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p)); 
+                }
             }
 
             if (!packets_to_send.empty()) send_packets_to_adapter(std::move(packets_to_send));
@@ -380,7 +426,8 @@ void WinPkFilterDriver::run() {
                     size_t current_batch = (std::min)(packets_to_mstcp.size() - processed, (size_t)BATCH_SIZE);
                     m_mstcp_request->dwPacketsNumber = (DWORD)current_batch;
                     m_mstcp_request->dwPacketsSuccess = 0;
-                    for (size_t i = 0; i < current_batch; ++i) {\n                        m_mstcp_request->EthPacket[i].Buffer = packets_to_mstcp[processed + i].data.get();
+                    for (size_t i = 0; i < current_batch; ++i) {
+                        m_mstcp_request->EthPacket[i].Buffer = packets_to_mstcp[processed + i].data.get();
                     }
                     m_ndis_api.SendPacketsToMstcp(m_mstcp_request);
                     processed += current_batch;
@@ -461,7 +508,8 @@ bool WinPkFilterDriver::send_packets_to_adapter(std::vector<Packet>&& packets) {
 bool WinPkFilterDriver::send_to_mstcp(const char* packet, size_t length) {
     if (!m_adapter_handle) return false;
     std::lock_guard<std::mutex> lock(m_send_mutex);
-    size_t clen = (length > MAX_ETHER_FRAME) ? MAX_ETHER_FRAME : length;\n    memcpy(m_send_buffer->m_IBuffer, packet, clen); m_send_buffer->m_Length = (ULONG)clen;
+    size_t clen = (length > MAX_ETHER_FRAME) ? MAX_ETHER_FRAME : length;
+    memcpy(m_send_buffer->m_IBuffer, packet, clen); m_send_buffer->m_Length = (ULONG)clen;
     m_send_buffer->m_dwDeviceFlags = PACKET_FLAG_ON_RECEIVE;
     ETH_REQUEST req = { m_adapter_handle, { m_send_buffer } };
     return m_ndis_api.SendPacketToMstcp(&req) != FALSE;
