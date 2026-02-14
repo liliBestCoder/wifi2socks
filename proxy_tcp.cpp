@@ -35,12 +35,6 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
 }
 
 ProxyTCP::~ProxyTCP() {
-    if (m_client_socket != INVALID_SOCKET) {
-        closesocket(m_client_socket);
-    }
-    if (m_remote_socket != INVALID_SOCKET) {
-        closesocket(m_remote_socket);
-    }
 }
 
 void ProxyTCP::start() {
