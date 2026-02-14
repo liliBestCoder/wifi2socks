@@ -31,7 +31,7 @@ void DnsOverTcpProxy::start() {
         return;
     }
     
-    int buf_size = 1024 * 1024; // 1MB
+    int buf_size = 64 * 1024; // 64KB
     setsockopt(m_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
     setsockopt(m_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
 
