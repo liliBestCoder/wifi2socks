@@ -21,8 +21,7 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
       m_client_socket(client_socket),
       m_remote_socket(INVALID_SOCKET),
       m_original_dest(dest),
-      m_is_direct(false),
-      m_ref_count(0)
+      m_is_direct(false)
 {
     u_long mode = 1;
     ioctlsocket(m_client_socket, FIONBIO, &mode);
@@ -43,12 +42,11 @@ ProxyTCP::~ProxyTCP() {
 
 void ProxyTCP::start() {
     auto self = shared_from_this();
-    retain(); 
     WorkerPool::instance().add_socket(
         m_client_socket,
         [self](char* buf, int len, sockaddr_in*) { self->on_client_initial_read(buf, len); },
         nullptr, 
-        [self]() { self->on_close(); }
+        nullptr
     );
 }
 
@@ -160,7 +158,7 @@ void ProxyTCP::connect_remote() {
             [self]() { self->on_remote_connect(); },
             [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); },
             nullptr,
-            [self]() { self->on_close(); }
+            nullptr
         );
     } else {
         WorkerPool::instance().connect_async(
@@ -168,7 +166,7 @@ void ProxyTCP::connect_remote() {
             [self]() { self->on_remote_connect(); },
             [self](char* b, int l, sockaddr_in*) { self->on_proxy_connect_response(b, l); },
             nullptr,
-            [self]() { self->on_close(); }
+            nullptr
         );
     }
 }
@@ -206,7 +204,6 @@ void ProxyTCP::on_remote_connect() {
     LOG_INFO("[ProxyTCP] Remote connection established for %s", m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str());
 
     auto self = shared_from_this();
-    retain();
 
     if (m_is_direct) {
         m_state = ESTABLISHED;
@@ -267,11 +264,6 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
     }
 }
 
-void ProxyTCP::on_close() {
-    LOG_DEBUG("[ProxyTCP] Socket closure notification.");
-    release();
-}
-
 void ProxyTCP::close_session() {
     if (m_state == CLOSING) return;
     m_state = CLOSING;
@@ -283,15 +275,5 @@ void ProxyTCP::close_session() {
     if (m_remote_socket != INVALID_SOCKET) {
         WorkerPool::instance().remove_socket(m_remote_socket);
         m_remote_socket = INVALID_SOCKET;
-    }
-}
-
-void ProxyTCP::retain() {
-    ++m_ref_count;
-}
-
-void ProxyTCP::release() {
-    if (--m_ref_count == 0) {
-        MainDispatcher::instance().queue_task([self = shared_from_this()]() {});
     }
 }

@@ -27,8 +27,6 @@ private:
     void on_client_read(char* buf, int len);
     void on_remote_read(char* buf, int len);
     
-    void on_close();
-
     // The core function to gracefully close the session.
     void close_session();
 
@@ -49,10 +47,4 @@ private:
     
     std::string m_detected_domain;
     bool m_is_direct;
-
-    // Using a simple reference count to manage the lifetime of the object
-    // in relation to the two sockets being in the IOCP loop.
-    std::atomic<int> m_ref_count;
-    void retain();
-    void release();
 };
