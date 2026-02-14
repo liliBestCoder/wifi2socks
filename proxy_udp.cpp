@@ -114,8 +114,16 @@ public:
         // --- 4. Forwarding (Direct Relay) ---
         sockaddr_in dest_addr_sock = {};
         dest_addr_sock.sin_family = AF_INET;
-        dest_addr_sock.sin_addr.s_addr = dest->ip;
-        dest_addr_sock.sin_port = dest->port;
+
+        if (is_direct && dport == 53) {
+            LOG_DEBUG("[DNS] Relaying DNS query for direct route to: %s", g_config.direct_dns_ip.c_str());
+            inet_pton(AF_INET, g_config.direct_dns_ip.c_str(), &dest_addr_sock.sin_addr);
+            dest_addr_sock.sin_port = htons(53);
+        }
+        else {
+            dest_addr_sock.sin_addr.s_addr = dest->ip;
+            dest_addr_sock.sin_port = dest->port;
+        }
 
         uint64_t dest_key = ((uint64_t)dest->ip << 16) | dport;
         SOCKET remote_socket = get_or_create_remote_socket(dest_key, client_addr);
