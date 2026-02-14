@@ -4,7 +4,7 @@
 #include <iostream>
 #include <algorithm>
 
-const int CONCURRENT_READ_COUNT = 4;
+
 
 // --- IO_CONTEXT Pool ---
 static std::mutex g_io_pool_mtx;

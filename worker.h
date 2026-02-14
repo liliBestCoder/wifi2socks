@@ -14,6 +14,8 @@
 #include <unordered_map>
 #include <atomic>
 
+constexpr int CONCURRENT_READ_COUNT = 4;
+
 // IOCP Operation Types
 enum IO_TYPE {
     IO_READ,    
