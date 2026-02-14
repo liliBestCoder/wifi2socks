@@ -19,7 +19,8 @@ enum IO_TYPE {
     IO_READ,    
     IO_WRITE,   
     IO_CONNECT, 
-    IO_REMOVE
+    IO_REMOVE,
+    IO_TASK     // Added for event-driven task execution
 };
 
 struct SocketContext;
@@ -29,7 +30,7 @@ struct IO_CONTEXT {
     OVERLAPPED overlapped;
     IO_TYPE type;
     SOCKET sock;
-    std::function<void()> on_done;
+    std::function<void()> task; // Added to carry tasks via IOCP
     std::vector<uint8_t> buf;
     sockaddr_in remote_addr;
     int remote_addr_len;
@@ -71,7 +72,7 @@ struct SocketContext {
 
 class Worker {
 public:
-    Worker();
+    Worker(HANDLE iocp); // Constructor now takes shared IOCP handle
     ~Worker();
     
     void start(int core_index);
@@ -102,7 +103,6 @@ private:
     std::thread m_thread;
     std::mutex m_mtx;
     std::map<SOCKET, SocketContext*> m_sockets; 
-    std::vector<std::function<void()>> m_task_queue; 
     std::atomic<bool> m_running;
     
     LPFN_CONNECTEX m_lpfnConnectEx;
@@ -112,12 +112,16 @@ class WorkerPool {
 public:
     static WorkerPool& instance();
     void init(int count);
-    Worker* get_worker(uint32_t hash);
     Worker* get_next_worker();
     
     void for_each_worker(std::function<void(Worker*)> callback);
+    HANDLE get_shared_iocp() const { return m_shared_iocp; }
 
 private:
+    WorkerPool() : m_shared_iocp(NULL), m_next_idx(0) {}
+    ~WorkerPool();
+
+    HANDLE m_shared_iocp;
     std::vector<Worker*> m_workers;
     std::atomic<size_t> m_next_idx;
 };

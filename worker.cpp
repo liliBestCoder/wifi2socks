@@ -5,9 +5,7 @@
 
 // Worker Implementation
 
-Worker::Worker() : m_running(false), m_iocp(NULL), m_lpfnConnectEx(NULL) {
-    m_iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
-    
+Worker::Worker(HANDLE iocp) : m_running(false), m_iocp(iocp), m_lpfnConnectEx(NULL) {
     SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
     if (s != INVALID_SOCKET) {
         GUID guid = WSAID_CONNECTEX;
@@ -22,7 +20,6 @@ Worker::Worker() : m_running(false), m_iocp(NULL), m_lpfnConnectEx(NULL) {
 
 Worker::~Worker() {
     stop();
-    if (m_iocp) CloseHandle(m_iocp);
 }
 
 void Worker::start(int core_index) {
@@ -40,14 +37,14 @@ void Worker::start(int core_index) {
 void Worker::stop() {
     if (!m_running) return;
     m_running = false;
-    if (m_iocp) PostQueuedCompletionStatus(m_iocp, 0, (ULONG_PTR)this, NULL);
+    // Post a control message to wake up the loop
+    PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
     if (m_thread.joinable()) m_thread.join();
 }
 
 void Worker::post_read(SocketContext* ctx) {
     if (!ctx || ctx->closing || ctx->paused || ctx->magic != SocketContext::MAGIC_VAL) return;
 
-    // Maintain a high-performance pipeline by having exactly one large read pending.
     if (ctx->read_pending.exchange(true)) return; 
 
     IO_CONTEXT* io = new IO_CONTEXT();
@@ -107,8 +104,9 @@ void Worker::post_write(SocketContext* ctx, std::vector<uint8_t>&& data) {
 }
 
 void Worker::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int)> on_write, std::function<void()> on_close, bool is_udp) {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    m_task_queue.push_back([this, s, on_read, on_write, on_close, is_udp]() {
+    IO_CONTEXT* io = new IO_CONTEXT();
+    io->type = IO_TASK;
+    io->task = [this, s, on_read, on_write, on_close, is_udp]() {
         SocketContext* ctx = new SocketContext();
         ctx->sock = s;
         ctx->on_read = on_read;
@@ -122,32 +120,22 @@ void Worker::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> 
         if (on_read) {
             post_read(ctx);
         }
-    });
-    PostQueuedCompletionStatus(m_iocp, 0, (ULONG_PTR)this, NULL);
+    };
+    PostQueuedCompletionStatus(m_iocp, 0, 0, (LPOVERLAPPED)io);
 }
 
 void Worker::remove_socket(SOCKET s, std::function<void()> on_done) {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    auto it = m_sockets.find(s);
-    if (it != m_sockets.end()) {
-        SocketContext* ctx = it->second;
-        ctx->closing = true;
-        ctx->on_remove_done = on_done;
-        m_sockets.erase(it);
-        closesocket(s);
-        
-        if (ctx->pending_io == 0) {
-            if (ctx->on_remove_done) ctx->on_remove_done();
-            delete ctx;
-        }
-    } else if (on_done) {
-        on_done();
-    }
+    IO_CONTEXT* io = new IO_CONTEXT();
+    io->type = IO_REMOVE;
+    io->sock = s;
+    io->task = on_done;
+    PostQueuedCompletionStatus(m_iocp, 0, 0, (LPOVERLAPPED)io);
 }
 
 void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect) {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    m_task_queue.push_back([this, s, addr, on_connect]() {
+    IO_CONTEXT* io_task = new IO_CONTEXT();
+    io_task->type = IO_TASK;
+    io_task->task = [this, s, addr, on_connect]() {
         struct sockaddr_in bindAddr;
         memset(&bindAddr, 0, sizeof(bindAddr));
         bindAddr.sin_family = AF_INET;
@@ -164,7 +152,7 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
         io->type = IO_CONNECT;
         io->sock = s;
         io->parent = ctx;
-        io->on_done = on_connect;
+        io->task = on_connect;
 
         ctx->pending_io++;
         if (m_lpfnConnectEx) {
@@ -177,8 +165,8 @@ void Worker::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_
                 delete io;
             }
         }
-    });
-    PostQueuedCompletionStatus(m_iocp, 0, (ULONG_PTR)this, NULL);
+    };
+    PostQueuedCompletionStatus(m_iocp, 0, 0, (LPOVERLAPPED)io_task);
 }
 
 bool Worker::send_async(SOCKET s, char* buf, int len) {
@@ -186,52 +174,58 @@ bool Worker::send_async(SOCKET s, char* buf, int len) {
 }
 
 bool Worker::send_async(SOCKET s, std::vector<uint8_t>&& data) {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    auto it = m_sockets.find(s);
-    if (it != m_sockets.end() && !it->second->closing) {
-        post_write(it->second, std::move(data));
-        return true;
-    }
-    return false;
+    // Note: To avoid locks in the hot path, we could post this as a task,
+    // but looking up the context here is faster if the map isn't too large.
+    // However, per requirements, we'll post it as a task to be handled by GetQueuedCompletionStatus.
+    IO_CONTEXT* io_task = new IO_CONTEXT();
+    io_task->type = IO_TASK;
+    io_task->sock = s;
+    io_task->buf = std::move(data);
+    io_task->task = [this, s, moved_io = io_task]() mutable {
+        auto it = m_sockets.find(s);
+        if (it != m_sockets.end() && !it->second->closing) {
+            post_write(it->second, std::move(moved_io->buf));
+        }
+    };
+    PostQueuedCompletionStatus(m_iocp, 0, 0, (LPOVERLAPPED)io_task);
+    return true;
 }
 
 void Worker::read_async(SOCKET s) {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    auto it = m_sockets.find(s);
-    if (it != m_sockets.end()) post_read(it->second);
+    IO_CONTEXT* io_task = new IO_CONTEXT();
+    io_task->type = IO_TASK;
+    io_task->task = [this, s]() {
+        auto it = m_sockets.find(s);
+        if (it != m_sockets.end()) post_read(it->second);
+    };
+    PostQueuedCompletionStatus(m_iocp, 0, 0, (LPOVERLAPPED)io_task);
 }
 
 void Worker::update_read_callback(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read) {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    auto it = m_sockets.find(s);
-    if (it != m_sockets.end()) it->second->on_read = on_read;
+    IO_CONTEXT* io_task = new IO_CONTEXT();
+    io_task->type = IO_TASK;
+    io_task->task = [this, s, on_read]() {
+        auto it = m_sockets.find(s);
+        if (it != m_sockets.end()) it->second->on_read = on_read;
+    };
+    PostQueuedCompletionStatus(m_iocp, 0, 0, (LPOVERLAPPED)io_task);
 }
 
 void Worker::queue_task(std::function<void()> task) {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    m_task_queue.push_back(task);
-    PostQueuedCompletionStatus(m_iocp, 0, (ULONG_PTR)this, NULL);
+    IO_CONTEXT* io = new IO_CONTEXT();
+    io->type = IO_TASK;
+    io->task = std::move(task);
+    PostQueuedCompletionStatus(m_iocp, 0, 0, (LPOVERLAPPED)io);
 }
 
 void Worker::set_socket_user_data(SOCKET s, void* user_data) {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    auto it = m_sockets.find(s);
-    if (it != m_sockets.end()) it->second->user_data = user_data;
-}
-
-void Worker::pause_read(SOCKET s) {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    auto it = m_sockets.find(s);
-    if (it != m_sockets.end()) it->second->paused = true;
-}
-
-void Worker::resume_read(SOCKET s) {
-    std::lock_guard<std::mutex> lock(m_mtx);
-    auto it = m_sockets.find(s);
-    if (it != m_sockets.end()) {
-        it->second->paused = false;
-        post_read(it->second);
-    }
+    IO_CONTEXT* io_task = new IO_CONTEXT();
+    io_task->type = IO_TASK;
+    io_task->task = [this, s, user_data]() {
+        auto it = m_sockets.find(s);
+        if (it != m_sockets.end()) it->second->user_data = user_data;
+    };
+    PostQueuedCompletionStatus(m_iocp, 0, 0, (LPOVERLAPPED)io_task);
 }
 
 void Worker::loop() {
@@ -240,27 +234,43 @@ void Worker::loop() {
     LPOVERLAPPED overlapped;
 
     while (m_running) {
-        std::vector<std::function<void()>> current_tasks;
-        {
-            std::lock_guard<std::mutex> lock(m_mtx);
-            if (!m_task_queue.empty()) current_tasks.swap(m_task_queue);
-        }
-        for (auto& task : current_tasks) {
-            try { task(); } catch(...) {}
-        }
-
-        DWORD timeout = current_tasks.empty() ? 100 : 0;
-        BOOL ret = GetQueuedCompletionStatus(m_iocp, &bytesTransferred, &completionKey, &overlapped, timeout);
+        // Standard IOCP wait: INFINITE timeout, no polling
+        BOOL ret = GetQueuedCompletionStatus(m_iocp, &bytesTransferred, &completionKey, &overlapped, INFINITE);
 
         if (overlapped == NULL) continue;
 
-        if (completionKey == (ULONG_PTR)this) {
+        IO_CONTEXT* io = (IO_CONTEXT*)overlapped;
+
+        // Handle generic tasks or control messages
+        if (io->type == IO_TASK) {
+            if (io->task) {
+                try { io->task(); } catch(...) {}
+            }
+            delete io;
             continue;
         }
 
-        IO_CONTEXT* io = (IO_CONTEXT*)overlapped;
-        SocketContext* ctx = (SocketContext*)completionKey;
+        if (io->type == IO_REMOVE) {
+            auto it = m_sockets.find(io->sock);
+            if (it != m_sockets.end()) {
+                SocketContext* ctx = it->second;
+                ctx->closing = true;
+                ctx->on_remove_done = io->task; // Reuse task field for on_done callback
+                m_sockets.erase(it);
+                closesocket(io->sock);
+                
+                if (ctx->pending_io == 0) {
+                    if (ctx->on_remove_done) ctx->on_remove_done();
+                    delete ctx;
+                }
+            } else if (io->task) {
+                io->task();
+            }
+            delete io;
+            continue;
+        }
 
+        SocketContext* ctx = (SocketContext*)completionKey;
         if (!ctx || ctx->magic != SocketContext::MAGIC_VAL) {
             delete io;
             continue;
@@ -282,7 +292,7 @@ void Worker::loop() {
                     if (ctx->on_write) ctx->on_write((int)bytesTransferred);
                 } else if (io->type == IO_CONNECT) {
                     setsockopt(ctx->sock, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
-                    if (io->on_done) io->on_done();
+                    if (io->task) io->task(); // Reuse task field for on_connect callback
                     post_read(ctx);
                 }
             } else {
@@ -304,22 +314,39 @@ void Worker::loop() {
     }
 }
 
+// WorkerPool Implementation
+
 WorkerPool& WorkerPool::instance() {
     static WorkerPool pool;
     return pool;
 }
 
+WorkerPool::~WorkerPool() {
+    if (m_shared_iocp) CloseHandle(m_shared_iocp);
+    for (auto* w : m_workers) delete w;
+}
+
 void WorkerPool::init(int count) {
     if (!m_workers.empty()) return;
+    
+    // Create single shared IOCP for all workers
+    m_shared_iocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+    
     for (int i = 0; i < count; ++i) {
-        Worker* w = new Worker();
+        Worker* w = new Worker(m_shared_iocp);
         w->start(i);
         m_workers.push_back(w);
     }
 }
 
 Worker* WorkerPool::get_next_worker() {
-    static std::atomic<size_t> next_idx(0);
     if (m_workers.empty()) return nullptr;
-    return m_workers[next_idx++ % m_workers.size()];
+    return m_workers[m_next_idx++ % m_workers.size()];
+}
+
+void WorkerPool::for_each_worker(std::function<void(Worker*)> callback) {
+    if (m_workers.empty()) return;
+    for (auto* w : m_workers) {
+        callback(w);
+    }
 }
