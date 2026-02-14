@@ -54,7 +54,7 @@ struct SocketContext {
     
     void* user_data;                    
 
-    SocketContext() : sock(INVALID_SOCKET), read_pending(false), 
+    SocketContext() : sock(INVALID_SOCKET), 
                      closing(false), is_udp(false), user_data(nullptr) {
     }
     
