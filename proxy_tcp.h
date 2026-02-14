@@ -49,15 +49,10 @@ private:
     Worker* m_worker;
 
     std::vector<uint8_t> m_initial_buffer; // Buffer for data received before ESTABLISHED
-    std::vector<uint8_t> m_client_outbox;  // Data to be sent to client
-    std::vector<uint8_t> m_remote_outbox;  // Data to be sent to remote
     
     std::string m_detected_domain;
     bool m_is_direct;
 
-    bool m_client_write_busy;
-    bool m_remote_write_busy;
-    
     // Using a simple reference count to manage the lifetime of the object
     // in relation to the two sockets being in the IOCP loop.
     std::atomic<int> m_ref_count;

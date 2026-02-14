@@ -92,7 +92,12 @@ void Worker::post_read(SocketContext* ctx) {
 }
 
 void Worker::post_write(SocketContext* ctx, std::vector<uint8_t>&& data) {
-    if (!ctx || ctx->write_pending || ctx->closing || ctx->magic != SocketContext::MAGIC_VAL) return;
+    if (!ctx || ctx->closing || ctx->magic != SocketContext::MAGIC_VAL) return;
+
+    if (ctx->write_pending) {
+        ctx->write_queue.push(std::move(data));
+        return;
+    }
 
     memset(&ctx->write_io.overlapped, 0, sizeof(OVERLAPPED));
     ctx->write_io.type = IO_WRITE;
@@ -103,6 +108,7 @@ void Worker::post_write(SocketContext* ctx, std::vector<uint8_t>&& data) {
     ctx->wsaWriteBuf.len = (ULONG)ctx->write_io.buf.size();
 
     ctx->pending_io++;
+    ctx->write_pending = true;
 
     DWORD bytes = 0;
     int ret = WSASend(ctx->sock, &ctx->wsaWriteBuf, 1, &bytes, 0, &ctx->write_io.overlapped, NULL);
@@ -113,11 +119,14 @@ void Worker::post_write(SocketContext* ctx, std::vector<uint8_t>&& data) {
             ctx->pending_io--;
             auto on_write = ctx->on_write;
             if (on_write) on_write(-1);
-        } else {
-            ctx->write_pending = true;
+            
+            // Try to send next if any
+            if (!ctx->write_queue.empty()) {
+                std::vector<uint8_t> next_data = std::move(ctx->write_queue.front());
+                ctx->write_queue.pop();
+                post_write(ctx, std::move(next_data));
+            }
         }
-    } else {
-        ctx->write_pending = true;
     }
 }
 
@@ -275,10 +284,6 @@ void Worker::resume_read(SOCKET s) {
     PostQueuedCompletionStatus(m_iocp, 0, 0, NULL);
 }
 
-void Worker::set_periodic_callback(std::function<void(void*)> cb) {
-    m_periodic_callback = cb;
-}
-
 void Worker::set_socket_user_data(SOCKET s, void* user_data) {
     std::lock_guard<std::mutex> lock(m_mtx);
     m_task_queue.push_back([this, s, user_data]() {
@@ -309,22 +314,13 @@ void Worker::loop() {
             }
         }
 
-        DWORD timeout = 10;
+        DWORD timeout = INFINITE;
         {
             std::lock_guard<std::mutex> lock(m_mtx);
             if (!m_task_queue.empty()) timeout = 0;
         }
 
         BOOL ret = GetQueuedCompletionStatus(m_iocp, &bytesTransferred, &completionKey, &overlapped, timeout);
-
-        // Periodic Callback for all sockets
-        if (m_periodic_callback) {
-            for (auto const& [sock, ctx] : m_sockets) {
-                if (ctx && ctx->user_data && !ctx->closing) {
-                    try { m_periodic_callback(ctx->user_data); } catch (...) {}
-                }
-            }
-        }
 
         if (overlapped != NULL) {
             IO_CONTEXT* ioCtx = (IO_CONTEXT*)overlapped;
@@ -385,6 +381,13 @@ void Worker::loop() {
                             ctx->write_pending = false;
                             auto on_write = ctx->on_write;
                             if (on_write) on_write((int)bytesTransferred);
+
+                            // Check write queue
+                            if (!ctx->closing && !ctx->write_queue.empty()) {
+                                std::vector<uint8_t> next_data = std::move(ctx->write_queue.front());
+                                ctx->write_queue.pop();
+                                post_write(ctx, std::move(next_data));
+                            }
                         }
                     } else {
                         // Error completion
@@ -399,6 +402,9 @@ void Worker::loop() {
                             ctx->write_pending = false;
                             auto on_write = ctx->on_write;
                             if (on_write) on_write(-1); 
+
+                            // Still try to clear queue or just let it be? 
+                            // Usually a failed write means the socket is bad.
                         }
                     }
                 } catch (...) {}

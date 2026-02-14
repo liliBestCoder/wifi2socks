@@ -26,8 +26,6 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
       m_original_dest(dest),
       m_worker(nullptr),
       m_is_direct(false),
-      m_client_write_busy(false),
-      m_remote_write_busy(false),
       m_ref_count(0)
 {
     u_long mode = 1;
@@ -48,7 +46,7 @@ ProxyTCP::~ProxyTCP() {
 }
 
 void ProxyTCP::start() {
-    m_worker = WorkerPool::instance().get_worker(m_original_dest.port);
+    m_worker = WorkerPool::instance().get_next_worker();
     if (!m_worker) {
         LOG_ERROR("[ProxyTCP] No available workers. Closing session.");
         close_session();
@@ -60,7 +58,7 @@ void ProxyTCP::start() {
     m_worker->add_socket(
         m_client_socket,
         [self](char* buf, int len, sockaddr_in*) { self->on_client_initial_read(buf, len); },
-        [self](int len) { self->on_client_write(len); }, 
+        nullptr, // No need for on_write callback anymore
         [self]() { self->on_close(); }
     );
 }
@@ -259,12 +257,7 @@ void ProxyTCP::on_client_read(char* buf, int len) {
     TrafficManager::instance().report_proxy_tx(len, m_is_direct);
     
     if (m_state == ESTABLISHED) {
-        if (!m_remote_write_busy) {
-            m_remote_write_busy = true;
-            m_worker->send_async(m_remote_socket, buf, len);
-        } else {
-            m_remote_outbox.insert(m_remote_outbox.end(), buf, buf + len);
-        }
+        m_worker->send_async(m_remote_socket, buf, len);
     } else {
         // Still connecting, buffer the data to be sent once established
         m_initial_buffer.insert(m_initial_buffer.end(), buf, buf + len);
@@ -279,34 +272,14 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
     TrafficManager::instance().report_proxy_rx(len, m_is_direct);
     
     if (m_state == ESTABLISHED) {
-        if (!m_client_write_busy) {
-            m_client_write_busy = true;
-            m_worker->send_async(m_client_socket, buf, len);
-        } else {
-            m_client_outbox.insert(m_client_outbox.end(), buf, buf + len);
-        }
+        m_worker->send_async(m_client_socket, buf, len);
     }
-    // If not established, we shouldn't really be receiving data from remote yet
 }
 
 void ProxyTCP::on_client_write(int len) {
-    if (!m_client_outbox.empty()) {
-        m_worker->send_async(m_client_socket, std::move(m_client_outbox));
-        m_client_outbox.clear();
-        // m_client_write_busy remains true
-    } else {
-        m_client_write_busy = false;
-    }
 }
 
 void ProxyTCP::on_remote_write(int len) {
-    if (!m_remote_outbox.empty()) {
-        m_worker->send_async(m_remote_socket, std::move(m_remote_outbox));
-        m_remote_outbox.clear();
-        // m_remote_write_busy remains true
-    } else {
-        m_remote_write_busy = false;
-    }
 }
 
 void ProxyTCP::on_close() {
