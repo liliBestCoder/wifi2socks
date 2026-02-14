@@ -58,7 +58,7 @@ void ProxyTCP::start() {
     m_worker->add_socket(
         m_client_socket,
         [self](char* buf, int len, sockaddr_in*) { self->on_client_initial_read(buf, len); },
-        nullptr, // No need for on_write callback anymore
+        nullptr, 
         [self]() { self->on_close(); }
     );
 }
@@ -114,8 +114,6 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
         RouteAction rule = RuleManager::instance().match_ip(ip_h);
         
         if (GeoChecker::is_private_ip(ip_h)) {
-            LOG_INFO("[ProxyTCP] Routing DIRECT for private IP: %u.%u.%u.%u", 
-                (ip_h >> 24) & 0xFF, (ip_h >> 16) & 0xFF, (ip_h >> 8) & 0xFF, ip_h & 0xFF);
             m_is_direct = true;
         } else if (rule == RouteAction::DIRECT) {
             m_is_direct = true;
@@ -139,16 +137,17 @@ void ProxyTCP::connect_remote() {
     sockaddr_in remote_addr;
     remote_addr.sin_family = AF_INET;
 
+    char ip_str[INET_ADDRSTRLEN];
+    struct in_addr addr;
+    addr.s_addr = m_original_dest.ip;
+    inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
+
     if (m_is_direct) {
-        char ip_str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &m_original_dest.ip, ip_str, INET_ADDRSTRLEN);
         LOG_INFO("[ProxyTCP] Routing DIRECT for %s (IP: %s)", m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str(), ip_str);
         remote_addr.sin_addr.s_addr = m_original_dest.ip;
         remote_addr.sin_port = m_original_dest.port;
     } else {
-        char ip_str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &m_original_dest.ip, ip_str, INET_ADDRSTRLEN);
-        LOG_INFO("[ProxyTCP] Routing PROXY for %s", m_detected_domain.empty() ? ip_str : m_detected_domain.c_str());
+        LOG_INFO("[ProxyTCP] Routing PROXY for %s (IP: %s)", m_detected_domain.empty() ? "(Domain unknown)" : m_detected_domain.c_str(), ip_str);
         inet_pton(AF_INET, g_config.proxy_ip.c_str(), &remote_addr.sin_addr);
         remote_addr.sin_port = htons(g_config.proxy_port);
     }
@@ -216,7 +215,7 @@ void ProxyTCP::on_remote_connect() {
         m_worker->add_socket(
             m_remote_socket,
             [self](char* buf, int len, sockaddr_in*) { self->on_remote_read(buf, len); },
-            nullptr, // No need for on_write callback
+            nullptr, 
             [self]() { self->on_close(); }
         );
 
@@ -232,7 +231,7 @@ void ProxyTCP::on_remote_connect() {
         m_worker->add_socket(
             m_remote_socket,
             [self](char* buf, int len, sockaddr_in*) { self->on_proxy_connect_response(buf, len); },
-            nullptr, // No need for on_write callback
+            nullptr, 
             [self]() { self->on_close(); }
         );
 
@@ -241,7 +240,9 @@ void ProxyTCP::on_remote_connect() {
         if (!m_detected_domain.empty()) {
             target_host = m_detected_domain;
         } else {
-            inet_ntop(AF_INET, &m_original_dest.ip, ip_str, INET_ADDRSTRLEN);
+            struct in_addr addr;
+            addr.s_addr = m_original_dest.ip;
+            inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
             target_host = ip_str;
         }
 

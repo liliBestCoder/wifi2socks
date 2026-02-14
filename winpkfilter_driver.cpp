@@ -261,7 +261,9 @@ void WinPkFilterDriver::run() {
                     m_read_buffers[i] = PacketPool::instance().acquire();
                     m_read_request->EthPacket[i].Buffer = m_read_buffers[i];
                 }
-            } else has_packets = false;
+            } else {
+                has_packets = false;
+            }
             
             for (auto& p : captured_packets) {
                 char* buffer = (char*)p.data->m_IBuffer;
@@ -419,7 +421,9 @@ void WinPkFilterDriver::run() {
                         }
                         if (!restored) packets_to_send.push_back(std::move(p));
                     }
-                } else { p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p)); }
+                } else { 
+                    p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p)); 
+                }
             }
 
             // Flush batches immediately to reduce latency
