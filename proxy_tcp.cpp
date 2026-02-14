@@ -209,25 +209,43 @@ void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
         return;
     }
 
-    std::string response(buf, len);
-    if (response.find(" 200 ") != std::string::npos) {
-        LOG_INFO("[ProxyTCP] CONNECT tunnel established for %s", m_detected_domain.c_str());
-        m_state = ESTABLISHED;
+    m_proxy_response_buffer.insert(m_proxy_response_buffer.end(), buf, buf + len);
 
-        if (!m_initial_buffer.empty()) {
-            LOG_DEBUG("[ProxyTCP] Sending initial buffer (%zu bytes) to proxy tunnel", m_initial_buffer.size());
-            TrafficManager::instance().report_proxy_tx((int)m_initial_buffer.size(), m_is_direct);
-            WorkerPool::instance().send_async(m_remote_socket, m_initial_buffer.data(), m_initial_buffer.size());
-            m_initial_buffer.clear();
+    const char* crlf2 = "\r\n\r\n";
+    auto it = std::search(m_proxy_response_buffer.begin(), m_proxy_response_buffer.end(), crlf2, crlf2 + 4);
+
+    if (it != m_proxy_response_buffer.end()) {
+        std::string header(m_proxy_response_buffer.begin(), it + 4);
+        
+        // We have the full header, clear the buffer
+        m_proxy_response_buffer.clear();
+
+        if (header.find(" 200 ") != std::string::npos) {
+            LOG_INFO("[ProxyTCP] CONNECT tunnel established for %s", m_detected_domain.c_str());
+            m_state = ESTABLISHED;
+
+            if (!m_initial_buffer.empty()) {
+                LOG_DEBUG("[ProxyTCP] Sending initial buffer (%zu bytes) to proxy tunnel", m_initial_buffer.size());
+                TrafficManager::instance().report_proxy_tx((int)m_initial_buffer.size(), m_is_direct);
+                WorkerPool::instance().send_async(m_remote_socket, m_initial_buffer.data(), m_initial_buffer.size());
+                m_initial_buffer.clear();
+            }
+
+            auto self = shared_from_this();
+            WorkerPool::instance().update_read_callback(m_remote_socket, [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); });
+            // Manually post reads since we are not in the main read loop anymore for this socket
+            for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
+                WorkerPool::instance().read_async(m_remote_socket);
+            }
+
+        } else {
+            if (header.length() > 200) header.resize(200);
+            LOG_ERROR("[ProxyTCP] Proxy CONNECT request failed. Response: %s", header.c_str());
+            close_session();
         }
-
-        auto self = shared_from_this();
-        WorkerPool::instance().update_read_callback(m_remote_socket, [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); });
-
     } else {
-        if (response.length() > 200) response.resize(200);
-        LOG_ERROR("[ProxyTCP] Proxy CONNECT request failed. Response: %s", response.c_str());
-        close_session();
+        // Header not complete, post another read to get more data
+        WorkerPool::instance().read_async(m_remote_socket);
     }
 }
 
@@ -359,8 +377,15 @@ void ProxyTCP::try_send(SOCKET socket) {
 
 void ProxyTCP::on_write_complete(SOCKET socket, int len) {
     if (len <= 0) {
-        LOG_ERROR("[ProxyTCP] Write operation failed or wrote 0 bytes, closing session. Socket: %llu", socket);
-        close_session();
+        LOG_ERROR("[ProxyTCP] Write operation failed or wrote 0 bytes on socket %llu, will retry.", socket);
+        // A write failed. Don't close the session. 
+        // Just reset the flag, leaving the data in the queue.
+        // The next call to try_send will attempt to resend it.
+        if (socket == m_remote_socket) {
+            m_remote_write_in_progress = false;
+        } else if (socket == m_client_socket) {
+            m_client_write_in_progress = false;
+        }
         return;
     }
 
@@ -423,10 +448,15 @@ void ProxyTCP::close_session() {
     if (m_state.exchange(CLOSING) == CLOSING) return;
     
     LOG_INFO("[ProxyTCP] Closing session for %s", m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str());
+
     if (m_client_socket != INVALID_SOCKET) {
-        WorkerPool::instance().remove_socket(m_client_socket);
+        shutdown(m_client_socket, SD_BOTH);
+        closesocket(m_client_socket);
+        m_client_socket = INVALID_SOCKET;
     }
     if (m_remote_socket != INVALID_SOCKET) {
-        WorkerPool::instance().remove_socket(m_remote_socket);
+        shutdown(m_remote_socket, SD_BOTH);
+        closesocket(m_remote_socket);
+        m_remote_socket = INVALID_SOCKET;
     }
 }
