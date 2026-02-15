@@ -11,14 +11,6 @@
 #include <vector>
 #include <algorithm>
 
-// Helper to check for various HTTP methods
-bool is_http_start(const uint8_t* data, size_t len) {
-    if (len < 4) return false;
-    return (memcmp(data, "GET ", 4) == 0 || memcmp(data, "POST ", 5) == 0 || memcmp(data, "HEAD ", 5) == 0 ||
-            memcmp(data, "PUT ", 4) == 0 || memcmp(data, "DELETE ", 7) == 0 || memcmp(data, "CONNECT ", 8) == 0 ||
-            memcmp(data, "OPTIONS ", 8) == 0 || memcmp(data, "TRACE ", 6) == 0);
-}
-
 ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
     : m_state(INITIAL),
       m_client_socket(client_socket),
