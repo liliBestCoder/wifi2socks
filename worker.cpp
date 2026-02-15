@@ -21,6 +21,7 @@ IO_CONTEXT* acquire_io_context() {
     io->task = nullptr;
     io->parent = nullptr;
     io->data_len = 0;
+    io->write_buffer_ptr = nullptr;
     return io;
 }
 
@@ -262,6 +263,16 @@ bool WorkerPool::send_async(SOCKET s, char* buf, int len) {
     return send_async(s, (const uint8_t*)buf, (size_t)len);
 }
 
+bool WorkerPool::send_async(SOCKET s, std::shared_ptr<std::vector<char>> buffer) {
+    if (!buffer || buffer->empty()) return true;
+    auto ctx = find_context(s);
+    if (ctx && !ctx->closing) {
+        post_write(ctx, buffer);
+        return true;
+    }
+    return false;
+}
+
 void WorkerPool::read_async(SOCKET s) {
     IO_CONTEXT* io_task = acquire_io_context();
     io_task->type = IO_TASK;
@@ -333,6 +344,29 @@ void WorkerPool::post_read(const std::shared_ptr<SocketContext>& ctx) {
         release_io_context(io);
     }
 }
+
+void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, std::shared_ptr<std::vector<char>> buffer) {
+    if (!ctx || ctx->closing || !buffer || buffer->empty()) return;
+
+    IO_CONTEXT* io = acquire_io_context();
+    io->type = IO_WRITE;
+    io->sock = ctx->sock;
+    io->parent = ctx;
+    io->write_buffer_ptr = buffer; // Keep the buffer alive
+
+    WSABUF wsaBuf;
+    wsaBuf.buf = buffer->data();
+    wsaBuf.len = (ULONG)buffer->size();
+
+    DWORD bytes = 0;
+    int ret = WSASend(ctx->sock, &wsaBuf, 1, &bytes, 0, &io->overlapped, NULL);
+
+    if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+        if (ctx->on_write) ctx->on_write(-1);
+        release_io_context(io); // This will release the shared_ptr
+    }
+}
+
 
 void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, const uint8_t* data, size_t len) {
     if (!ctx || ctx->closing || len == 0) return;

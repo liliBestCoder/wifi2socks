@@ -333,10 +333,11 @@ void ProxyTCP::on_client_read(char* buf, int len) {
     TrafficManager::instance().report_proxy_tx(len, m_is_direct);
     
     if (m_state == ESTABLISHED) {
+        auto buffer = std::make_shared<std::vector<char>>(buf, buf + len);
         size_t new_size;
         {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-            m_remote_send_queue.emplace_back(buf, buf + len);
+            m_remote_send_queue.push_back(buffer);
             new_size = (m_remote_send_queue_size += len);
         }
 
@@ -364,10 +365,11 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
     TrafficManager::instance().report_proxy_rx(len, m_is_direct);
 
     if (m_state == ESTABLISHED) {
+        auto buffer = std::make_shared<std::vector<char>>(buf, buf + len);
         size_t new_size;
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
-            m_client_send_queue.emplace_back(buf, buf + len);
+            m_client_send_queue.push_back(buffer);
             new_size = (m_client_send_queue_size += len);
         }
         try_send(m_client_socket);
@@ -385,8 +387,8 @@ void ProxyTCP::try_send(SOCKET socket) {
             return;
         }
         m_remote_write_in_progress = true;
-        const auto& buffer_to_send = m_remote_send_queue.front();
-        WorkerPool::instance().send_async(m_remote_socket, (const uint8_t*)buffer_to_send.data(), buffer_to_send.size());
+        auto buffer_to_send = m_remote_send_queue.front();
+        WorkerPool::instance().send_async(m_remote_socket, buffer_to_send);
 
     } else if (socket == m_client_socket) {
         std::lock_guard<std::mutex> lock(m_client_queue_mutex);
@@ -394,8 +396,8 @@ void ProxyTCP::try_send(SOCKET socket) {
             return;
         }
         m_client_write_in_progress = true;
-        const auto& buffer_to_send = m_client_send_queue.front();
-        WorkerPool::instance().send_async(m_client_socket, (const uint8_t*)buffer_to_send.data(), buffer_to_send.size());
+        auto buffer_to_send = m_client_send_queue.front();
+        WorkerPool::instance().send_async(m_client_socket, buffer_to_send);
     }
 }
 

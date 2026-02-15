@@ -55,12 +55,12 @@ private:
     void on_write_complete(SOCKET socket, int len);
 
     // Client -> Remote data flow
-    std::deque<std::vector<char>> m_client_send_queue;
+    std::deque<std::shared_ptr<std::vector<char>>> m_client_send_queue;
     std::atomic<bool> m_client_write_in_progress{false};
     std::mutex m_client_queue_mutex;
 
     // Remote -> Client data flow
-    std::deque<std::vector<char>> m_remote_send_queue;
+    std::deque<std::shared_ptr<std::vector<char>>> m_remote_send_queue;
     std::atomic<bool> m_remote_write_in_progress{false};
     std::mutex m_remote_queue_mutex;
 

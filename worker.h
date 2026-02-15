@@ -38,6 +38,7 @@ struct IO_CONTEXT {
     sockaddr_in remote_addr;
     int remote_addr_len;
     std::shared_ptr<SocketContext> parent;
+    std::shared_ptr<std::vector<char>> write_buffer_ptr;
 
     IO_CONTEXT() : type(IO_READ), sock(INVALID_SOCKET), data_len(0), remote_addr_len(0), parent(nullptr) {
         memset(&overlapped, 0, sizeof(OVERLAPPED));
@@ -93,6 +94,7 @@ public:
                       std::function<void(int)> on_write = nullptr);
     bool send_async(SOCKET s, const uint8_t* data, size_t len);
     bool send_async(SOCKET s, char* buf, int len);
+    bool send_async(SOCKET s, std::shared_ptr<std::vector<char>> buffer);
     void read_async(SOCKET s);
     void update_read_callback(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read);
     void queue_task(std::function<void()> task);
@@ -120,6 +122,7 @@ private:
     // 内部方法
     void post_read(const std::shared_ptr<SocketContext>& ctx);
     void post_write(const std::shared_ptr<SocketContext>& ctx, const uint8_t* data, size_t len);
+    void post_write(const std::shared_ptr<SocketContext>& ctx, std::shared_ptr<std::vector<char>> buffer);
     void register_context(SOCKET s, std::shared_ptr<SocketContext> ctx);
     void unregister_context(SOCKET s);
 };
