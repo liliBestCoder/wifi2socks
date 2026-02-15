@@ -6,6 +6,7 @@
 
 #include <ws2tcpip.h>
 #include <mswsock.h>
+#include <algorithm>
 
 
 DnsOverTcpProxy::DnsOverTcpProxy(const std::vector<uint8_t>& query_payload, ResponseCallback callback)
@@ -90,30 +91,41 @@ void DnsOverTcpProxy::on_read(char* buf, int len) {
         return;
     }
 
+    m_read_buffer.insert(m_read_buffer.end(), buf, buf + len);
+    TrafficManager::instance().report_proxy_rx(len, false);
+
     if (m_state == HTTP_CONNECT_SENT) {
-        std::string resp(buf, len);
-        if (resp.find(" 200 ") != std::string::npos) {
-            send_dns_query();
-        } else {
-            LOG_ERROR("[DoT] Proxy CONNECT failed: %s", resp.c_str());
-            on_close();
+        const char* crlf2 = "\r\n\r\n";
+        auto it = std::search(m_read_buffer.begin(), m_read_buffer.end(), crlf2, crlf2 + 4);
+
+        if (it != m_read_buffer.end()) {
+            std::string header(m_read_buffer.begin(), it);
+            if (header.find(" 200 ") != std::string::npos) {
+                m_read_buffer.erase(m_read_buffer.begin(), it + 4);
+                send_dns_query();
+            } else {
+                LOG_ERROR("[DoT] Proxy CONNECT failed: %s", header.c_str());
+                on_close();
+                return;
+            }
         }
-    } else if (m_state == DNS_QUERY) {
-        handle_dns_response(buf, len);
+    }
+    
+    if (m_state == DNS_QUERY) {
+        handle_dns_response();
     }
 }
 
-void DnsOverTcpProxy::handle_dns_response(const char* buf, int len) {
-    TrafficManager::instance().report_proxy_rx(len, false);
-    m_read_buffer.insert(m_read_buffer.end(), buf, buf + len);
-
-    while (true) {
+void DnsOverTcpProxy::handle_dns_response() {
+    while (m_state == DNS_QUERY && !m_read_buffer.empty()) {
         if (!m_len_received) {
             if (m_read_buffer.size() >= 2) {
                 m_expected_len = ntohs(*(uint16_t*)m_read_buffer.data());
                 m_len_received = true;
                 m_read_buffer.erase(m_read_buffer.begin(), m_read_buffer.begin() + 2);
-            } else break;
+            } else {
+                break;
+            }
         }
 
         if (m_len_received) {

@@ -24,7 +24,7 @@ private:
 
     void send_http_connect();
     void send_dns_query();
-    void handle_dns_response(const char* buf, int len);
+    void handle_dns_response();
 
     enum State {
         CONNECTING,

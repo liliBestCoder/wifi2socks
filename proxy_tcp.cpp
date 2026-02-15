@@ -109,10 +109,16 @@ void ProxyTCP::connect_remote() {
     sockaddr_in remote_addr = {0};
     remote_addr.sin_family = AF_INET;
 
+    char ip_str[INET_ADDRSTRLEN];
+    struct in_addr addr = {m_original_dest.ip};
+    inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
+
     if (m_is_direct) {
+        LOG_INFO("[ProxyTCP] Routing DIRECT for %s (IP: %s)", m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str(), ip_str);
         remote_addr.sin_addr.s_addr = m_original_dest.ip;
         remote_addr.sin_port = m_original_dest.port;
     } else {
+        LOG_INFO("[ProxyTCP] Routing PROXY for %s (IP: %s)", m_detected_domain.empty() ? "(Domain unknown)" : m_detected_domain.c_str(), ip_str);
         inet_pton(AF_INET, g_config.proxy_ip.c_str(), &remote_addr.sin_addr);
         remote_addr.sin_port = htons(g_config.proxy_port);
     }
