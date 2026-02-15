@@ -54,6 +54,7 @@ bool load_config(const char* filepath) {
             else if (key == "tap_mac") g_config.tap_mac = value;
             else if (key == "proxy_ip") g_config.proxy_ip = value;
             else if (key == "proxy_port") g_config.proxy_port = (uint16_t)std::stoi(value);
+            else if (key == "proxy_dns_server") g_config.proxy_dns_server = value;
             else if (key == "direct_dns_server") g_config.direct_dns_server = value;
             else if (key == "lwip_listen_port") g_config.lwip_listen_port = (uint16_t)std::stoi(value);
             else if (key == "max_sni_len") g_config.max_sni_len = (uint32_t)std::stoul(value);
@@ -97,6 +98,7 @@ bool save_config(const char* filepath) {
 
     file << "proxy_ip = " << g_config.proxy_ip << "\n";
     file << "proxy_port = " << g_config.proxy_port << "\n";
+    file << "proxy_dns_server = " << g_config.proxy_dns_server << "\n";
     file << "direct_dns_server = " << g_config.direct_dns_server << "\n\n";
 
     file << "lwip_listen_port = " << g_config.lwip_listen_port << "\n";
