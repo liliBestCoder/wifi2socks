@@ -414,14 +414,12 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
     auto self = shared_from_this();
     if (socket == m_remote_socket) {
         size_t new_size;
-        size_t sent_size = 0;
         {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
             if (!m_remote_send_queue.empty()) {
-                sent_size = m_remote_send_queue.front()->size();
                 m_remote_send_queue.pop_front();
             }
-            new_size = (m_remote_send_queue_size -= sent_size);
+            new_size = (m_remote_send_queue_size -= len);
             m_remote_write_in_progress = false;
         }
 
@@ -438,14 +436,12 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
 
     } else if (socket == m_client_socket) {
         size_t new_size;
-        size_t sent_size = 0;
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
             if (!m_client_send_queue.empty()) {
-                sent_size = m_client_send_queue.front()->size();
                 m_client_send_queue.pop_front();
             }
-            new_size = (m_client_send_queue_size -= sent_size);
+            new_size = (m_client_send_queue_size -= len);
             m_client_write_in_progress = false;
         }
 
