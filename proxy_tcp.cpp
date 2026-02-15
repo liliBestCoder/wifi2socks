@@ -252,10 +252,8 @@ void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
 
             auto self = shared_from_this();
             WorkerPool::instance().update_read_callback(m_remote_socket, [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); });
-            // Manually post reads since we are not in the main read loop anymore for this socket
-            for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
-                WorkerPool::instance().read_async(m_remote_socket);
-            }
+            // Manually post a single read since we are not in the main read loop anymore for this socket
+            WorkerPool::instance().read_async(m_remote_socket);
 
         } else {
             if (header.length() > 200) header.resize(200);
@@ -293,9 +291,7 @@ void ProxyTCP::on_remote_connect() {
         }
 
         // Start reading from the remote for direct connections
-        for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
-            WorkerPool::instance().read_async(m_remote_socket);
-        }
+        WorkerPool::instance().read_async(m_remote_socket);
     } else {
         m_state = AWAITING_CONNECT_RESPONSE;
 
@@ -432,9 +428,7 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
         if (m_client_read_paused && new_size < LOW_WATER_MARK) {
             if (m_client_read_paused.exchange(false)) {
                  LOG_DEBUG("[ProxyTCP] Backpressure relieved on client read. Queue size: %zu", new_size);
-                for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
-                    WorkerPool::instance().read_async(m_client_socket);
-                }
+                WorkerPool::instance().read_async(m_client_socket);
             }
         }
         
@@ -458,9 +452,7 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
         if (m_remote_read_paused && new_size < LOW_WATER_MARK) {
             if (m_remote_read_paused.exchange(false)) {
                 LOG_DEBUG("[ProxyTCP] Backpressure relieved on remote read. Queue size: %zu", new_size);
-                for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
-                    WorkerPool::instance().read_async(m_remote_socket);
-                }
+                WorkerPool::instance().read_async(m_remote_socket);
             }
         }
         
