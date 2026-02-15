@@ -291,6 +291,11 @@ void ProxyTCP::on_remote_connect() {
             WorkerPool::instance().send_async(m_remote_socket, m_initial_buffer.data(), m_initial_buffer.size());
             m_initial_buffer.clear();
         }
+
+        // Start reading from the remote for direct connections
+        for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
+            WorkerPool::instance().read_async(m_remote_socket);
+        }
     } else {
         m_state = AWAITING_CONNECT_RESPONSE;
 
