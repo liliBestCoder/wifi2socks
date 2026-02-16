@@ -46,6 +46,9 @@ private:
 
     std::vector<char> m_proxy_response_buffer; // Buffer for proxy CONNECT response
     
+    std::vector<uint8_t> m_initial_buffer; // Buffer for data received before ESTABLISHED
+    std::mutex m_initial_buffer_mutex;
+    
     std::string m_detected_domain;
     bool m_is_direct;
 

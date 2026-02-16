@@ -96,12 +96,18 @@ void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
         m_proxy_response_buffer.clear();
         if (header.find(" 200 ") != std::string::npos) {
             m_state = ESTABLISHED;
-            // Data is already in m_remote_send_queue, just try to send it.
+            
+            // Connection is established. Try to send any buffered data.
             try_send(m_remote_socket);
 
+            // Switch the read callback on the remote socket to the standard data handler
+            // and start the read loops for both directions.
             auto self = shared_from_this();
             WorkerPool::instance().update_read_callback(m_remote_socket, [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); });
             WorkerPool::instance().read_async(m_remote_socket);
+            if (!m_client_read_paused) {
+                WorkerPool::instance().read_async(m_client_socket);
+            }
         } else {
             close_session();
         }
@@ -118,10 +124,15 @@ void ProxyTCP::on_remote_connect() {
 
     if (m_is_direct) {
         m_state = ESTABLISHED;
-        // Data is already in m_remote_send_queue, just try to send it.
+        
+        // Connection is established. Try to send any buffered data.
         try_send(m_remote_socket);
 
+        // Start read loops for both directions.
         WorkerPool::instance().read_async(m_remote_socket);
+        if (!m_client_read_paused) {
+            WorkerPool::instance().read_async(m_client_socket);
+        }
     } else {
         m_state = AWAITING_CONNECT_RESPONSE;
         std::string target_host = m_detected_domain;
@@ -145,49 +156,47 @@ void ProxyTCP::on_client_read(char* buf, int len) {
         return;
     }
 
-    // Per your design, all data goes directly into the remote-bound queue first.
-    auto buffer = std::make_shared<std::vector<char>>(buf, buf + len);
+    // --- Dual-Write Logic ---
+    // 1. Always write to the main queue for eventual forwarding.
+    auto buffer_for_queue = std::make_shared<std::vector<char>>(buf, buf + len);
     {
         std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-        m_remote_send_queue.push_back(buffer);
+        m_remote_send_queue.push_back(buffer_for_queue);
         m_remote_send_queue_size += len;
     }
 
+    // 2. In INITIAL state, also write to the contiguous buffer for parsing.
+    if (m_state == INITIAL) {
+        std::lock_guard<std::mutex> lock(m_initial_buffer_mutex);
+        m_initial_buffer.insert(m_initial_buffer.end(), (const uint8_t*)buf, (const uint8_t*)buf + len);
+    }
+    // --- End of Dual-Write ---
+
+
     // --- State Machine ---
     if (m_state == INITIAL) {
-        // Peek data from the queue to parse SNI, without consuming it yet.
-        std::vector<uint8_t> temp_contiguous_buffer;
+        bool proceed = false;
+        std::string sni;
+
         {
-            std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-            size_t current_size = 0;
-            // This is inefficient but necessary for parsing functions that need contiguous memory.
-            // It only happens once at the beginning of a connection.
-            for (const auto& chunk : m_remote_send_queue) {
-                temp_contiguous_buffer.insert(temp_contiguous_buffer.end(), chunk->begin(), chunk->end());
-                current_size += chunk->size();
-                if (current_size >= 8192) { // A reasonable limit for SNI parsing.
-                    break;
+            std::lock_guard<std::mutex> lock(m_initial_buffer_mutex);
+            sni = parse_tls_sni(m_initial_buffer.data(), m_initial_buffer.size());
+            if (!sni.empty()) {
+                proceed = true;
+            }
+            else {
+                std::string host = parse_http_host(m_initial_buffer.data(), m_initial_buffer.size());
+                if (!host.empty()) {
+                    sni = host;
+                    proceed = true;
+                }
+                // If we still can't determine the domain, check if we have received too much data.
+                else if (m_initial_buffer.size() >= 4096) {
+                    proceed = true; // Give up parsing and proceed with IP-based routing.
                 }
             }
         }
 
-        bool proceed = false;
-        std::string sni;
-
-        sni = parse_tls_sni(temp_contiguous_buffer.data(), temp_contiguous_buffer.size());
-        if (!sni.empty()) {
-            proceed = true;
-        }
-        else {
-            std::string host = parse_http_host(temp_contiguous_buffer.data(), temp_contiguous_buffer.size());
-            if (!host.empty()) {
-                sni = host;
-                proceed = true;
-            }
-            else if (temp_contiguous_buffer.size() >= 4096) {
-                proceed = true;
-            }
-        }
 
         if (proceed) {
             // Routing
@@ -212,11 +221,17 @@ void ProxyTCP::on_client_read(char* buf, int len) {
                 else { m_is_direct = GeoChecker::instance().is_cn_ip(ip_h); }
             }
             
+            // "Burn after reading": Clear the initial buffer as its purpose is served.
+            {
+                std::lock_guard<std::mutex> lock(m_initial_buffer_mutex);
+                m_initial_buffer.clear();
+            }
+
             // Change state and connect.
             m_state = CONNECTING;
             connect_remote();
         }
-        // If not enough data, just wait for the next read event.
+        // If not enough data and not proceeding, just wait for the next read event.
     }
     else if (m_state == ESTABLISHED) {
         try_send(m_remote_socket);
