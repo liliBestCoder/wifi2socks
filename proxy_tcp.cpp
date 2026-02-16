@@ -51,26 +51,32 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
     m_initial_buffer.insert(m_initial_buffer.end(), (const uint8_t*)buf, (const uint8_t*)buf + len);
     size_t max_buf_len = (g_config.max_sni_len > 0) ? g_config.max_sni_len : 16384;
 
-    bool ready = false;
-    if (m_initial_buffer.size() >= 5 && m_initial_buffer[0] == 0x16) { // TLS
-        uint16_t tls_len = ((uint16_t)m_initial_buffer[3] << 8) | m_initial_buffer[4];
-        if (m_initial_buffer.size() >= (size_t)5 + tls_len) ready = true;
-    }
-    else if (is_http_start(m_initial_buffer.data(), m_initial_buffer.size())) { // HTTP
-        std::string host = parse_http_host(m_initial_buffer.data(), m_initial_buffer.size());
-        if (!host.empty() || m_initial_buffer.size() > 1024) ready = true;
-    }
-    else if (m_initial_buffer.size() > 64) { // Unknown
-        ready = true;
-    }
-
-    if (!ready && m_initial_buffer.size() < max_buf_len) {
-        WorkerPool::instance().read_async(m_client_socket);
-        return;
-    }
-
+    bool proceed = false;
     std::string sni = parse_tls_sni(m_initial_buffer.data(), m_initial_buffer.size());
-    if (sni.empty()) sni = parse_http_host(m_initial_buffer.data(), m_initial_buffer.size());
+
+    if (!sni.empty()) {
+        proceed = true;
+    }
+    else {
+        std::string host = parse_http_host(m_initial_buffer.data(), m_initial_buffer.size());
+        if (!host.empty()) {
+            sni = host;
+            proceed = true;
+        }
+        else if (m_initial_buffer.size() >= 4096) { 
+            proceed = true;
+        }
+    }
+
+    if (!proceed) {
+        if (m_initial_buffer.size() < max_buf_len) {
+            WorkerPool::instance().read_async(m_client_socket);
+            return;
+        }
+        else {
+            proceed = true;
+        }
+    }
 
     if (!sni.empty()) {
         m_detected_domain = sni;
