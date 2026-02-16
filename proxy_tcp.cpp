@@ -109,8 +109,9 @@ void ProxyTCP::connect_remote() {
     sockaddr_in remote_addr = {0};
     remote_addr.sin_family = AF_INET;
 
-    char ip_str[INET_ADDRSTRLEN];
-    struct in_addr addr = {m_original_dest.ip};
+    char ip_str[INET_ADDRSTRLEN] = {0};
+    struct in_addr addr;
+    addr.s_addr = m_original_dest.ip;
     inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
 
     if (m_is_direct) {
@@ -199,8 +200,9 @@ void ProxyTCP::on_remote_connect() {
         m_state = AWAITING_CONNECT_RESPONSE;
         std::string target_host = m_detected_domain;
         if (target_host.empty()) {
-            char ip_str[INET_ADDRSTRLEN];
-            struct in_addr addr = {m_original_dest.ip};
+            char ip_str[INET_ADDRSTRLEN] = {0};
+            struct in_addr addr;
+            addr.s_addr = m_original_dest.ip;
             inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
             target_host = ip_str;
         }
