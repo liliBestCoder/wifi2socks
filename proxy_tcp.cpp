@@ -48,13 +48,8 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
         return;
     }
 
+    m_initial_buffer.insert(m_initial_buffer.end(), (const uint8_t*)buf, (const uint8_t*)buf + len);
     size_t max_buf_len = (g_config.max_sni_len > 0) ? g_config.max_sni_len : 16384;
-    if (m_initial_buffer.size() + len > max_buf_len) {
-        len = (int)(max_buf_len - m_initial_buffer.size());
-    }
-    if (len > 0) {
-        m_initial_buffer.insert(m_initial_buffer.end(), (const uint8_t*)buf, (const uint8_t*)buf + len);
-    }
 
     bool ready = false;
     if (m_initial_buffer.size() >= 5 && m_initial_buffer[0] == 0x16) { // TLS
