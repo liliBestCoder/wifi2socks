@@ -111,7 +111,7 @@ void DnsOverTcpProxy::on_read(char* buf, int len) {
         }
     }
     
-    if (m_state == DNS_QUERY) {
+    else if (m_state == DNS_QUERY) {
         handle_dns_response();
     }
 
@@ -135,6 +135,11 @@ void DnsOverTcpProxy::handle_dns_response() {
         if (m_len_received) {
             if (m_read_buffer.size() >= m_expected_len) {
                 m_callback((const char*)m_read_buffer.data(), m_expected_len);
+
+                m_read_buffer.erase(m_read_buffer.begin(), m_read_buffer.begin() + m_expected_len);
+                m_len_received = false;
+                m_expected_len = 0;
+
                 on_close();
                 break;
             } else {
