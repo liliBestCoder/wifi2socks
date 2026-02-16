@@ -165,9 +165,8 @@ void ProxyTCP::on_client_read(char* buf, int len) {
         m_remote_send_queue_size += len;
     }
 
-    // 2. In INITIAL state, also write to the contiguous buffer for parsing.
+    // 2. In INITIAL state, also write to the contiguous buffer for parsing (no lock needed).
     if (m_state == INITIAL) {
-        std::lock_guard<std::mutex> lock(m_initial_buffer_mutex);
         m_initial_buffer.insert(m_initial_buffer.end(), (const uint8_t*)buf, (const uint8_t*)buf + len);
     }
     // --- End of Dual-Write ---
@@ -180,9 +179,8 @@ void ProxyTCP::on_client_read(char* buf, int len) {
 
         // Per user's suggestion, the lock is removed as this is single-threaded.
         // Also, cache data and size to avoid repeated calls.
-        const auto& buf_ref = m_initial_buffer;
-        const auto* buf_data = buf_ref.data();
-        const auto buf_size = buf_ref.size();
+        const auto* buf_data = m_initial_buffer.data();
+        const auto buf_size = m_initial_buffer.size();
 
         sni = parse_tls_sni(buf_data, buf_size);
         if (!sni.empty()) {
@@ -224,7 +222,7 @@ void ProxyTCP::on_client_read(char* buf, int len) {
                 else { m_is_direct = GeoChecker::instance().is_cn_ip(ip_h); }
             }
             
-            // "Burn after reading": Clear the initial buffer as its purpose is served.
+            // "Burn after reading": Clear the initial buffer (no lock needed).
             m_initial_buffer.clear();
 
             // Change state and connect.
