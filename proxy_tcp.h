@@ -21,7 +21,6 @@ public:
     void start();
 
 private:
-    void on_client_initial_read(char* buf, int len);
     void connect_remote();
     void on_remote_connect();
     void on_proxy_connect_response(char* buf, int len);
@@ -45,8 +44,6 @@ private:
     SOCKET m_remote_socket;
     OriginalDestination m_original_dest;
 
-    std::vector<uint8_t> m_initial_buffer; // Buffer for data received before ESTABLISHED
-    std::mutex m_initial_buffer_mutex;
     std::vector<char> m_proxy_response_buffer; // Buffer for proxy CONNECT response
     
     std::string m_detected_domain;

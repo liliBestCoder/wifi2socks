@@ -36,74 +36,13 @@ void ProxyTCP::start() {
     auto self = shared_from_this();
     WorkerPool::instance().add_socket(
         m_client_socket,
-        [self](char* buf, int len, sockaddr_in*) { self->on_client_initial_read(buf, len); },
+        [self](char* buf, int len, sockaddr_in*) { self->on_client_read(buf, len); },
         [self](int len) { self->on_write_complete(self->m_client_socket, len); },
         false
     );
 }
 
-void ProxyTCP::on_client_initial_read(char* buf, int len) {
-    if (len <= 0) {
-        close_session();
-        return;
-    }
 
-    m_initial_buffer.insert(m_initial_buffer.end(), (const uint8_t*)buf, (const uint8_t*)buf + len);
-    size_t max_buf_len = (g_config.max_sni_len > 0) ? g_config.max_sni_len : 16384;
-
-    bool proceed = false;
-    std::string sni = parse_tls_sni(m_initial_buffer.data(), m_initial_buffer.size());
-
-    if (!sni.empty()) {
-        proceed = true;
-    }
-    else {
-        std::string host = parse_http_host(m_initial_buffer.data(), m_initial_buffer.size());
-        if (!host.empty()) {
-            sni = host;
-            proceed = true;
-        }
-        else if (m_initial_buffer.size() >= 4096) { 
-            proceed = true;
-        }
-    }
-
-    if (!proceed) {
-        if (m_initial_buffer.size() < max_buf_len) {
-            WorkerPool::instance().read_async(m_client_socket);
-            return;
-        }
-        else {
-            proceed = true;
-        }
-    }
-
-    if (!sni.empty()) {
-        m_detected_domain = sni;
-        RouteAction rule = RuleManager::instance().match_domain(sni);
-        if (rule == RouteAction::DIRECT) m_is_direct = true;
-        else if (rule == RouteAction::PROXY) m_is_direct = false;
-        else if (rule == RouteAction::BLOCK) { close_session(); return; }
-        else {
-            m_is_direct = GeoChecker::instance().is_cn_domain(sni);
-            if (!m_is_direct) {
-                if (GeoChecker::instance().is_cn_ip(ntohl(m_original_dest.ip))) m_is_direct = true;
-            }
-        }
-    } else {
-        uint32_t ip_h = ntohl(m_original_dest.ip);
-        RouteAction rule = RuleManager::instance().match_ip(ip_h);
-        if (GeoChecker::is_private_ip(ip_h) || rule == RouteAction::DIRECT) m_is_direct = true;
-        else if (rule == RouteAction::PROXY) m_is_direct = false;
-        else if (rule == RouteAction::BLOCK) { close_session(); return; }
-        else { m_is_direct = GeoChecker::instance().is_cn_ip(ip_h); }
-    }
-    
-    auto self = shared_from_this();
-    WorkerPool::instance().update_read_callback(m_client_socket, [self](char* b, int l, sockaddr_in*) { self->on_client_read(b, l); });
-    connect_remote();
-    WorkerPool::instance().read_async(m_client_socket);
-}
 
 void ProxyTCP::connect_remote() {
     m_state = CONNECTING;
@@ -157,19 +96,9 @@ void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
         m_proxy_response_buffer.clear();
         if (header.find(" 200 ") != std::string::npos) {
             m_state = ESTABLISHED;
-            {
-                std::lock_guard<std::mutex> lock(m_initial_buffer_mutex);
-                if (!m_initial_buffer.empty()) {
-                    auto buffer = std::make_shared<std::vector<char>>(m_initial_buffer.begin(), m_initial_buffer.end());
-                    {
-                        std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-                        m_remote_send_queue.push_back(buffer);
-                        m_remote_send_queue_size += buffer->size();
-                    }
-                    m_initial_buffer.clear();
-                    try_send(m_remote_socket);
-                }
-            }
+            // Data is already in m_remote_send_queue, just try to send it.
+            try_send(m_remote_socket);
+
             auto self = shared_from_this();
             WorkerPool::instance().update_read_callback(m_remote_socket, [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); });
             WorkerPool::instance().read_async(m_remote_socket);
@@ -189,19 +118,9 @@ void ProxyTCP::on_remote_connect() {
 
     if (m_is_direct) {
         m_state = ESTABLISHED;
-        {
-            std::lock_guard<std::mutex> lock(m_initial_buffer_mutex);
-            if (!m_initial_buffer.empty()) {
-                auto buffer = std::make_shared<std::vector<char>>(m_initial_buffer.begin(), m_initial_buffer.end());
-                {
-                    std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-                    m_remote_send_queue.push_back(buffer);
-                    m_remote_send_queue_size += buffer->size();
-                }
-                m_initial_buffer.clear();
-                try_send(m_remote_socket);
-            }
-        }
+        // Data is already in m_remote_send_queue, just try to send it.
+        try_send(m_remote_socket);
+
         WorkerPool::instance().read_async(m_remote_socket);
     } else {
         m_state = AWAITING_CONNECT_RESPONSE;
@@ -221,26 +140,96 @@ void ProxyTCP::on_remote_connect() {
 }
 
 void ProxyTCP::on_client_read(char* buf, int len) {
-    if (len <= 0) { close_session(); return; }
-    
-    if (m_state == ESTABLISHED) {
-        auto buffer = std::make_shared<std::vector<char>>(buf, buf + len);
-        size_t new_size;
-        {
-            std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-            m_remote_send_queue.push_back(buffer);
-            new_size = (m_remote_send_queue_size += len);
-        }
-        try_send(m_remote_socket);
-        if (new_size > HIGH_WATER_MARK && !m_client_read_paused.exchange(true)) {
-            // LOG_DEBUG("[ProxyTCP] Backpressure applied on client read.");
-        }
-    } else {
-        std::lock_guard<std::mutex> lock(m_initial_buffer_mutex);
-        m_initial_buffer.insert(m_initial_buffer.end(), (uint8_t*)buf, (uint8_t*)buf + len);
+    if (len <= 0) {
+        close_session();
+        return;
     }
 
-    if (!m_client_read_paused) WorkerPool::instance().read_async(m_client_socket);
+    // Per your design, all data goes directly into the remote-bound queue first.
+    auto buffer = std::make_shared<std::vector<char>>(buf, buf + len);
+    {
+        std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
+        m_remote_send_queue.push_back(buffer);
+        m_remote_send_queue_size += len;
+    }
+
+    // --- State Machine ---
+    if (m_state == INITIAL) {
+        // Peek data from the queue to parse SNI, without consuming it yet.
+        std::vector<uint8_t> temp_contiguous_buffer;
+        {
+            std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
+            size_t current_size = 0;
+            // This is inefficient but necessary for parsing functions that need contiguous memory.
+            // It only happens once at the beginning of a connection.
+            for (const auto& chunk : m_remote_send_queue) {
+                temp_contiguous_buffer.insert(temp_contiguous_buffer.end(), chunk->begin(), chunk->end());
+                current_size += chunk->size();
+                if (current_size >= 8192) { // A reasonable limit for SNI parsing.
+                    break;
+                }
+            }
+        }
+
+        bool proceed = false;
+        std::string sni;
+
+        sni = parse_tls_sni(temp_contiguous_buffer.data(), temp_contiguous_buffer.size());
+        if (!sni.empty()) {
+            proceed = true;
+        }
+        else {
+            std::string host = parse_http_host(temp_contiguous_buffer.data(), temp_contiguous_buffer.size());
+            if (!host.empty()) {
+                sni = host;
+                proceed = true;
+            }
+            else if (temp_contiguous_buffer.size() >= 4096) {
+                proceed = true;
+            }
+        }
+
+        if (proceed) {
+            // Routing
+            if (!sni.empty()) {
+                m_detected_domain = sni;
+                RouteAction rule = RuleManager::instance().match_domain(sni);
+                if (rule == RouteAction::DIRECT) m_is_direct = true;
+                else if (rule == RouteAction::PROXY) m_is_direct = false;
+                else if (rule == RouteAction::BLOCK) { close_session(); return; }
+                else {
+                    m_is_direct = GeoChecker::instance().is_cn_domain(sni);
+                    if (!m_is_direct && GeoChecker::instance().is_cn_ip(ntohl(m_original_dest.ip))) {
+                        m_is_direct = true;
+                    }
+                }
+            } else {
+                uint32_t ip_h = ntohl(m_original_dest.ip);
+                RouteAction rule = RuleManager::instance().match_ip(ip_h);
+                if (GeoChecker::is_private_ip(ip_h) || rule == RouteAction::DIRECT) m_is_direct = true;
+                else if (rule == RouteAction::PROXY) m_is_direct = false;
+                else if (rule == RouteAction::BLOCK) { close_session(); return; }
+                else { m_is_direct = GeoChecker::instance().is_cn_ip(ip_h); }
+            }
+            
+            // Change state and connect.
+            m_state = CONNECTING;
+            connect_remote();
+        }
+        // If not enough data, just wait for the next read event.
+    }
+    else if (m_state == ESTABLISHED) {
+        try_send(m_remote_socket);
+        if (m_remote_send_queue_size > HIGH_WATER_MARK && !m_client_read_paused.exchange(true)) {
+            // LOG_DEBUG("[ProxyTCP] Backpressure applied on client read.");
+        }
+    } 
+    // For CONNECTING or AWAITING_PROXY_RESPONSE, we just buffer. Data is already in the queue.
+
+    // Continue the read loop unless paused.
+    if (!m_client_read_paused) {
+        WorkerPool::instance().read_async(m_client_socket);
+    }
 }
 
 void ProxyTCP::on_remote_read(char* buf, int len) {
