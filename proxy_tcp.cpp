@@ -276,8 +276,7 @@ void ProxyTCP::try_send(SOCKET socket) {
 
 void ProxyTCP::on_write_complete(SOCKET socket, int len) {
     if (len <= 0) {
-        if (socket == m_remote_socket) m_remote_write_in_progress = false;
-        else if (socket == m_client_socket) m_client_write_in_progress = false;
+        close_session();
         return;
     }
 
