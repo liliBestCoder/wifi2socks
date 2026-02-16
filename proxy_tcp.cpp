@@ -109,10 +109,9 @@ void ProxyTCP::connect_remote() {
     sockaddr_in remote_addr = {0};
     remote_addr.sin_family = AF_INET;
 
-    char ip_str[INET_ADDRSTRLEN] = {0};
-    struct in_addr addr;
-    addr.s_addr = m_original_dest.ip;
-    inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
+    unsigned char* ip_bytes = (unsigned char*)&m_original_dest.ip;
+    char ip_str[INET_ADDRSTRLEN];
+    snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
 
     if (m_is_direct) {
         LOG_INFO("[ProxyTCP] Routing DIRECT for %s (IP: %s)", m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str(), ip_str);
@@ -200,10 +199,9 @@ void ProxyTCP::on_remote_connect() {
         m_state = AWAITING_CONNECT_RESPONSE;
         std::string target_host = m_detected_domain;
         if (target_host.empty()) {
-            char ip_str[INET_ADDRSTRLEN] = {0};
-            struct in_addr addr;
-            addr.s_addr = m_original_dest.ip;
-            inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
+            unsigned char* ip_bytes = (unsigned char*)&m_original_dest.ip;
+            char ip_str[INET_ADDRSTRLEN];
+            snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
             target_host = ip_str;
         }
         uint16_t target_port = ntohs(m_original_dest.port);

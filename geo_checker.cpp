@@ -270,7 +270,7 @@ std::string GeoChecker::query_domain(const std::string& domain) {
         pos = next_dot + 1;
     }
     for (const auto& kv : domain_keyword_) if (d.find(kv.keyword) != std::string::npos) return geosite_codes_[kv.code_index];
-    for (const auto& kv : domain_regex_) if (std::regex_search(d, kv.reg)) return geosite_codes_[kv.code_index];
+    // for (const auto& kv : domain_regex_) if (std::regex_search(d, kv.reg)) return geosite_codes_[kv.code_index];
     return "UNKNOWN";
 }
 
@@ -293,7 +293,7 @@ bool GeoChecker::is_cn_domain(const std::string& domain) {
         pos = next_dot + 1;
     }
     for (const auto& kv : domain_keyword_) if ((kv.flags & (FLAG_CN >> 16)) && d.find(kv.keyword) != std::string::npos) return true;
-    for (const auto& kv : domain_regex_) if ((kv.flags & (FLAG_CN >> 16)) && std::regex_search(d, kv.reg)) return true;
+    // for (const auto& kv : domain_regex_) if ((kv.flags & (FLAG_CN >> 16)) && std::regex_search(d, kv.reg)) return true;
     
     if (d.length() > 3 && d.substr(d.length() - 3) == ".cn") return true;
 
@@ -320,7 +320,7 @@ bool GeoChecker::is_google_domain(const std::string& domain) {
     }
     
     for (const auto& kv : domain_keyword_) if ((kv.flags & (FLAG_GOOGLE >> 16)) && d.find(kv.keyword) != std::string::npos) return true;
-    for (const auto& kv : domain_regex_) if ((kv.flags & (FLAG_GOOGLE >> 16)) && std::regex_search(d, kv.reg)) return true;
+    // for (const auto& kv : domain_regex_) if ((kv.flags & (FLAG_GOOGLE >> 16)) && std::regex_search(d, kv.reg)) return true;
 
     return false;
 }
@@ -345,7 +345,7 @@ bool GeoChecker::is_tencent_domain(const std::string& domain) {
     }
 
     for (const auto& kv : domain_keyword_) if ((kv.flags & (FLAG_TENCENT >> 16)) && d.find(kv.keyword) != std::string::npos) return true;
-    for (const auto& kv : domain_regex_) if ((kv.flags & (FLAG_TENCENT >> 16)) && std::regex_search(d, kv.reg)) return true;
+    // for (const auto& kv : domain_regex_) if ((kv.flags & (FLAG_TENCENT >> 16)) && std::regex_search(d, kv.reg)) return true;
 
     return false;
 }

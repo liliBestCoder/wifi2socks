@@ -101,7 +101,10 @@ public:
             bool is_cn = (rule == RouteAction::DIRECT) || (rule == RouteAction::PASS && GeoChecker::instance().is_cn_ip(ip_h));
             
             if (!is_cn) {
-                LOG_DEBUG("[UdpProxy] Dropping international QUIC packet to %s", inet_ntoa(*(in_addr*)&(dest->ip)));
+                unsigned char* ip_bytes = (unsigned char*)&(dest->ip);
+                char ip_str[INET_ADDRSTRLEN];
+                snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+                LOG_DEBUG("[UdpProxy] Dropping international QUIC packet to %s", ip_str);
                 return; // DROP
             }
             is_direct = true;
