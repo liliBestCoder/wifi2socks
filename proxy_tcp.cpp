@@ -175,25 +175,28 @@ void ProxyTCP::on_client_read(char* buf, int len) {
 
     // --- State Machine ---
     if (m_state == INITIAL) {
-        bool proceed = false;
         std::string sni;
+        bool proceed = false;
 
-        {
-            std::lock_guard<std::mutex> lock(m_initial_buffer_mutex);
-            sni = parse_tls_sni(m_initial_buffer.data(), m_initial_buffer.size());
-            if (!sni.empty()) {
+        // Per user's suggestion, the lock is removed as this is single-threaded.
+        // Also, cache data and size to avoid repeated calls.
+        const auto& buf_ref = m_initial_buffer;
+        const auto* buf_data = buf_ref.data();
+        const auto buf_size = buf_ref.size();
+
+        sni = parse_tls_sni(buf_data, buf_size);
+        if (!sni.empty()) {
+            proceed = true;
+        }
+        else {
+            std::string host = parse_http_host(buf_data, buf_size);
+            if (!host.empty()) {
+                sni = host;
                 proceed = true;
             }
-            else {
-                std::string host = parse_http_host(m_initial_buffer.data(), m_initial_buffer.size());
-                if (!host.empty()) {
-                    sni = host;
-                    proceed = true;
-                }
-                // If we still can't determine the domain, check if we have received too much data.
-                else if (m_initial_buffer.size() >= 4096) {
-                    proceed = true; // Give up parsing and proceed with IP-based routing.
-                }
+            // If we still can't determine the domain, check if we have received too much data.
+            else if (buf_size >= 4096) {
+                proceed = true; // Give up parsing and proceed with IP-based routing.
             }
         }
 
@@ -222,10 +225,7 @@ void ProxyTCP::on_client_read(char* buf, int len) {
             }
             
             // "Burn after reading": Clear the initial buffer as its purpose is served.
-            {
-                std::lock_guard<std::mutex> lock(m_initial_buffer_mutex);
-                m_initial_buffer.clear();
-            }
+            m_initial_buffer.clear();
 
             // Change state and connect.
             m_state = CONNECTING;
