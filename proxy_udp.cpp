@@ -14,6 +14,97 @@
 #include <mutex>
 #include <memory>
 #include <vector>
+#include <string>
+#include <arpa/inet.h>
+
+// Struct to hold DNS response details
+struct DnsResponse {
+    std::string qname;
+    uint16_t qtype;
+    uint16_t rcode;
+    std::vector<std::string> addresses;
+    bool parse_error = false;
+};
+
+// Function to parse a raw DNS response packet
+DnsResponse parse_dns_response(const char* data, int len) {
+    DnsResponse res;
+    if (len < 12) {
+        res.parse_error = true;
+        return res;
+    }
+
+    // --- Parse Header ---
+    res.rcode = ntohs(*(uint16_t*)(data + 2)) & 0x000F;
+    uint16_t qdcount = ntohs(*(uint16_t*)(data + 4));
+    uint16_t ancount = ntohs(*(uint16_t*)(data + 6));
+    
+    if (qdcount != 1) { // We only handle single-question responses
+        res.parse_error = true;
+        return res;
+    }
+
+    const char* p = data + 12; // Start of question section
+
+    // --- Parse Question Section ---
+    std::string qname;
+    while (*p != 0) {
+        if ((unsigned char)*p > 63) { // It's a pointer
+            res.parse_error = true; // No pointers allowed in question name
+            return res;
+        }
+        uint8_t label_len = (uint8_t)*p++;
+        if (p + label_len > data + len) {
+            res.parse_error = true;
+            return res;
+        }
+        if (!qname.empty()) qname += ".";
+        qname.append(p, label_len);
+        p += label_len;
+    }
+    p++; // Skip null terminator for qname
+    res.qname = qname;
+
+    if (p + 4 > data + len) {
+        res.parse_error = true;
+        return res;
+    }
+    res.qtype = ntohs(*(uint16_t*)p);
+    p += 4; // Skip qtype and qclass
+
+    // --- Parse Answer Section ---
+    for (int i = 0; i < ancount; ++i) {
+        if (p >= data + len) { res.parse_error = true; return res; }
+
+        // Parse Name (can be a pointer)
+        const char* name_ptr = p;
+        if (( (unsigned char)name_ptr[0] & 0xC0) == 0xC0) { // Pointer
+            p += 2;
+        } else { // Full name
+            while (*p != 0) {
+                uint8_t label_len = (uint8_t)*p++;
+                p += label_len;
+            }
+            p++;
+        }
+
+        if (p + 10 > data + len) { res.parse_error = true; return res; }
+        
+        uint16_t type = ntohs(*(uint16_t*)p);
+        uint16_t data_len = ntohs(*(uint16_t*)(p + 8));
+        p += 10;
+
+        if (type == 1 && data_len == 4) { // TYPE A record
+            char ip_str[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, p, ip_str, INET_ADDRSTRLEN)) {
+                res.addresses.push_back(ip_str);
+            }
+        }
+        p += data_len;
+    }
+
+    return res;
+}
 
 // A manager to handle all UDP proxy operations.
 class UdpProxyManager {
@@ -80,10 +171,29 @@ public:
                           domain.c_str(), (int)rule, is_cn, should_proxy_dns);
 
                 if (should_proxy_dns) {
-                    LOG_INFO("[DNS] Routing DNS query for '%s' over TCP (DoT).", domain.c_str());
-                    auto on_dns_response = [listener_socket, client_addr = *client_addr](const char* dns_resp, int resp_len) {
+                    auto on_dns_response = [listener_socket, client_addr = *client_addr, domain](const char* dns_resp, int resp_len) {
                         if (resp_len > 0) {
+                            DnsResponse res = parse_dns_response(dns_resp, resp_len);
+                            if (res.parse_error) {
+                                LOG_WARN("[DNS] Failed to parse DoT DNS response for '%s'.", domain.c_str());
+                            } else {
+                                if (res.rcode == 0 && !res.addresses.empty()) {
+                                    std::string ips;
+                                    for (size_t i = 0; i < res.addresses.size(); ++i) {
+                                        ips += res.addresses[i];
+                                        if (i < res.addresses.size() - 1) ips += ", ";
+                                    }
+                                    LOG_INFO("[DNS] Resolved '%s' to [%s] via DoT.", res.qname.c_str(), ips.c_str());
+                                } else if (res.rcode != 0) {
+                                    LOG_INFO("[DNS] Failed to resolve '%s' via DoT. RCODE: %d", res.qname.c_str(), res.rcode);
+                                } else {
+                                    // RCODE is 0 but no A records, could be CNAME, MX etc. or empty response
+                                    LOG_INFO("[DNS] Received response for '%s' via DoT (RCODE: 0, no A records).", res.qname.c_str());
+                                }
+                            }
                             sendto(listener_socket, dns_resp, resp_len, 0, (const sockaddr*)&client_addr, sizeof(client_addr));
+                        } else {
+                            LOG_ERROR("[DNS] Received empty or invalid response for '%s' from DoT proxy.", domain.c_str());
                         }
                     };
                     std::vector<uint8_t> query_vec((uint8_t*)data, (uint8_t*)data + len);
@@ -149,6 +259,35 @@ private:
 
         TrafficManager::instance().report_proxy_rx(len, true); // Assuming direct
 
+        // --- DNS Logging for Direct Queries ---
+        sockaddr_in direct_dns_addr = {};
+        inet_pton(AF_INET, g_config.direct_dns_server.c_str(), &direct_dns_addr.sin_addr);
+
+        // Heuristic: If packet comes from direct DNS server's IP, it's a DNS response.
+        if (from_addr->sin_addr.s_addr == direct_dns_addr.sin_addr.s_addr) {
+            DnsResponse res = parse_dns_response(buf, len);
+            if (res.parse_error) {
+                LOG_WARN("[DNS] Failed to parse direct DNS response.");
+            }
+            else {
+                if (res.rcode == 0 && !res.addresses.empty()) {
+                    std::string ips;
+                    for (size_t i = 0; i < res.addresses.size(); ++i) {
+                        ips += res.addresses[i];
+                        if (i < res.addresses.size() - 1) ips += ", ";
+                    }
+                    LOG_INFO("[DNS] Resolved '%s' to [%s] via DIRECT.", res.qname.c_str(), ips.c_str());
+                }
+                else if (res.rcode != 0) {
+                    LOG_INFO("[DNS] Failed to resolve '%s' via DIRECT. RCODE: %d", res.qname.c_str(), res.rcode);
+                }
+                else {
+                    LOG_INFO("[DNS] Received response for '%s' via DIRECT (RCODE: 0, no A records).", res.qname.c_str());
+                }
+            }
+        }
+        // --- End of DNS Logging ---
+
         sockaddr_in client_addr_to_send;
         bool found = false;
         {
@@ -162,10 +301,11 @@ private:
 
         if (found) {
             SOCKET listener_socket = (SOCKET)AppListener::instance().get_udp_socket();
-            if(listener_socket != INVALID_SOCKET) {
+            if (listener_socket != INVALID_SOCKET) {
                 sendto(listener_socket, buf, len, 0, (const sockaddr*)&client_addr_to_send, sizeof(client_addr_to_send));
             }
-        } else {
+        }
+        else {
             LOG_ERROR("[UdpProxy] Received a UDP packet on a remote socket but could not find a reverse route.");
         }
         
