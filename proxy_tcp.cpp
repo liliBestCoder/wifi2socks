@@ -102,6 +102,7 @@ void ProxyTCP::on_client_initial_read(char* buf, int len) {
     auto self = shared_from_this();
     WorkerPool::instance().update_read_callback(m_client_socket, [self](char* b, int l, sockaddr_in*) { self->on_client_read(b, l); });
     connect_remote();
+    WorkerPool::instance().read_async(m_client_socket);
 }
 
 void ProxyTCP::connect_remote() {
@@ -172,7 +173,6 @@ void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
             auto self = shared_from_this();
             WorkerPool::instance().update_read_callback(m_remote_socket, [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); });
             WorkerPool::instance().read_async(m_remote_socket);
-            WorkerPool::instance().read_async(m_client_socket);
         } else {
             close_session();
         }
@@ -203,7 +203,6 @@ void ProxyTCP::on_remote_connect() {
             }
         }
         WorkerPool::instance().read_async(m_remote_socket);
-        WorkerPool::instance().read_async(m_client_socket);
     } else {
         m_state = AWAITING_CONNECT_RESPONSE;
         std::string target_host = m_detected_domain;
@@ -240,6 +239,8 @@ void ProxyTCP::on_client_read(char* buf, int len) {
         std::lock_guard<std::mutex> lock(m_initial_buffer_mutex);
         m_initial_buffer.insert(m_initial_buffer.end(), (uint8_t*)buf, (uint8_t*)buf + len);
     }
+
+    if (!m_client_read_paused) WorkerPool::instance().read_async(m_client_socket);
 }
 
 void ProxyTCP::on_remote_read(char* buf, int len) {
@@ -258,6 +259,8 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
             // LOG_DEBUG("[ProxyTCP] Backpressure applied on remote read.");
         }
     }
+
+    if (!m_remote_read_paused) WorkerPool::instance().read_async(m_remote_socket);
 }
 
 void ProxyTCP::try_send(SOCKET socket) {
