@@ -15,7 +15,7 @@
 #include <memory>
 #include <vector>
 #include <string>
-#include <arpa/inet.h>
+#include <ws2tcpip.h>
 
 // Struct to hold DNS response details
 struct DnsResponse {
