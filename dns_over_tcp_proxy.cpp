@@ -114,13 +114,17 @@ void DnsOverTcpProxy::on_read(char* buf, int len) {
     if (m_state == DNS_QUERY) {
         handle_dns_response();
     }
+
+    if (m_state != CLOSED) {
+        WorkerPool::instance().read_async(m_socket);
+    }
 }
 
 void DnsOverTcpProxy::handle_dns_response() {
     while (m_state == DNS_QUERY && !m_read_buffer.empty()) {
         if (!m_len_received) {
             if (m_read_buffer.size() >= 2) {
-                m_expected_len = ntohs(*(uint16_t*)m_read_buffer.data());
+                m_expected_len = (uint16_t)(((uint16_t)m_read_buffer[0] << 8) | m_read_buffer[1]);
                 m_len_received = true;
                 m_read_buffer.erase(m_read_buffer.begin(), m_read_buffer.begin() + 2);
             } else {
