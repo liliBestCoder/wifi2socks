@@ -156,15 +156,18 @@ void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
         m_proxy_response_buffer.clear();
         if (header.find(" 200 ") != std::string::npos) {
             m_state = ESTABLISHED;
-            if (!m_initial_buffer.empty()) {
-                auto buffer = std::make_shared<std::vector<char>>(m_initial_buffer.begin(), m_initial_buffer.end());
-                {
-                    std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-                    m_remote_send_queue.push_back(buffer);
-                    m_remote_send_queue_size += buffer->size();
+            {
+                std::lock_guard<std::mutex> lock(m_initial_buffer_mutex);
+                if (!m_initial_buffer.empty()) {
+                    auto buffer = std::make_shared<std::vector<char>>(m_initial_buffer.begin(), m_initial_buffer.end());
+                    {
+                        std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
+                        m_remote_send_queue.push_back(buffer);
+                        m_remote_send_queue_size += buffer->size();
+                    }
+                    m_initial_buffer.clear();
+                    try_send(m_remote_socket);
                 }
-                m_initial_buffer.clear();
-                try_send(m_remote_socket);
             }
             auto self = shared_from_this();
             WorkerPool::instance().update_read_callback(m_remote_socket, [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); });
@@ -185,15 +188,18 @@ void ProxyTCP::on_remote_connect() {
 
     if (m_is_direct) {
         m_state = ESTABLISHED;
-        if (!m_initial_buffer.empty()) {
-            auto buffer = std::make_shared<std::vector<char>>(m_initial_buffer.begin(), m_initial_buffer.end());
-            {
-                std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-                m_remote_send_queue.push_back(buffer);
-                m_remote_send_queue_size += buffer->size();
+        {
+            std::lock_guard<std::mutex> lock(m_initial_buffer_mutex);
+            if (!m_initial_buffer.empty()) {
+                auto buffer = std::make_shared<std::vector<char>>(m_initial_buffer.begin(), m_initial_buffer.end());
+                {
+                    std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
+                    m_remote_send_queue.push_back(buffer);
+                    m_remote_send_queue_size += buffer->size();
+                }
+                m_initial_buffer.clear();
+                try_send(m_remote_socket);
             }
-            m_initial_buffer.clear();
-            try_send(m_remote_socket);
         }
         WorkerPool::instance().read_async(m_remote_socket);
     } else {
@@ -230,6 +236,7 @@ void ProxyTCP::on_client_read(char* buf, int len) {
             // LOG_DEBUG("[ProxyTCP] Backpressure applied on client read.");
         }
     } else {
+        std::lock_guard<std::mutex> lock(m_initial_buffer_mutex);
         m_initial_buffer.insert(m_initial_buffer.end(), (uint8_t*)buf, (uint8_t*)buf + len);
     }
 }

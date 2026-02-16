@@ -46,6 +46,7 @@ private:
     OriginalDestination m_original_dest;
 
     std::vector<uint8_t> m_initial_buffer; // Buffer for data received before ESTABLISHED
+    std::mutex m_initial_buffer_mutex;
     std::vector<char> m_proxy_response_buffer; // Buffer for proxy CONNECT response
     
     std::string m_detected_domain;
