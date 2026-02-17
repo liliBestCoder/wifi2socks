@@ -406,7 +406,7 @@ void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, const uin
     io->wsa_bufs.push_back(w);
 
     DWORD bytes = 0;
-    int ret = WSASend(ctx->sock, io->wsa_bufs.data(), 1, &bytes, 0, &io->overlapped, NULL);
+    int ret = WSASend(ctx->sock, io->wsa_bufs.data(), (DWORD)io->wsa_bufs.size(), &bytes, 0, &io->overlapped, NULL);
 
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         if (ctx->on_write) ctx->on_write(-1);

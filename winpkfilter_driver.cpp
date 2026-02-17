@@ -280,7 +280,7 @@ void WinPkFilterDriver::run() {
                 USHORT ether_type = ntohs(*(USHORT*)(buffer + 12));
 
                 if (ether_type == ETHERTYPE_IPV6) {
-                    // Drop all IPv6 traffic to force clients to use IPv4 handled by our proxy
+                    p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p));
                     continue;
                 }
 
