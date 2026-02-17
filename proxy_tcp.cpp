@@ -281,6 +281,8 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
 
     auto self = shared_from_this();
     if (socket == m_remote_socket) {
+        if (m_state != ESTABLISHED) return;
+
         {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
             if (!m_remote_write_in_progress) return; // Ignore manual writes (like CONNECT req)
@@ -298,6 +300,8 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
         }
         WorkerPool::instance().queue_task([self, socket]() { self->try_send(socket); });
     } else if (socket == m_client_socket) {
+        if (m_state != ESTABLISHED) return;
+
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
             if (!m_client_write_in_progress) return; // Ignore manual writes (like 204 hook)
@@ -321,12 +325,12 @@ void ProxyTCP::close_session() {
     if (m_state.exchange(CLOSING) == CLOSING) return;
     if (m_client_socket != INVALID_SOCKET) {
         shutdown(m_client_socket, SD_BOTH);
-        closesocket(m_client_socket);
+        WorkerPool::instance().remove_socket(m_client_socket);
         m_client_socket = INVALID_SOCKET;
     }
     if (m_remote_socket != INVALID_SOCKET) {
         shutdown(m_remote_socket, SD_BOTH);
-        closesocket(m_remote_socket);
+        WorkerPool::instance().remove_socket(m_remote_socket);
         m_remote_socket = INVALID_SOCKET;
     }
 }
