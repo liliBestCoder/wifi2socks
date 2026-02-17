@@ -165,6 +165,18 @@ void ProxyTCP::on_client_read(char* buf, int len) {
 
     // --- State Machine ---
     if (m_state == INITIAL) {
+        const auto* buf_data = m_initial_buffer.data();
+        const auto buf_size = m_initial_buffer.size();
+
+        // Check for /generate_204 hook on port 80
+        if (ntohs(m_original_dest.port) == 80 && is_generate_204_request(buf_data, buf_size)) {
+            LOG_INFO("[ProxyTCP] Hooking /generate_204 request on port 80 from client");
+            const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            WorkerPool::instance().send_async(m_client_socket, (const uint8_t*)response, (int)strlen(response));
+            close_session();
+            return;
+        }
+
         std::string sni;
         bool proceed = false;
 

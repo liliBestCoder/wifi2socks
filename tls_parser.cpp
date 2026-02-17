@@ -97,6 +97,19 @@ bool is_http_start(const uint8_t* data, size_t len) {
     return false;
 }
 
+bool is_generate_204_request(const uint8_t* data, size_t len) {
+    if (!is_http_start(data, len)) return false;
+    
+    // Only check the first line for the URI
+    const char* first_line_end = (const char*)memchr(data, '\n', len);
+    if (!first_line_end) return false;
+    
+    size_t first_line_len = first_line_end - (const char*)data;
+    std::string first_line((const char*)data, first_line_len);
+    
+    return first_line.find("/generate_204") != std::string::npos;
+}
+
 std::string parse_http_host(const uint8_t* data, size_t len) {
     if (!is_http_start(data, len)) return "";
     
