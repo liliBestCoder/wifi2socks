@@ -141,7 +141,9 @@ void WiFiAPManager::StartListener() {
                     for (int i = 0; i < 10; ++i) { 
                         std::this_thread::sleep_for(std::chrono::seconds(2));
                         if (ForceSetStaticIP(g_config.tap_ip)) {
-                            // Locked.
+                            // Locked. We can stop retrying if the state is stable
+                            // but keep one more check to be sure ICS didn't revert it.
+                            if (i > 3) break; 
                         }
                     }
                     }).detach();
@@ -172,36 +174,48 @@ bool ForceSetStaticIP(const std::string& targetIp) {
     for (auto pCurr = pAddresses; pCurr; pCurr = pCurr->Next) {
         std::wstring desc = pCurr->Description;
         if (desc.find(L"Wi-Fi Direct Virtual Adapter") != std::wstring::npos) {
-            // Clear all existing IPs to kill ICS remnants
+            bool alreadyHasTarget = false;
+            std::vector<IN_ADDR> existingIps;
+
             for (auto pUnicast = pCurr->FirstUnicastAddress; pUnicast; pUnicast = pUnicast->Next) {
                 if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
-                    MIB_UNICASTIPADDRESS_ROW row;
-                    InitializeUnicastIpAddressEntry(&row);
-                    row.InterfaceLuid = pCurr->Luid;
-                    row.Address.Ipv4.sin_family = AF_INET;
-                    row.Address.Ipv4.sin_addr = ((sockaddr_in*)pUnicast->Address.lpSockaddr)->sin_addr;
-                    DeleteUnicastIpAddressEntry(&row);
+                    IN_ADDR addr = ((sockaddr_in*)pUnicast->Address.lpSockaddr)->sin_addr;
+                    char ip_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
+                    if (targetIp == ip_str) {
+                        alreadyHasTarget = true;
+                    } else {
+                        existingIps.push_back(addr);
+                    }
                 }
             }
 
-            // Set our target IP (11.1)
-            MIB_UNICASTIPADDRESS_ROW newRow;
-            InitializeUnicastIpAddressEntry(&newRow);
-            newRow.InterfaceLuid = pCurr->Luid;
-            newRow.Address.Ipv4.sin_family = AF_INET;
-            newRow.OnLinkPrefixLength = 24;
-            newRow.DadState = IpDadStatePreferred;
-            inet_pton(AF_INET, targetIp.c_str(), &newRow.Address.Ipv4.sin_addr);
-            CreateUnicastIpAddressEntry(&newRow);
+            if (alreadyHasTarget && existingIps.empty()) {
+                // IP is already correctly set and no dirty ICS IPs (like 137.1) remain.
+                return true; 
+            }
 
-            // Set bait IP (137.1) to respond to ARP from stuck clients
-            MIB_UNICASTIPADDRESS_ROW baitRow;
-            InitializeUnicastIpAddressEntry(&baitRow);
-            baitRow.InterfaceLuid = pCurr->Luid;
-            baitRow.Address.Ipv4.sin_family = AF_INET;
-            baitRow.OnLinkPrefixLength = 24; baitRow.DadState = IpDadStatePreferred;
-            inet_pton(AF_INET, "192.168.137.1", &baitRow.Address.Ipv4.sin_addr);
-            CreateUnicastIpAddressEntry(&baitRow);
+            // Remove other IPs (especially remnants of ICS 192.168.137.1)
+            for (auto& addr : existingIps) {
+                MIB_UNICASTIPADDRESS_ROW row;
+                InitializeUnicastIpAddressEntry(&row);
+                row.InterfaceLuid = pCurr->Luid;
+                row.Address.Ipv4.sin_family = AF_INET;
+                row.Address.Ipv4.sin_addr = addr;
+                DeleteUnicastIpAddressEntry(&row);
+            }
+
+            // Set our target IP if not present
+            if (!alreadyHasTarget) {
+                MIB_UNICASTIPADDRESS_ROW newRow;
+                InitializeUnicastIpAddressEntry(&newRow);
+                newRow.InterfaceLuid = pCurr->Luid;
+                newRow.Address.Ipv4.sin_family = AF_INET;
+                newRow.OnLinkPrefixLength = 24;
+                newRow.DadState = IpDadStatePreferred;
+                inet_pton(AF_INET, targetIp.c_str(), &newRow.Address.Ipv4.sin_addr);
+                CreateUnicastIpAddressEntry(&newRow);
+            }
 
             return true;
         }

@@ -49,6 +49,14 @@ typedef struct _UDP_HEADER {
     USHORT  Csum;
 } UDP_HEADER, *PUDP_HEADER;
 
+typedef struct _ICMP_HEADER {
+    UCHAR   Type;
+    UCHAR   Code;
+    USHORT  Csum;
+    USHORT  Id;
+    USHORT  Seq;
+} ICMP_HEADER, *PICMP_HEADER;
+
 typedef struct _ARP_HEADER {
     USHORT  HwType;
     USHORT  ProtoType;
@@ -120,6 +128,10 @@ static void recalculate_tcp_udp_checksum(PIP_HEADER ip) {
         PUDP_HEADER udp = (PUDP_HEADER)((uint8_t*)ip + ip_hdr_len);
         udp->Csum = 0;
         udp->Csum = csum_finalize(csum_partial(udp, payload_len, sum));
+    } else if (ip->Proto == IPPROTO_ICMP) {
+        PICMP_HEADER icmp = (PICMP_HEADER)((uint8_t*)ip + ip_hdr_len);
+        icmp->Csum = 0;
+        icmp->Csum = csum_finalize(csum_partial(icmp, payload_len, 0));
     }
 }
 
@@ -286,6 +298,31 @@ void WinPkFilterDriver::run() {
                     p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p));
                 } else if (ether_type == ETHERTYPE_IP) {
                     PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
+
+                    if (ip->Proto == IPPROTO_ICMP && !p.outbound) {
+                        int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
+                        if (length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
+                            PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ip_hdr_len);
+                            if (icmp->Type == 8 && ip->DstAddr == m_gateway_ip) { // Echo Request to Gateway
+                                // Prepare local Echo Reply
+                                uint8_t temp_mac[6];
+                                memcpy(temp_mac, buffer, 6);
+                                memcpy(buffer, buffer + 6, 6);
+                                memcpy(buffer + 6, temp_mac, 6);
+
+                                ULONG temp_ip = ip->SrcAddr;
+                                ip->SrcAddr = ip->DstAddr;
+                                ip->DstAddr = temp_ip;
+
+                                icmp->Type = 0; // Echo Reply
+                                recalculate_ip_checksum(ip);
+                                recalculate_tcp_udp_checksum(ip);
+
+                                send_to_adapter(buffer, length);
+                                continue;
+                            }
+                        }
+                    }
 
                     if (ip->Proto == IPPROTO_UDP) {
                         PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
