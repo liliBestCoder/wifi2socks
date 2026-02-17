@@ -233,16 +233,11 @@ void ProxyTCP::on_client_read(char* buf, int len) {
     }
     else if (m_state == ESTABLISHED) {
         try_send(m_remote_socket);
-        if (m_remote_send_queue_size > HIGH_WATER_MARK && !m_client_read_paused.exchange(true)) {
-            // LOG_DEBUG("[ProxyTCP] Backpressure applied on client read.");
-        }
     } 
     // For CONNECTING or AWAITING_PROXY_RESPONSE, we just buffer. Data is already in the queue.
 
-    // Continue the read loop unless paused.
-    if (!m_client_read_paused) {
-        WorkerPool::instance().read_async(m_client_socket);
-    }
+    // Continue the read loop unconditionally.
+    WorkerPool::instance().read_async(m_client_socket);
 }
 
 void ProxyTCP::on_remote_read(char* buf, int len) {
@@ -250,19 +245,16 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
 
     if (m_state == ESTABLISHED) {
         auto buffer = std::make_shared<std::vector<char>>(buf, buf + len);
-        size_t new_size;
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
             m_client_send_queue.push_back(buffer);
-            new_size = (m_client_send_queue_size += len);
+            m_client_send_queue_size += len;
         }
         try_send(m_client_socket);
-        if (new_size > HIGH_WATER_MARK && !m_remote_read_paused.exchange(true)) {
-            // LOG_DEBUG("[ProxyTCP] Backpressure applied on remote read.");
-        }
     }
 
-    if (!m_remote_read_paused) WorkerPool::instance().read_async(m_remote_socket);
+    // Continue the read loop unconditionally.
+    WorkerPool::instance().read_async(m_remote_socket);
 }
 
 void ProxyTCP::try_send(SOCKET socket) {
@@ -301,11 +293,6 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
             new_size = (m_remote_send_queue_size -= len);
             m_remote_write_in_progress = false;
         }
-        if (m_client_read_paused && new_size < LOW_WATER_MARK) {
-            if (m_client_read_paused.exchange(false)) {
-                WorkerPool::instance().read_async(m_client_socket);
-            }
-        }
         WorkerPool::instance().queue_task([self, socket]() { self->try_send(socket); });
     } else if (socket == m_client_socket) {
         size_t new_size;
@@ -321,11 +308,6 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
             }
             new_size = (m_client_send_queue_size -= len);
             m_client_write_in_progress = false;
-        }
-        if (m_remote_read_paused && new_size < LOW_WATER_MARK) {
-            if (m_remote_read_paused.exchange(false)) {
-                WorkerPool::instance().read_async(m_remote_socket);
-            }
         }
         WorkerPool::instance().queue_task([self, socket]() { self->try_send(socket); });
     }

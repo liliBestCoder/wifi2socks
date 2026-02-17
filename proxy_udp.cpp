@@ -175,7 +175,7 @@ public:
                         if (resp_len > 0) {
                             DnsResponse res = parse_dns_response(dns_resp, resp_len);
                             if (res.parse_error) {
-                                LOG_WARN("[DNS] Failed to parse DoT DNS response for '%s'.", domain.c_str());
+                                LOG_ERROR("[DNS] Failed to parse DoT DNS response for '%s'.", domain.c_str());
                             } else {
                                 if (res.rcode == 0 && !res.addresses.empty()) {
                                     std::string ips;
@@ -267,7 +267,7 @@ private:
         if (from_addr->sin_addr.s_addr == direct_dns_addr.sin_addr.s_addr) {
             DnsResponse res = parse_dns_response(buf, len);
             if (res.parse_error) {
-                LOG_WARN("[DNS] Failed to parse direct DNS response.");
+                LOG_ERROR("[DNS] Failed to parse direct DNS response.");
             }
             else {
                 if (res.rcode == 0 && !res.addresses.empty()) {
