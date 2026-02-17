@@ -17,13 +17,13 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
       m_remote_socket(INVALID_SOCKET),
       m_original_dest(dest),
       m_is_direct(false),
-      m_client_write_in_flight(0),
-      m_remote_write_in_flight(0)
+      m_client_write_in_progress(false),
+      m_remote_write_in_progress(false)
 {
     u_long mode = 1;
     ioctlsocket(m_client_socket, FIONBIO, &mode);
 
-    int buf_size = 1024 * 1024; // 128KB
+    int buf_size = 16 * 1024 * 1024; // 16MB
     setsockopt(m_client_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
     setsockopt(m_client_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
 
@@ -275,37 +275,33 @@ void ProxyTCP::try_send(SOCKET socket) {
     if (m_state == CLOSING) return;
 
     if (socket == m_remote_socket) {
-        if (m_remote_write_in_flight >= 32) return;
-
         std::vector<std::shared_ptr<std::vector<char>>> buffers;
         {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-            if (m_remote_send_queue.empty()) return;
+            if (m_remote_write_in_progress || m_remote_send_queue.empty()) return;
 
+            // Batch up to 1024 buffers (approx 1.4MB) to fill the pipe.
+            // DO NOT pop here. Only pop in on_write_complete upon success.
             size_t count = 0;
-            while (!m_remote_send_queue.empty() && count < 256) {
-                buffers.push_back(std::move(m_remote_send_queue.front()));
-                m_remote_send_queue.pop_front();
-                count++;
+            for (auto& buf : m_remote_send_queue) {
+                buffers.push_back(buf);
+                if (++count >= 1024) break;
             }
-            m_remote_write_in_flight++;
+            m_remote_write_in_progress = true;
         }
         WorkerPool::instance().send_batch_async(m_remote_socket, std::move(buffers));
     } else if (socket == m_client_socket) {
-        if (m_client_write_in_flight >= 32) return;
-
         std::vector<std::shared_ptr<std::vector<char>>> buffers;
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
-            if (m_client_send_queue.empty()) return;
+            if (m_client_write_in_progress || m_client_send_queue.empty()) return;
 
             size_t count = 0;
-            while (!m_client_send_queue.empty() && count < 256) {
-                buffers.push_back(std::move(m_client_send_queue.front()));
-                m_client_send_queue.pop_front();
-                count++;
+            for (auto& buf : m_client_send_queue) {
+                buffers.push_back(buf);
+                if (++count >= 1024) break;
             }
-            m_client_write_in_flight++;
+            m_client_write_in_progress = true;
         }
         WorkerPool::instance().send_batch_async(m_client_socket, std::move(buffers));
     }
@@ -322,18 +318,24 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
         {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
             if (!attempted_buffers.empty()) {
-                m_remote_write_in_flight--;
-                m_remote_send_queue_size -= len;
-
-                size_t total_attempted = 0;
-                for (const auto& b : attempted_buffers) total_attempted += b->size();
-                if ((size_t)len < total_attempted) {
-                    close_session();
-                    return;
+                m_remote_write_in_progress = false;
+                
+                // POP confirmed bytes from the head of the REAL queue.
+                int remaining = len;
+                while (remaining > 0 && !m_remote_send_queue.empty()) {
+                    auto& front_buffer = m_remote_send_queue.front();
+                    if (remaining < (int)front_buffer->size()) {
+                        front_buffer->erase(front_buffer->begin(), front_buffer->begin() + remaining);
+                        remaining = 0;
+                    } else {
+                        remaining -= (int)front_buffer->size();
+                        m_remote_send_queue.pop_front();
+                    }
                 }
+                m_remote_send_queue_size -= len;
             }
 
-            if (m_client_at_eof && m_remote_send_queue.empty() && m_remote_write_in_flight == 0) {
+            if (m_client_at_eof && m_remote_send_queue.empty()) {
                 close_session();
                 return;
             }
@@ -343,18 +345,23 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
             if (!attempted_buffers.empty()) {
-                m_client_write_in_flight--;
-                m_client_send_queue_size -= len;
+                m_client_write_in_progress = false;
 
-                size_t total_attempted = 0;
-                for (const auto& b : attempted_buffers) total_attempted += b->size();
-                if ((size_t)len < total_attempted) {
-                    close_session();
-                    return;
+                int remaining = len;
+                while (remaining > 0 && !m_client_send_queue.empty()) {
+                    auto& front_buffer = m_client_send_queue.front();
+                    if (remaining < (int)front_buffer->size()) {
+                        front_buffer->erase(front_buffer->begin(), front_buffer->begin() + remaining);
+                        remaining = 0;
+                    } else {
+                        remaining -= (int)front_buffer->size();
+                        m_client_send_queue.pop_front();
+                    }
                 }
+                m_client_send_queue_size -= len;
             }
 
-            if (m_remote_at_eof && m_client_send_queue.empty() && m_client_write_in_flight == 0) {
+            if (m_remote_at_eof && m_client_send_queue.empty()) {
                 shutdown(m_client_socket, SD_SEND);
                 WorkerPool::instance().queue_task([self]() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
