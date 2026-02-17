@@ -143,7 +143,10 @@ void ProxyTCP::on_remote_connect() {
 
 void ProxyTCP::on_client_read(char* buf, int len) {
     if (len <= 0) {
-        close_session();
+        m_client_at_eof = true;
+        if (m_remote_send_queue_size == 0) {
+            close_session();
+        }
         return;
     }
 
@@ -241,7 +244,13 @@ void ProxyTCP::on_client_read(char* buf, int len) {
 }
 
 void ProxyTCP::on_remote_read(char* buf, int len) {
-    if (len <= 0) { close_session(); return; }
+    if (len <= 0) {
+        m_remote_at_eof = true;
+        if (m_client_send_queue_size == 0) {
+            close_session();
+        }
+        return;
+    }
 
     if (m_state == ESTABLISHED) {
         auto buffer = std::make_shared<std::vector<char>>(buf, buf + len);
@@ -297,6 +306,11 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
             }
             m_remote_send_queue_size -= len;
             m_remote_write_in_progress = false;
+
+            if (m_client_at_eof && m_remote_send_queue_size == 0) {
+                close_session();
+                return;
+            }
         }
         WorkerPool::instance().queue_task([self, socket]() { self->try_send(socket); });
     } else if (socket == m_client_socket) {
@@ -316,6 +330,11 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
             }
             m_client_send_queue_size -= len;
             m_client_write_in_progress = false;
+
+            if (m_remote_at_eof && m_client_send_queue_size == 0) {
+                close_session();
+                return;
+            }
         }
         WorkerPool::instance().queue_task([self, socket]() { self->try_send(socket); });
     }

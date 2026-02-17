@@ -54,15 +54,19 @@ private:
     void try_send(SOCKET socket);
     void on_write_complete(SOCKET socket, int len);
 
-    // Client -> Remote data flow
+    // Data flow to Client (from Remote)
     std::deque<std::shared_ptr<std::vector<char>>> m_client_send_queue;
     std::atomic<bool> m_client_write_in_progress{false};
     std::mutex m_client_queue_mutex;
 
-    // Remote -> Client data flow
+    // Data flow to Remote (from Client)
     std::deque<std::shared_ptr<std::vector<char>>> m_remote_send_queue;
     std::atomic<bool> m_remote_write_in_progress{false};
     std::mutex m_remote_queue_mutex;
+
+    // Graceful closure flags
+    std::atomic<bool> m_remote_at_eof{ false };
+    std::atomic<bool> m_client_at_eof{ false };
 
     // Backpressure Control
     static const size_t HIGH_WATER_MARK = 8 * 1024 * 1024; // 8MB
