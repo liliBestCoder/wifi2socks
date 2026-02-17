@@ -182,9 +182,6 @@ void ProxyTCP::on_client_read(char* buf, int len) {
 
         // Per user's suggestion, the lock is removed as this is single-threaded.
         // Also, cache data and size to avoid repeated calls.
-        const auto* buf_data = m_initial_buffer.data();
-        const auto buf_size = m_initial_buffer.size();
-
         sni = parse_tls_sni(buf_data, buf_size);
         if (!sni.empty()) {
             proceed = true;
