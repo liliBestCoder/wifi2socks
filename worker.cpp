@@ -22,12 +22,14 @@ IO_CONTEXT* acquire_io_context() {
     io->parent = nullptr;
     io->data_len = 0;
     io->write_buffers.clear();
+    io->wsa_bufs.clear();
     return io;
 }
 
 void release_io_context(IO_CONTEXT* io) {
     if (!io) return;
     io->write_buffers.clear(); // Ensure shared_ptrs are released
+    io->wsa_bufs.clear();
     std::lock_guard<std::mutex> lock(g_io_pool_mtx);
     if (g_io_pool.size() < 4096) { // Increased pool size for high throughput
         g_io_pool.push_back(io);
@@ -340,17 +342,18 @@ void WorkerPool::post_read(const std::shared_ptr<SocketContext>& ctx) {
     io->sock = ctx->sock;
     io->parent = ctx;
 
-    WSABUF wsaBuf;
-    wsaBuf.buf = (char*)io->buf;
-    wsaBuf.len = sizeof(io->buf);
+    WSABUF w;
+    w.buf = (char*)io->buf;
+    w.len = sizeof(io->buf);
+    io->wsa_bufs.push_back(w);
 
     DWORD bytes = 0, flags = 0;
     int ret;
     if (ctx->is_udp) {
         io->remote_addr_len = sizeof(io->remote_addr);
-        ret = WSARecvFrom(ctx->sock, &wsaBuf, 1, &bytes, &flags, (sockaddr*)&io->remote_addr, &io->remote_addr_len, &io->overlapped, NULL);
+        ret = WSARecvFrom(ctx->sock, io->wsa_bufs.data(), 1, &bytes, &flags, (sockaddr*)&io->remote_addr, &io->remote_addr_len, &io->overlapped, NULL);
     } else {
-        ret = WSARecv(ctx->sock, &wsaBuf, 1, &bytes, &flags, &io->overlapped, NULL);
+        ret = WSARecv(ctx->sock, io->wsa_bufs.data(), 1, &bytes, &flags, &io->overlapped, NULL);
     }
 
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
@@ -367,17 +370,16 @@ void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, std::vect
     io->parent = ctx;
     io->write_buffers = std::move(buffers);
 
-    std::vector<WSABUF> wsaBufs;
-    wsaBufs.reserve(io->write_buffers.size());
+    io->wsa_bufs.reserve(io->write_buffers.size());
     for (auto& buf : io->write_buffers) {
         WSABUF w;
         w.buf = buf->data();
         w.len = (ULONG)buf->size();
-        wsaBufs.push_back(w);
+        io->wsa_bufs.push_back(w);
     }
 
     DWORD bytes = 0;
-    int ret = WSASend(ctx->sock, wsaBufs.data(), (DWORD)wsaBufs.size(), &bytes, 0, &io->overlapped, NULL);
+    int ret = WSASend(ctx->sock, io->wsa_bufs.data(), (DWORD)io->wsa_bufs.size(), &bytes, 0, &io->overlapped, NULL);
 
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         if (ctx->on_write) ctx->on_write(-1);
@@ -398,12 +400,13 @@ void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, const uin
     memcpy(io->buf, data, copy_len);
     io->data_len = copy_len;
 
-    WSABUF wsaBuf;
-    wsaBuf.buf = (char*)io->buf;
-    wsaBuf.len = (ULONG)io->data_len;
+    WSABUF w;
+    w.buf = (char*)io->buf;
+    w.len = (ULONG)io->data_len;
+    io->wsa_bufs.push_back(w);
 
     DWORD bytes = 0;
-    int ret = WSASend(ctx->sock, &wsaBuf, 1, &bytes, 0, &io->overlapped, NULL);
+    int ret = WSASend(ctx->sock, io->wsa_bufs.data(), 1, &bytes, 0, &io->overlapped, NULL);
 
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         if (ctx->on_write) ctx->on_write(-1);

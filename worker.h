@@ -41,6 +41,7 @@ struct IO_CONTEXT {
     
     // Batch write support
     std::vector<std::shared_ptr<std::vector<char>>> write_buffers;
+    std::vector<WSABUF> wsa_bufs;
 
     IO_CONTEXT() : type(IO_READ), sock(INVALID_SOCKET), data_len(0), remote_addr_len(0), parent(nullptr) {
         memset(&overlapped, 0, sizeof(OVERLAPPED));
