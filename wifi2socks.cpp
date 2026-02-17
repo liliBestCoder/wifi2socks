@@ -54,7 +54,7 @@ std::string find_adapter_by_ip(const std::string& target_ip) {
                         std::string name = pCurr->AdapterName;
                         LOG_INFO("MATCH FOUND BY IP: %s", name.c_str());
                         free(pAddresses);
-                        return "\\\\Device\\\\" + name;
+                        return "\\Device\\" + name;
                     }
                 }
             }
@@ -107,7 +107,7 @@ int main() {
     
     int worker_count = std::thread::hardware_concurrency();
     if (worker_count == 0) worker_count = 4;
-    WorkerPool::instance().init(worker_count);
+    WorkerPool::instance().init(8);
     LOG_INFO("[CORE] Worker pool initialized with %d workers sharing one IOCP.", worker_count);
 
     UdpProxy::initialize();

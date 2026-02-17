@@ -21,7 +21,7 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
     u_long mode = 1;
     ioctlsocket(m_client_socket, FIONBIO, &mode);
 
-    int buf_size = 128 * 1024; // 128KB
+    int buf_size = 1024 * 1024; // 128KB
     setsockopt(m_client_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
     setsockopt(m_client_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
 
@@ -67,7 +67,7 @@ void ProxyTCP::connect_remote() {
     m_remote_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if(m_remote_socket == INVALID_SOCKET) { close_session(); return; }
     
-    int buf_size = 128 * 1024;
+    int buf_size = 1024 * 1024;
     setsockopt(m_remote_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
     setsockopt(m_remote_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
     BOOL nodelay = TRUE;
@@ -86,6 +86,12 @@ void ProxyTCP::connect_remote() {
 }
 
 void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
+    if (m_state == ESTABLISHED) {
+        on_remote_read(buf, len);
+        WorkerPool::instance().read_async(m_remote_socket);
+        return;
+    }
+
     if (len <= 0) { close_session(); return; }
     m_proxy_response_buffer.insert(m_proxy_response_buffer.end(), buf, buf + len);
     const char* crlf2 = "\r\n\r\n";
@@ -96,37 +102,28 @@ void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
         m_proxy_response_buffer.clear();
         if (header.find(" 200 ") != std::string::npos) {
             m_state = ESTABLISHED;
-            
             // Connection is established. Try to send any buffered data.
             try_send(m_remote_socket);
-
-            // Switch the read callback on the remote socket to the standard data handler
-            // and start the read loops for both directions.
-            auto self = shared_from_this();
-            WorkerPool::instance().update_read_callback(m_remote_socket, [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); });
-            WorkerPool::instance().read_async(m_remote_socket);
         } else {
             close_session();
         }
-    } else {
-        WorkerPool::instance().read_async(m_remote_socket);
     }
+
+    WorkerPool::instance().read_async(m_remote_socket);
 }
 
 void ProxyTCP::on_remote_connect() {
     int error = 0;
     int elen = sizeof(error);
     getsockopt(m_remote_socket, SOL_SOCKET, SO_ERROR, (char*)&error, &elen);
-    if (error != 0) { close_session(); return; }
+    if (error != 0) { 
+        close_session(); 
+        return; 
+    }
 
     if (m_is_direct) {
         m_state = ESTABLISHED;
-        
-        // Connection is established. Try to send any buffered data.
         try_send(m_remote_socket);
-
-        // Start read loops for both directions.
-        WorkerPool::instance().read_async(m_remote_socket);
     } else {
         m_state = AWAITING_CONNECT_RESPONSE;
         std::string target_host = m_detected_domain;
@@ -244,6 +241,7 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
             m_client_send_queue.push_back(buffer);
             m_client_send_queue_size += len;
         }
+        LOG_INFO("domain:%s start forward to client", m_detected_domain.c_str());
         try_send(m_client_socket);
     }
 
