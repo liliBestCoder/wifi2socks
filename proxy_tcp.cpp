@@ -275,15 +275,15 @@ void ProxyTCP::try_send(SOCKET socket) {
     if (m_state == CLOSING) return;
 
     if (socket == m_remote_socket) {
-        if (m_remote_write_in_flight >= 4) return;
+        if (m_remote_write_in_flight >= 32) return;
 
         std::vector<std::shared_ptr<std::vector<char>>> buffers;
         {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
             if (m_remote_send_queue.empty()) return;
-            
+
             size_t count = 0;
-            while (!m_remote_send_queue.empty() && count < 64) {
+            while (!m_remote_send_queue.empty() && count < 256) {
                 buffers.push_back(std::move(m_remote_send_queue.front()));
                 m_remote_send_queue.pop_front();
                 count++;
@@ -292,15 +292,15 @@ void ProxyTCP::try_send(SOCKET socket) {
         }
         WorkerPool::instance().send_batch_async(m_remote_socket, std::move(buffers));
     } else if (socket == m_client_socket) {
-        if (m_client_write_in_flight >= 4) return;
+        if (m_client_write_in_flight >= 32) return;
 
         std::vector<std::shared_ptr<std::vector<char>>> buffers;
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
             if (m_client_send_queue.empty()) return;
-            
+
             size_t count = 0;
-            while (!m_client_send_queue.empty() && count < 64) {
+            while (!m_client_send_queue.empty() && count < 256) {
                 buffers.push_back(std::move(m_client_send_queue.front()));
                 m_client_send_queue.pop_front();
                 count++;
@@ -321,34 +321,15 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
     if (socket == m_remote_socket) {
         {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-            m_remote_write_in_flight--;
-            m_remote_send_queue_size -= len;
-
-            // Handle partial send: Rollback unsent data to the front of the queue
             if (!attempted_buffers.empty()) {
+                m_remote_write_in_flight--;
+                m_remote_send_queue_size -= len;
+
                 size_t total_attempted = 0;
                 for (const auto& b : attempted_buffers) total_attempted += b->size();
-
                 if ((size_t)len < total_attempted) {
-                    size_t sent = len;
-                    for (size_t i = 0; i < attempted_buffers.size(); ++i) {
-                        const auto& buf = attempted_buffers[i];
-                        if (sent >= buf->size()) {
-                            sent -= buf->size();
-                        } else {
-                            // Found the break point. Push back remaining buffers in reverse order to maintain sequence.
-                            for (size_t j = attempted_buffers.size(); j > i; --j) {
-                                const auto& b_to_restore = attempted_buffers[j - 1];
-                                if (j - 1 == i && sent > 0) {
-                                    auto part = std::make_shared<std::vector<char>>(b_to_restore->begin() + sent, b_to_restore->end());
-                                    m_remote_send_queue.push_front(part);
-                                } else {
-                                    m_remote_send_queue.push_front(b_to_restore);
-                                }
-                            }
-                            break;
-                        }
-                    }
+                    close_session();
+                    return;
                 }
             }
 
@@ -357,50 +338,32 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
                 return;
             }
         }
-        WorkerPool::instance().queue_task([self, socket]() { self->try_send(socket); });
+        self->try_send(socket);
     } else if (socket == m_client_socket) {
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
-            m_client_write_in_flight--;
-            m_client_send_queue_size -= len;
-
-            // Handle partial send for client side
             if (!attempted_buffers.empty()) {
+                m_client_write_in_flight--;
+                m_client_send_queue_size -= len;
+
                 size_t total_attempted = 0;
                 for (const auto& b : attempted_buffers) total_attempted += b->size();
-
                 if ((size_t)len < total_attempted) {
-                    size_t sent = len;
-                    for (size_t i = 0; i < attempted_buffers.size(); ++i) {
-                        const auto& buf = attempted_buffers[i];
-                        if (sent >= buf->size()) {
-                            sent -= buf->size();
-                        } else {
-                            for (size_t j = attempted_buffers.size(); j > i; --j) {
-                                const auto& b_to_restore = attempted_buffers[j - 1];
-                                if (j - 1 == i && sent > 0) {
-                                    auto part = std::make_shared<std::vector<char>>(b_to_restore->begin() + sent, b_to_restore->end());
-                                    m_client_send_queue.push_front(part);
-                                } else {
-                                    m_client_send_queue.push_front(b_to_restore);
-                                }
-                            }
-                            break;
-                        }
-                    }
+                    close_session();
+                    return;
                 }
             }
 
             if (m_remote_at_eof && m_client_send_queue.empty() && m_client_write_in_flight == 0) {
                 shutdown(m_client_socket, SD_SEND);
                 WorkerPool::instance().queue_task([self]() {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     self->close_session();
                 });
                 return;
             }
         }
-        WorkerPool::instance().queue_task([self, socket]() { self->try_send(socket); });
+        self->try_send(socket);
     }
 }
 
