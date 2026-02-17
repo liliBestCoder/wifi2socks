@@ -281,9 +281,10 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
 
     auto self = shared_from_this();
     if (socket == m_remote_socket) {
-        size_t new_size;
         {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
+            if (!m_remote_write_in_progress) return; // Ignore manual writes (like CONNECT req)
+
             if (!m_remote_send_queue.empty()) {
                 auto& front_buffer = m_remote_send_queue.front();
                 if (len < front_buffer->size()) {
@@ -292,14 +293,15 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
                     m_remote_send_queue.pop_front();
                 }
             }
-            new_size = (m_remote_send_queue_size -= len);
+            m_remote_send_queue_size -= len;
             m_remote_write_in_progress = false;
         }
         WorkerPool::instance().queue_task([self, socket]() { self->try_send(socket); });
     } else if (socket == m_client_socket) {
-        size_t new_size;
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
+            if (!m_client_write_in_progress) return; // Ignore manual writes (like 204 hook)
+
             if (!m_client_send_queue.empty()) {
                 auto& front_buffer = m_client_send_queue.front();
                 if (len < front_buffer->size()) {
@@ -308,7 +310,7 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
                     m_client_send_queue.pop_front();
                 }
             }
-            new_size = (m_client_send_queue_size -= len);
+            m_client_send_queue_size -= len;
             m_client_write_in_progress = false;
         }
         WorkerPool::instance().queue_task([self, socket]() { self->try_send(socket); });
