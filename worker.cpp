@@ -384,7 +384,7 @@ void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, std::vect
     int ret = WSASend(ctx->sock, io->wsa_bufs.data(), (DWORD)io->wsa_bufs.size(), &bytes, 0, &io->overlapped, NULL);
 
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        if (ctx->on_write) ctx->on_write(-1);
+        if (ctx->on_write) ctx->on_write(-1, io->write_buffers);
         release_io_context(io);
     }
 }
@@ -412,7 +412,8 @@ void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, const uin
     int ret = WSASend(ctx->sock, io->wsa_bufs.data(), (DWORD)io->wsa_bufs.size(), &bytes, 0, &io->overlapped, NULL);
 
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        if (ctx->on_write) ctx->on_write(-1);
+        if (ctx->on_write) ctx->on_write(-1, io->write_buffers);
         release_io_context(io);
     }
 }
+
