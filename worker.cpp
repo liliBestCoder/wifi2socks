@@ -21,12 +21,13 @@ IO_CONTEXT* acquire_io_context() {
     io->task = nullptr;
     io->parent = nullptr;
     io->data_len = 0;
-    io->write_buffer_ptr = nullptr;
+    io->write_buffers.clear();
     return io;
 }
 
 void release_io_context(IO_CONTEXT* io) {
     if (!io) return;
+    io->write_buffers.clear(); // Ensure shared_ptrs are released
     std::lock_guard<std::mutex> lock(g_io_pool_mtx);
     if (g_io_pool.size() < 4096) { // Increased pool size for high throughput
         g_io_pool.push_back(io);
@@ -267,7 +268,19 @@ bool WorkerPool::send_async(SOCKET s, std::shared_ptr<std::vector<char>> buffer)
     if (!buffer || buffer->empty()) return true;
     auto ctx = find_context(s);
     if (ctx && !ctx->closing) {
-        post_write(ctx, buffer);
+        std::vector<std::shared_ptr<std::vector<char>>> buffers;
+        buffers.push_back(buffer);
+        post_write(ctx, std::move(buffers));
+        return true;
+    }
+    return false;
+}
+
+bool WorkerPool::send_batch_async(SOCKET s, std::vector<std::shared_ptr<std::vector<char>>> buffers) {
+    if (buffers.empty()) return true;
+    auto ctx = find_context(s);
+    if (ctx && !ctx->closing) {
+        post_write(ctx, std::move(buffers));
         return true;
     }
     return false;
@@ -345,25 +358,30 @@ void WorkerPool::post_read(const std::shared_ptr<SocketContext>& ctx) {
     }
 }
 
-void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, std::shared_ptr<std::vector<char>> buffer) {
-    if (!ctx || ctx->closing || !buffer || buffer->empty()) return;
+void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, std::vector<std::shared_ptr<std::vector<char>>> buffers) {
+    if (!ctx || ctx->closing || buffers.empty()) return;
 
     IO_CONTEXT* io = acquire_io_context();
     io->type = IO_WRITE;
     io->sock = ctx->sock;
     io->parent = ctx;
-    io->write_buffer_ptr = buffer; // Keep the buffer alive
+    io->write_buffers = std::move(buffers);
 
-    WSABUF wsaBuf;
-    wsaBuf.buf = buffer->data();
-    wsaBuf.len = (ULONG)buffer->size();
+    std::vector<WSABUF> wsaBufs;
+    wsaBufs.reserve(io->write_buffers.size());
+    for (auto& buf : io->write_buffers) {
+        WSABUF w;
+        w.buf = buf->data();
+        w.len = (ULONG)buf->size();
+        wsaBufs.push_back(w);
+    }
 
     DWORD bytes = 0;
-    int ret = WSASend(ctx->sock, &wsaBuf, 1, &bytes, 0, &io->overlapped, NULL);
+    int ret = WSASend(ctx->sock, wsaBufs.data(), (DWORD)wsaBufs.size(), &bytes, 0, &io->overlapped, NULL);
 
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
         if (ctx->on_write) ctx->on_write(-1);
-        release_io_context(io); // This will release the shared_ptr
+        release_io_context(io);
     }
 }
 

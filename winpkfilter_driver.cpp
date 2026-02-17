@@ -72,6 +72,7 @@ typedef struct _ARP_HEADER {
 
 const USHORT ETHERTYPE_IP = 0x0800;
 const USHORT ETHERTYPE_ARP = 0x0806;
+const USHORT ETHERTYPE_IPV6 = 0x86DD;
 
 #pragma comment(lib, "ndisapilib.lib")
 #pragma comment(lib, "iphlpapi.lib")
@@ -277,6 +278,11 @@ void WinPkFilterDriver::run() {
                 }
 
                 USHORT ether_type = ntohs(*(USHORT*)(buffer + 12));
+
+                if (ether_type == ETHERTYPE_IPV6) {
+                    // Drop all IPv6 traffic to force clients to use IPv4 handled by our proxy
+                    continue;
+                }
 
                 if (ether_type == ETHERTYPE_ARP) {
                     if (!p.outbound && length >= 14 + sizeof(ARP_HEADER)) {

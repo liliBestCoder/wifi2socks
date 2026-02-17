@@ -262,7 +262,6 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
             m_client_send_queue.push_back(buffer);
             m_client_send_queue_size += len;
         }
-        LOG_INFO("domain:%s start forward to client", m_detected_domain.c_str());
         try_send(m_client_socket);
     }
 
@@ -273,15 +272,33 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
 void ProxyTCP::try_send(SOCKET socket) {
     if (m_state == CLOSING) return;
     if (socket == m_remote_socket) {
-        std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-        if (m_remote_write_in_progress || m_remote_send_queue.empty()) return;
-        m_remote_write_in_progress = true;
-        WorkerPool::instance().send_async(m_remote_socket, m_remote_send_queue.front());
+        std::vector<std::shared_ptr<std::vector<char>>> buffers;
+        {
+            std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
+            if (m_remote_write_in_progress || m_remote_send_queue.empty()) return;
+            
+            size_t count = 0;
+            for (auto& buf : m_remote_send_queue) {
+                buffers.push_back(buf);
+                if (++count >= 64) break;
+            }
+            m_remote_write_in_progress = true;
+        }
+        WorkerPool::instance().send_batch_async(m_remote_socket, std::move(buffers));
     } else if (socket == m_client_socket) {
-        std::lock_guard<std::mutex> lock(m_client_queue_mutex);
-        if (m_client_write_in_progress || m_client_send_queue.empty()) return;
-        m_client_write_in_progress = true;
-        WorkerPool::instance().send_async(m_client_socket, m_client_send_queue.front());
+        std::vector<std::shared_ptr<std::vector<char>>> buffers;
+        {
+            std::lock_guard<std::mutex> lock(m_client_queue_mutex);
+            if (m_client_write_in_progress || m_client_send_queue.empty()) return;
+            
+            size_t count = 0;
+            for (auto& buf : m_client_send_queue) {
+                buffers.push_back(buf);
+                if (++count >= 64) break;
+            }
+            m_client_write_in_progress = true;
+        }
+        WorkerPool::instance().send_batch_async(m_client_socket, std::move(buffers));
     }
 }
 
@@ -297,13 +314,16 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
 
         {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-            if (!m_remote_write_in_progress) return; // Ignore manual writes (like CONNECT req)
+            if (!m_remote_write_in_progress) return; // Ignore manual writes
 
-            if (!m_remote_send_queue.empty()) {
+            int remaining = len;
+            while (remaining > 0 && !m_remote_send_queue.empty()) {
                 auto& front_buffer = m_remote_send_queue.front();
-                if (len < front_buffer->size()) {
-                    front_buffer->erase(front_buffer->begin(), front_buffer->begin() + len);
+                if (remaining < (int)front_buffer->size()) {
+                    front_buffer->erase(front_buffer->begin(), front_buffer->begin() + remaining);
+                    remaining = 0;
                 } else {
+                    remaining -= (int)front_buffer->size();
                     m_remote_send_queue.pop_front();
                 }
             }
@@ -321,13 +341,16 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len) {
 
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
-            if (!m_client_write_in_progress) return; // Ignore manual writes (like 204 hook)
+            if (!m_client_write_in_progress) return;
 
-            if (!m_client_send_queue.empty()) {
+            int remaining = len;
+            while (remaining > 0 && !m_client_send_queue.empty()) {
                 auto& front_buffer = m_client_send_queue.front();
-                if (len < front_buffer->size()) {
-                    front_buffer->erase(front_buffer->begin(), front_buffer->begin() + len);
+                if (remaining < (int)front_buffer->size()) {
+                    front_buffer->erase(front_buffer->begin(), front_buffer->begin() + remaining);
+                    remaining = 0;
                 } else {
+                    remaining -= (int)front_buffer->size();
                     m_client_send_queue.pop_front();
                 }
             }

@@ -68,11 +68,6 @@ private:
     std::atomic<bool> m_remote_at_eof{ false };
     std::atomic<bool> m_client_at_eof{ false };
 
-    // Backpressure Control
-    static const size_t HIGH_WATER_MARK = 8 * 1024 * 1024; // 8MB
-    static const size_t LOW_WATER_MARK = 2 * 1024 * 1024;  // 2MB
-    std::atomic<bool> m_client_read_paused{false};
-    std::atomic<bool> m_remote_read_paused{false};
     std::atomic<size_t> m_client_send_queue_size{0};
     std::atomic<size_t> m_remote_send_queue_size{0};
 };
