@@ -252,6 +252,7 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
 }
 
 void ProxyTCP::try_send(SOCKET socket) {
+    if (m_state == CLOSING) return;
     if (socket == m_remote_socket) {
         std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
         if (m_remote_write_in_progress || m_remote_send_queue.empty()) return;
