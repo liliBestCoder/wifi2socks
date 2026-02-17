@@ -52,7 +52,7 @@ private:
     bool m_is_direct;
 
     void try_send(SOCKET socket);
-    void on_write_complete(SOCKET socket, int len);
+    void on_write_complete(SOCKET socket, int len, const std::vector<std::shared_ptr<std::vector<char>>>& attempted_buffers);
 
     // Data flow to Client (from Remote)
     std::deque<std::shared_ptr<std::vector<char>>> m_client_send_queue;

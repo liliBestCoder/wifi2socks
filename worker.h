@@ -42,8 +42,9 @@ struct IO_CONTEXT {
     // Batch write support
     std::vector<std::shared_ptr<std::vector<char>>> write_buffers;
     std::vector<WSABUF> wsa_bufs;
+    size_t total_bytes_submitted;
 
-    IO_CONTEXT() : type(IO_READ), sock(INVALID_SOCKET), data_len(0), remote_addr_len(0), parent(nullptr) {
+    IO_CONTEXT() : type(IO_READ), sock(INVALID_SOCKET), data_len(0), remote_addr_len(0), parent(nullptr), total_bytes_submitted(0) {
         memset(&overlapped, 0, sizeof(OVERLAPPED));
     }
 };
@@ -52,7 +53,7 @@ struct SocketContext {
     SOCKET sock;
     
     std::function<void(char*, int, sockaddr_in*)> on_read;
-    std::function<void(int)> on_write; 
+    std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write; 
     std::function<void()> on_remove_done; 
     
     std::atomic<bool> closing;          

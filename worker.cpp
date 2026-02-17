@@ -122,7 +122,7 @@ void Worker::loop() {
                         if (ctx->on_read) ctx->on_read(nullptr, 0, nullptr);
                     }
                 } else if (io->type == IO_WRITE) {
-                    if (ctx->on_write) ctx->on_write((int)bytesTransferred);
+                    if (ctx->on_write) ctx->on_write((int)bytesTransferred, io->write_buffers);
                 } else if (io->type == IO_CONNECT) {
                     setsockopt(ctx->sock, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
                     if (io->task) io->task();
@@ -136,7 +136,7 @@ void Worker::loop() {
                 if (io->type == IO_READ) {
                     if (ctx->on_read) ctx->on_read(nullptr, -1, nullptr);
                 } else if (io->type == IO_WRITE && ctx->on_write) {
-                    ctx->on_write(-1);
+                    ctx->on_write(-1, io->write_buffers);
                 } else if (io->type == IO_CONNECT) {
                     LOG_ERROR("[Worker] ConnectEx async failure: %d", WSAGetLastError());
                     if (io->task) io->task();
@@ -174,7 +174,7 @@ void WorkerPool::init(int count) {
     }
 }
 
-void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int)> on_write, bool is_udp) {
+void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp) {
     IO_CONTEXT* io = acquire_io_context();
     io->type = IO_TASK;
     io->task = [this, s, on_read, on_write, is_udp]() {
@@ -207,7 +207,7 @@ void WorkerPool::remove_socket(SOCKET s, std::function<void()> on_done) {
 
 void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect, 
                                   std::function<void(char*, int, sockaddr_in*)> on_read,
-                                  std::function<void(int)> on_write) {
+                                  std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write) {
     IO_CONTEXT* init_task = acquire_io_context();
     init_task->type = IO_TASK;
     init_task->task = [this, s, addr, on_connect, on_read, on_write]() {
@@ -369,6 +369,7 @@ void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, std::vect
     io->sock = ctx->sock;
     io->parent = ctx;
     io->write_buffers = std::move(buffers);
+    io->total_bytes_submitted = 0;
 
     io->wsa_bufs.reserve(io->write_buffers.size());
     for (auto& buf : io->write_buffers) {
@@ -376,6 +377,7 @@ void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, std::vect
         w.buf = buf->data();
         w.len = (ULONG)buf->size();
         io->wsa_bufs.push_back(w);
+        io->total_bytes_submitted += w.len;
     }
 
     DWORD bytes = 0;
@@ -399,6 +401,7 @@ void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, const uin
     size_t copy_len = (std::min)(len, sizeof(io->buf));
     memcpy(io->buf, data, copy_len);
     io->data_len = copy_len;
+    io->total_bytes_submitted = copy_len;
 
     WSABUF w;
     w.buf = (char*)io->buf;
