@@ -99,7 +99,7 @@ int main() {
     GeoChecker::instance().init();
     LOG_INFO("[CORE] GeoChecker Initialized.");
 
-    PacketPool::instance().init(8192);
+    PacketPool::instance().init(1024 * 64);
     PacketMonitor::instance().start();
 
     std::string adapter_name = find_adapter_by_ip(g_config.tap_ip);

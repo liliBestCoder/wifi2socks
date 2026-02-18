@@ -13,23 +13,27 @@
 #include <condition_variable>
 #include <list>
 #include <memory>
+#include <atomic>
+#include <chrono>
 
-// Enable Jumbo Frame support to ensure buffer size is 9014 (safe for all DLL versions)
 #ifndef JUMBO_FRAME_SUPPORTED
 #define JUMBO_FRAME_SUPPORTED 1
 #endif
 
-// WinPkFilter SDK headers (Original ones restored)
+// WinPkFilter SDK headers
 #include "Common.h"
 #include "ndisapi.h"
 #include "packet_pool.h"
 
-// Combined flags for convenience if not in older Common.h
+// Combined flags definitions if not present in Common.h
 #ifndef MSTCP_FLAG_TUNNEL
-#define MSTCP_FLAG_TUNNEL (0x00000001 | 0x00000002)
+#define MSTCP_FLAG_TUNNEL 0x00000002
 #endif
 #ifndef MSTCP_FLAG_SENT_RECEIVE
-#define MSTCP_FLAG_SENT_RECEIVE (0x00000001 | 0x00000002)
+#define MSTCP_FLAG_SENT_RECEIVE 0x00000001
+#endif
+#ifndef MSTCP_FLAG_RECV_TUNNEL
+#define MSTCP_FLAG_RECV_TUNNEL 0x00000002
 #endif
 
 class WinPkFilterDriver {
@@ -39,22 +43,19 @@ public:
     struct Packet {
         RawPacketPtr data;
         bool outbound;
+        // Explicit constructor to solve C2661
         Packet(RawPacketPtr d, bool o) : data(std::move(d)), outbound(o) {}
         Packet() : outbound(false) {}
     };
 
     using PacketHandler = std::function<void(const char* packet, size_t length, bool outbound)>;
-
     using BatchPacketHandler = std::function<void(std::vector<Packet>&& packets)>;
 
     WinPkFilterDriver();
-
     ~WinPkFilterDriver();
 
     bool start(const std::string& adapter_name, PacketHandler handler, std::function<void()> on_before_batch = nullptr, std::function<void()> on_after_batch = nullptr);
-
     bool start_batch(const std::string& adapter_name, BatchPacketHandler handler);
-
     void stop();
 
     bool send_to_adapter(const char* packet, size_t length);
@@ -77,44 +78,47 @@ private:
     std::function<void()> m_on_after_batch;
 
     std::thread m_reader_thread;
-    bool m_running;
+    std::atomic<bool> m_running;
 
     // --- Multi-threading members ---
 
     unsigned int m_num_workers;
     std::vector<std::thread> m_worker_threads;
 
-    // Struct for packets in the worker queues
     struct QueuedPacket {
-        INTERMEDIATE_BUFFER* buffer;
+        PINTERMEDIATE_BUFFER buffer;
     };
 
-    // Each worker has its own queue to ensure packet order for a flow
     struct WorkerQueue {
         std::list<QueuedPacket> packets;
         std::mutex mtx;
         std::condition_variable cv;
     };
-    
-    // Use unique_ptr to make WorkerQueue "movable" for the vector
+    // Use unique_ptr to handle mutex non-copyable issue (C2280)
     std::vector<std::unique_ptr<WorkerQueue>> m_worker_queues;
 
-    // Struct for processed packets ready to be written back
     enum class PacketDestination { TO_ADAPTER, TO_MSTCP };
     struct ProcessedPacket {
-        INTERMEDIATE_BUFFER* buffer;
+        PINTERMEDIATE_BUFFER buffer;
         PacketDestination destination;
     };
     
-    // A single queue for all workers to put their results
     struct ResultQueue {
         std::list<ProcessedPacket> packets;
         std::mutex mtx;
     } m_results_queue;
     
-    HANDLE m_results_event; // Event to signal new results
+    HANDLE m_results_event; // Win32 Event for signaling
 
-    // --- End of multi-threading members ---
+    // Statistics counters (Pure atomic, no logging overhead in worker loop)
+    std::atomic<uint64_t> m_stat_rx_pkts{0};
+    std::atomic<uint64_t> m_stat_rx_bytes{0};
+    std::atomic<uint64_t> m_stat_tx_pkts{0};
+    std::atomic<uint64_t> m_stat_tx_bytes{0};
+    std::atomic<uint64_t> m_stat_work_time_us{0};
+    std::chrono::steady_clock::time_point m_last_stat_time;
+
+    // --- End of new members ---
 
     static const int BATCH_SIZE = 512;
     PETH_M_REQUEST m_read_request;

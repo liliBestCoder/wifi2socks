@@ -9,6 +9,7 @@
 #include "app_listener.h"
 #include "proxy_tcp.h"
 #include "dns_over_tcp_proxy.h"
+#include "dns_cache.h"
 
 #include <unordered_map>
 #include <mutex>
@@ -40,45 +41,53 @@ DnsResponse parse_dns_response(const char* data, int len) {
     uint16_t ancount = ntohs(*(uint16_t*)(data + 6));
     
     if (qdcount != 1) { // We only handle single-question responses
-        res.parse_error = true;
-        return res;
+        // res.parse_error = true; 
+        // Allow it, but parsing might be limited
     }
 
     const char* p = data + 12; // Start of question section
 
     // --- Parse Question Section ---
     std::string qname;
-    while (*p != 0) {
-        if ((unsigned char)*p > 63) { // It's a pointer
-            res.parse_error = true; // No pointers allowed in question name
-            return res;
+    // Only parse the first question
+    if (qdcount > 0) {
+        while (*p != 0) {
+            if ((unsigned char)*p >= 192) { // It's a pointer 0xC0xx
+                // Pointer logic not strictly needed for basic parsing of standard responses where qname is inline
+                // But for robustness:
+                int offset = ((unsigned char)*p & 0x3F) << 8 | (unsigned char)*(p + 1);
+                // We don't support pointer jumping back for qname extraction here for simplicity 
+                // in this lightweight parser unless needed. 
+                // Usually request QNAME is literal labels.
+                p += 2;
+                break; 
+            }
+            uint8_t label_len = (uint8_t)*p++;
+            if (p + label_len > data + len) {
+                res.parse_error = true;
+                return res;
+            }
+            if (!qname.empty()) qname += ".";
+            qname.append(p, label_len);
+            p += label_len;
         }
-        uint8_t label_len = (uint8_t)*p++;
-        if (p + label_len > data + len) {
+        if (*p == 0) p++; // Skip null terminator if not pointer
+        res.qname = qname;
+
+        if (p + 4 > data + len) {
             res.parse_error = true;
             return res;
         }
-        if (!qname.empty()) qname += ".";
-        qname.append(p, label_len);
-        p += label_len;
+        res.qtype = ntohs(*(uint16_t*)p);
+        p += 4; // Skip qtype and qclass
     }
-    p++; // Skip null terminator for qname
-    res.qname = qname;
-
-    if (p + 4 > data + len) {
-        res.parse_error = true;
-        return res;
-    }
-    res.qtype = ntohs(*(uint16_t*)p);
-    p += 4; // Skip qtype and qclass
 
     // --- Parse Answer Section ---
     for (int i = 0; i < ancount; ++i) {
-        if (p >= data + len) { res.parse_error = true; return res; }
+        if (p >= data + len) break;
 
         // Parse Name (can be a pointer)
-        const char* name_ptr = p;
-        if (( (unsigned char)name_ptr[0] & 0xC0) == 0xC0) { // Pointer
+        if (((unsigned char)*p & 0xC0) == 0xC0) { // Pointer
             p += 2;
         } else { // Full name
             while (*p != 0) {
@@ -88,22 +97,75 @@ DnsResponse parse_dns_response(const char* data, int len) {
             p++;
         }
 
-        if (p + 10 > data + len) { res.parse_error = true; return res; }
+        if (p + 10 > data + len) break;
         
         uint16_t type = ntohs(*(uint16_t*)p);
         uint16_t data_len = ntohs(*(uint16_t*)(p + 8));
         p += 10;
 
         if (type == 1 && data_len == 4) { // TYPE A record
-            char ip_str[INET_ADDRSTRLEN];
-            if (inet_ntop(AF_INET, p, ip_str, INET_ADDRSTRLEN)) {
-                res.addresses.push_back(ip_str);
+            if (p + 4 <= data + len) {
+                char ip_str[INET_ADDRSTRLEN];
+                if (inet_ntop(AF_INET, p, ip_str, INET_ADDRSTRLEN)) {
+                    res.addresses.push_back(ip_str);
+                }
             }
         }
         p += data_len;
     }
 
     return res;
+}
+
+// Helper to build a raw DNS A-record response
+// returns vector of bytes
+std::vector<char> build_dns_a_response(const char* request_data, int request_len, uint32_t ip_nbo) {
+    if (request_len < 12) return {};
+
+    std::vector<char> response;
+    response.reserve(request_len + 16); // Header + Q + Answer
+
+    // Copy Request
+    response.insert(response.end(), request_data, request_data + request_len);
+
+    // Modify Header
+    // 1. Flags (Byte 2 and 3). Set QR=1, RA=1. Keep RD if set.
+    // Standard response: 0x8180 (No error)
+    uint16_t* flags = (uint16_t*)(response.data() + 2);
+    *flags = htons(0x8180); 
+
+    // 2. Answer Count (Byte 6 and 7). Set to 1.
+    uint16_t* an_count = (uint16_t*)(response.data() + 6);
+    *an_count = htons(1);
+
+    // 3. Authority and Additional counts set to 0
+    uint16_t* ns_count = (uint16_t*)(response.data() + 8);
+    *ns_count = 0;
+    uint16_t* ar_count = (uint16_t*)(response.data() + 10);
+    *ar_count = 0;
+
+    // Append Answer Record
+    // Name: Pointer to the QNAME at offset 12 (0xC00C)
+    // 0xC0 0x0C
+    response.push_back((char)0xC0);
+    response.push_back((char)0x0C);
+
+    // Type: A (1)
+    response.push_back(0); response.push_back(1);
+    // Class: IN (1)
+    response.push_back(0); response.push_back(1);
+    // TTL: 300 seconds (0x0000012C)
+    response.push_back(0); response.push_back(0); response.push_back(1); response.push_back(0x2C);
+    // RDLENGTH: 4
+    response.push_back(0); response.push_back(4);
+    // RDATA: IP address (already in network byte order)
+    const char* ip_bytes = (const char*)&ip_nbo;
+    response.push_back(ip_bytes[0]);
+    response.push_back(ip_bytes[1]);
+    response.push_back(ip_bytes[2]);
+    response.push_back(ip_bytes[3]);
+
+    return response;
 }
 
 // A manager to handle all UDP proxy operations.
@@ -163,6 +225,21 @@ public:
         if (dport == 53) {
             std::string domain = parse_dns_query_domain(data, len);
             if (!domain.empty()) {
+                // *** DNS Cache Lookup ***
+                uint32_t cached_ip = DnsCache::instance().get(domain);
+                if (cached_ip != 0) {
+                    char ip_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &cached_ip, ip_str, INET_ADDRSTRLEN);
+                    LOG_INFO("[DNS] Cache Hit for '%s' -> %s", domain.c_str(), ip_str);
+                    
+                    std::vector<char> resp = build_dns_a_response(data, len, cached_ip);
+                    if (!resp.empty()) {
+                        sendto(listener_socket, resp.data(), (int)resp.size(), 0, (const sockaddr*)client_addr, sizeof(*client_addr));
+                    }
+                    return; // Intercepted
+                }
+                // ************************
+
                 RouteAction rule = RuleManager::instance().match_domain(domain);
                 bool is_cn = GeoChecker::instance().is_cn_domain(domain);
                 bool should_proxy_dns = (rule == RouteAction::PROXY) || (rule == RouteAction::PASS && !is_cn);
@@ -179,15 +256,23 @@ public:
                             } else {
                                 if (res.rcode == 0 && !res.addresses.empty()) {
                                     std::string ips;
+                                    uint32_t first_ip_nbo = 0;
                                     for (size_t i = 0; i < res.addresses.size(); ++i) {
                                         ips += res.addresses[i];
                                         if (i < res.addresses.size() - 1) ips += ", ";
+                                        if (i == 0) inet_pton(AF_INET, res.addresses[i].c_str(), &first_ip_nbo);
                                     }
                                     LOG_INFO("[DNS] Resolved '%s' to [%s] via DoT.", res.qname.c_str(), ips.c_str());
+                                    
+                                    // *** Write to Cache ***
+                                    if (first_ip_nbo != 0) {
+                                        DnsCache::instance().put(domain, first_ip_nbo, 300); // TTL 300s
+                                    }
+                                    // **********************
+
                                 } else if (res.rcode != 0) {
                                     LOG_INFO("[DNS] Failed to resolve '%s' via DoT. RCODE: %d", res.qname.c_str(), res.rcode);
                                 } else {
-                                    // RCODE is 0 but no A records, could be CNAME, MX etc. or empty response
                                     LOG_INFO("[DNS] Received response for '%s' via DoT (RCODE: 0, no A records).", res.qname.c_str());
                                 }
                             }
@@ -272,11 +357,20 @@ private:
             else {
                 if (res.rcode == 0 && !res.addresses.empty()) {
                     std::string ips;
+                    uint32_t first_ip_nbo = 0;
                     for (size_t i = 0; i < res.addresses.size(); ++i) {
                         ips += res.addresses[i];
                         if (i < res.addresses.size() - 1) ips += ", ";
+                        if (i == 0) inet_pton(AF_INET, res.addresses[i].c_str(), &first_ip_nbo);
                     }
                     LOG_INFO("[DNS] Resolved '%s' to [%s] via DIRECT.", res.qname.c_str(), ips.c_str());
+
+                    // *** Write to Cache ***
+                    if (first_ip_nbo != 0) {
+                        DnsCache::instance().put(res.qname, first_ip_nbo, 300);
+                    }
+                    // **********************
+
                 }
                 else if (res.rcode != 0) {
                     LOG_INFO("[DNS] Failed to resolve '%s' via DIRECT. RCODE: %d", res.qname.c_str(), res.rcode);
