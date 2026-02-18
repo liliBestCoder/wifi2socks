@@ -12,6 +12,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <list>
+#include <memory>
 
 // Enable Jumbo Frame support to ensure buffer size is 9014 (safe for all DLL versions)
 #ifndef JUMBO_FRAME_SUPPORTED
@@ -36,32 +37,25 @@ class WinPkFilterDriver {
 public:
 
     struct Packet {
-
         RawPacketPtr data;
-
         bool outbound;
-
+        Packet(RawPacketPtr d, bool o) : data(std::move(d)), outbound(o) {}
+        Packet() : outbound(false) {}
     };
 
     using PacketHandler = std::function<void(const char* packet, size_t length, bool outbound)>;
 
     using BatchPacketHandler = std::function<void(std::vector<Packet>&& packets)>;
 
-
-
     WinPkFilterDriver();
 
     ~WinPkFilterDriver();
-
-
 
     bool start(const std::string& adapter_name, PacketHandler handler, std::function<void()> on_before_batch = nullptr, std::function<void()> on_after_batch = nullptr);
 
     bool start_batch(const std::string& adapter_name, BatchPacketHandler handler);
 
     void stop();
-
-
 
     bool send_to_adapter(const char* packet, size_t length);
     bool send_to_mstcp(const char* packet, size_t length);
@@ -85,7 +79,7 @@ private:
     std::thread m_reader_thread;
     bool m_running;
 
-    // --- New members for multi-threading ---
+    // --- Multi-threading members ---
 
     unsigned int m_num_workers;
     std::vector<std::thread> m_worker_threads;
@@ -101,7 +95,9 @@ private:
         std::mutex mtx;
         std::condition_variable cv;
     };
-    std::vector<WorkerQueue> m_worker_queues;
+    
+    // Use unique_ptr to make WorkerQueue "movable" for the vector
+    std::vector<std::unique_ptr<WorkerQueue>> m_worker_queues;
 
     // Struct for processed packets ready to be written back
     enum class PacketDestination { TO_ADAPTER, TO_MSTCP };
@@ -114,10 +110,11 @@ private:
     struct ResultQueue {
         std::list<ProcessedPacket> packets;
         std::mutex mtx;
-        std::condition_variable cv;
     } m_results_queue;
     
-    // --- End of new members ---
+    HANDLE m_results_event; // Event to signal new results
+
+    // --- End of multi-threading members ---
 
     static const int BATCH_SIZE = 512;
     PETH_M_REQUEST m_read_request;
