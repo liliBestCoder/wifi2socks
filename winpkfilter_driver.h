@@ -10,6 +10,8 @@
 #include <thread>
 #include <vector>
 #include <mutex>
+#include <condition_variable>
+#include <list>
 
 // Enable Jumbo Frame support to ensure buffer size is 9014 (safe for all DLL versions)
 #ifndef JUMBO_FRAME_SUPPORTED
@@ -62,7 +64,6 @@ public:
 
 
     bool send_to_adapter(const char* packet, size_t length);
-    bool send_packets_to_adapter(std::vector<Packet>&& packets);
     bool send_to_mstcp(const char* packet, size_t length);
     bool get_adapter_mac(const std::string& adapter_name, uint8_t* mac);
 
@@ -70,7 +71,7 @@ public:
 
 private:
     void run();
-    void tx_run();
+    void worker_loop(unsigned int worker_id);
 
     CNdisApi m_ndis_api;
     HANDLE m_adapter_handle;
@@ -81,14 +82,42 @@ private:
     std::function<void()> m_on_before_batch;
     std::function<void()> m_on_after_batch;
 
-    std::thread m_worker_thread;
-    std::thread m_tx_thread;
+    std::thread m_reader_thread;
     bool m_running;
-    bool m_tx_running;
 
-    HANDLE m_tx_event;
-    std::mutex m_tx_mtx;
-    std::vector<std::vector<Packet>> m_tx_queue;
+    // --- New members for multi-threading ---
+
+    unsigned int m_num_workers;
+    std::vector<std::thread> m_worker_threads;
+
+    // Struct for packets in the worker queues
+    struct QueuedPacket {
+        INTERMEDIATE_BUFFER* buffer;
+    };
+
+    // Each worker has its own queue to ensure packet order for a flow
+    struct WorkerQueue {
+        std::list<QueuedPacket> packets;
+        std::mutex mtx;
+        std::condition_variable cv;
+    };
+    std::vector<WorkerQueue> m_worker_queues;
+
+    // Struct for processed packets ready to be written back
+    enum class PacketDestination { TO_ADAPTER, TO_MSTCP };
+    struct ProcessedPacket {
+        INTERMEDIATE_BUFFER* buffer;
+        PacketDestination destination;
+    };
+    
+    // A single queue for all workers to put their results
+    struct ResultQueue {
+        std::list<ProcessedPacket> packets;
+        std::mutex mtx;
+        std::condition_variable cv;
+    } m_results_queue;
+    
+    // --- End of new members ---
 
     static const int BATCH_SIZE = 512;
     PETH_M_REQUEST m_read_request;
@@ -96,7 +125,6 @@ private:
     
     PETH_M_REQUEST m_write_request;
     PETH_M_REQUEST m_mstcp_request;
-    PINTERMEDIATE_BUFFER m_write_buffers[BATCH_SIZE];
     
     INTERMEDIATE_BUFFER* m_send_buffer;
     std::mutex m_send_mutex;
