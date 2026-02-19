@@ -304,7 +304,11 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                             if (ip->DstAddr == m_gateway_ip) {
                                 int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
                                 USHORT dport = (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + ip_hdr_len))->DstPort : ((PUDP_HEADER)((char*)ip + ip_hdr_len))->DstPort;
-                                if (dport == htons(NAT_TARGET_PORT)) should_intercept = false;
+                                if (dport == htons(NAT_TARGET_PORT)) {
+                                    should_intercept = false;
+                                    recalculate_ip_checksum(ip); 
+                                    recalculate_tcp_udp_checksum(ip);
+                                }
                             }
                         }
 
