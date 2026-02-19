@@ -296,7 +296,19 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                         }
                     }
                     if (!handled) {
-                        if (!p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) && ip->SrcAddr != m_gateway_ip && ip->DstAddr != m_gateway_ip) {
+                        bool should_intercept = false;
+                        if (!p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) && ip->SrcAddr != m_gateway_ip) {
+                            should_intercept = true;
+                            // Check if packet is destined to the Proxy Port on the Gateway (Explicit Proxy or RST)
+                            // We should NOT intercept these, to avoid Poisoning/Looping, and to let them hit the socket directly.
+                            if (ip->DstAddr == m_gateway_ip) {
+                                int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
+                                USHORT dport = (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + ip_hdr_len))->DstPort : ((PUDP_HEADER)((char*)ip + ip_hdr_len))->DstPort;
+                                if (dport == htons(NAT_TARGET_PORT)) should_intercept = false;
+                            }
+                        }
+
+                        if (should_intercept) {
                             OriginalDestination od(ip->DstAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort : ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort, ip->SrcAddr);
                             uint64_t key = NatManager::make_key(ip->SrcAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort : ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
                             if (ip->Proto == IPPROTO_TCP) {
@@ -314,8 +326,11 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                                 if (od) {
                                     ip->SrcAddr = od->ip; if (ip->Proto == IPPROTO_TCP) ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort = od->port;
                                     else ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort = od->port;
-                                    recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
                                 }
+                                // Always recalculate checksums for traffic we intercept on the proxy port,
+                                // because capturing the packet breaks NDIS Checksum Offload context.
+                                recalculate_ip_checksum(ip); 
+                                recalculate_tcp_udp_checksum(ip);
                             }
                             packets_to_send.push_back(std::move(p)); handled = true;
                         }
