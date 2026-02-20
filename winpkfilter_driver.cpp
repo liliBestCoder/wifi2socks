@@ -14,6 +14,7 @@
 #include "logger.h"
 #include "nat_manager.h"
 #include "geo_checker.h"
+#include "tls_parser.h"
 
 // --- Protocol Header Definitions ---
 #include <pshpack1.h>
@@ -100,30 +101,6 @@ static uint16_t csum_finalize(uint32_t sum) {
     return (result == 0) ? 0xFFFF : result;
 }
 
-// 增量更新16位字段的校验和
-static void incremental_checksum_update(uint16_t* checksum, uint16_t old_val, uint16_t new_val) {
-    uint32_t sum = (~(*checksum)) & 0xFFFF;
-    sum += (~old_val) & 0xFFFF;
-    sum += new_val;
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    *checksum = ~((uint16_t)sum);
-}
-
-// 增量更新32位字段的校验和
-static void incremental_checksum_update(uint16_t* checksum, uint32_t old_val, uint32_t new_val) {
-    uint32_t sum = (~(*checksum)) & 0xFFFF;
-    sum += (~(old_val & 0xFFFF)) & 0xFFFF;
-    sum += (~(old_val >> 16)) & 0xFFFF;
-    sum += (new_val & 0xFFFF);
-    sum += (new_val >> 16);
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    *checksum = ~((uint16_t)sum);
-}
-
 static void recalculate_ip_checksum(PIP_HEADER ip) {
     ip->Csum = 0;
     ip->Csum = csum_finalize(csum_partial(ip, (ip->Ver_HLen & 0x0F) * 4, 0));
@@ -158,18 +135,31 @@ static void recalculate_tcp_udp_checksum(PIP_HEADER ip) {
     }
 }
 
-// Fixed symmetric hash function
+static void incremental_checksum_update(uint16_t* checksum, uint16_t old_val, uint16_t new_val) {
+    uint32_t sum = (~(*checksum)) & 0xFFFF;
+    sum += (~old_val) & 0xFFFF;
+    sum += new_val;
+    while (sum >> 16) { sum = (sum & 0xFFFF) + (sum >> 16); }
+    *checksum = ~((uint16_t)sum);
+}
+
+static void incremental_checksum_update_32(uint16_t* checksum, uint32_t old_val, uint32_t new_val) {
+    uint32_t sum = (~(*checksum)) & 0xFFFF;
+    sum += (~(old_val & 0xFFFF)) & 0xFFFF;
+    sum += (~(old_val >> 16)) & 0xFFFF;
+    sum += (new_val & 0xFFFF);
+    sum += (new_val >> 16);
+    while (sum >> 16) { sum = (sum & 0xFFFF) + (sum >> 16); }
+    *checksum = ~((uint16_t)sum);
+}
+
 static uint32_t get_flow_hash(const char* packet, size_t length) {
     if (length < 14 + sizeof(IP_HEADER)) return 0;
     PIP_HEADER ip = (PIP_HEADER)(packet + 14);
-    
-    // IP part: XOR ensures A^B == B^A
     uint32_t hash = ip->SrcAddr ^ ip->DstAddr ^ ip->Proto;
-    
     int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
     if (ip->Proto == IPPROTO_TCP && length >= 14 + ip_hdr_len + sizeof(TCP_HEADER)) {
         PTCP_HEADER tcp = (PTCP_HEADER)((uint8_t*)ip + ip_hdr_len);
-        // Port part: Use XOR for symmetry
         hash ^= (tcp->SrcPort ^ tcp->DstPort); 
     } else if (ip->Proto == IPPROTO_UDP && length >= 14 + ip_hdr_len + sizeof(UDP_HEADER)) {
         PUDP_HEADER udp = (PUDP_HEADER)((uint8_t*)ip + ip_hdr_len);
@@ -181,7 +171,6 @@ static uint32_t get_flow_hash(const char* packet, size_t length) {
 WinPkFilterDriver::WinPkFilterDriver()
     : m_adapter_handle(nullptr), m_wait_event(nullptr), m_running(false), m_gateway_ip(0), m_results_event(nullptr) {
     CNdisApi::SetPoolSize(32768);
-
     m_num_workers = (std::max)(1u, std::thread::hardware_concurrency());
     for (unsigned int i = 0; i < m_num_workers; ++i) {
         m_worker_queues.push_back(std::make_unique<WorkerQueue>());
@@ -271,8 +260,6 @@ void WinPkFilterDriver::stop() {
 
 void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
     std::list<QueuedPacket> local_queue;
-    std::vector<Packet> packets_to_send; packets_to_send.reserve(BATCH_SIZE);
-    std::vector<Packet> packets_to_mstcp; packets_to_mstcp.reserve(BATCH_SIZE);
     while (m_running) {
         {
             std::unique_lock<std::mutex> lock(m_worker_queues[worker_id]->mtx);
@@ -282,108 +269,98 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
         }
         
         auto start_time = std::chrono::steady_clock::now();
-        packets_to_send.clear(); packets_to_mstcp.clear();
+        std::vector<ProcessedPacket> results;
         
         for (auto& p_in : local_queue) {
-            Packet p{ RawPacketPtr(p_in.buffer), (p_in.buffer->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) };
-            unsigned char* buffer = p.data->m_IBuffer;
-            size_t length = p.data->m_Length;
+            PINTERMEDIATE_BUFFER buffer_ptr = p_in.buffer;
+            unsigned char* buffer = buffer_ptr->m_IBuffer;
+            size_t length = buffer_ptr->m_Length;
+            bool outbound = (buffer_ptr->m_dwDeviceFlags == PACKET_FLAG_ON_SEND);
             bool handled = false;
 
-            if (length >= 14) {
-                USHORT ether_type = ntohs(*(USHORT*)(buffer + 12));
-                if (ether_type == ETHERTYPE_IP && length >= 34) {
-                    PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
-                    
-                    if (!handled) {
-                        bool should_intercept = false;
-                        if (!p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) && ip->SrcAddr != m_gateway_ip) {
-                            should_intercept = true;
-                            // Check if packet is destined to the Proxy Port on the Gateway (Explicit Proxy or RST)
-                            // We should NOT intercept these, to avoid Poisoning/Looping, and to let them hit the socket directly.
-                            if (ip->DstAddr == m_gateway_ip) {
-                                int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
-                                USHORT dport = (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + ip_hdr_len))->DstPort : ((PUDP_HEADER)((char*)ip + ip_hdr_len))->DstPort;
-                                if (dport == htons(NAT_TARGET_PORT)) {
-                                    should_intercept = false;
-                                    recalculate_ip_checksum(ip); 
-                                    recalculate_tcp_udp_checksum(ip);
-                                }
-                            }
+            if (length >= 14 + 20) {
+                PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
+                int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
+                if (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) {
+                    if (!outbound && ip->SrcAddr != m_gateway_ip) {
+                        // Inbound: Redirect to Gateway
+                        OriginalDestination od(ip->DstAddr, 0, ip->SrcAddr);
+                        uint64_t key = 0;
+                        uint32_t old_dst_ip = ip->DstAddr;
+                        if (ip->Proto == IPPROTO_TCP) {
+                            PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + ip_hdr_len);
+                            od.port = tcp->DstPort;
+                            key = NatManager::make_key(ip->SrcAddr, tcp->SrcPort);
+                            NatManager::instance().create_tcp_mapping(key, od);
+                            ip->DstAddr = m_gateway_ip;
+                            uint16_t old_dst_port = tcp->DstPort;
+                            tcp->DstPort = htons(NAT_TARGET_PORT);
+                            incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
+                            incremental_checksum_update(&tcp->Csum, old_dst_ip, ip->DstAddr);
+                            incremental_checksum_update(&tcp->Csum, old_dst_port, tcp->DstPort);
+                        } else {
+                            PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
+                            od.port = udp->DstPort;
+                            key = NatManager::make_key(ip->SrcAddr, udp->SrcPort);
+                            NatManager::instance().create_or_update_udp_mapping(key, od);
+                            ip->DstAddr = m_gateway_ip;
+                            uint16_t old_dst_port = udp->DstPort;
+                            udp->DstPort = htons(NAT_TARGET_PORT);
+                            incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
+                            incremental_checksum_update(&udp->Csum, old_dst_ip, ip->DstAddr);
+                            incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
                         }
+                        results.push_back({ buffer_ptr, PacketDestination::TO_MSTCP });
+                        handled = true;
+                    } else if (outbound) {
+                        // Outbound: Recover Original Address
+                        uint16_t sport = 0;
+                        if (ip->Proto == IPPROTO_TCP) sport = ntohs(((PTCP_HEADER)((char*)ip + ip_hdr_len))->SrcPort);
+                        else sport = ntohs(((PUDP_HEADER)((char*)ip + ip_hdr_len))->SrcPort);
 
-                        if (should_intercept) {
-                            OriginalDestination od(ip->DstAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort : ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort, ip->SrcAddr);
-                            uint64_t key = NatManager::make_key(ip->SrcAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort : ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
-                            uint32_t old_dst_ip = ip->DstAddr;
-                            if (ip->Proto == IPPROTO_TCP) {
-                                PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                uint16_t old_dst_port = tcp->DstPort;
-                                od.port = tcp->DstPort; NatManager::instance().create_tcp_mapping(key, od);
-                                ip->DstAddr = m_gateway_ip;
-                                tcp->DstPort = htons(NAT_TARGET_PORT);
-                                incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
-                                incremental_checksum_update(&tcp->Csum, old_dst_ip, ip->DstAddr);
-                                incremental_checksum_update(&tcp->Csum, old_dst_port, tcp->DstPort);
-                            } else {
-                                PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                uint16_t old_dst_port = udp->DstPort;
-                                od.port = udp->DstPort; NatManager::instance().create_or_update_udp_mapping(key, od);
-                                ip->DstAddr = m_gateway_ip;
-                                udp->DstPort = htons(NAT_TARGET_PORT);
-                                incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
-                                incremental_checksum_update(&udp->Csum, old_dst_ip, ip->DstAddr);
-                                incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
-                            }
-                            packets_to_mstcp.push_back(std::move(p)); handled = true;
-                        } else if (p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP)) {
-                            USHORT sport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort) : ntohs(((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
-                            if (sport == NAT_TARGET_PORT) {
-                                auto od = NatManager::instance().get_mapping(NatManager::make_key(ip->DstAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort : ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort));
-                                if (od) {
-                                    // Mapping found, packet is modified. Use incremental checksum update.
-                                    uint32_t old_src_ip = ip->SrcAddr;
-                                    ip->SrcAddr = od->ip;
-                                    incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
+                        if (sport == NAT_TARGET_PORT) {
+                            uint64_t key = 0;
+                            if (ip->Proto == IPPROTO_TCP) key = NatManager::make_key(ip->DstAddr, ((PTCP_HEADER)((char*)ip + ip_hdr_len))->DstPort);
+                            else key = NatManager::make_key(ip->DstAddr, ((PUDP_HEADER)((char*)ip + ip_hdr_len))->DstPort);
 
-                                    if (ip->Proto == IPPROTO_TCP) {
-                                        PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                        uint16_t old_src_port = tcp->SrcPort;
-                                        tcp->SrcPort = od->port;
-                                        // Update TCP checksum for the change in pseudo-header (IP address)
-                                        incremental_checksum_update(&tcp->Csum, old_src_ip, ip->SrcAddr);
-                                        // Update TCP checksum for the change in source port
-                                        incremental_checksum_update(&tcp->Csum, old_src_port, tcp->SrcPort);
-                                    } else { // UDP
-                                        PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                        uint16_t old_src_port = udp->SrcPort;
-                                        udp->SrcPort = od->port;
-                                        // Update UDP checksum for the change in pseudo-header (IP address)
-                                        incremental_checksum_update(&udp->Csum, old_src_ip, ip->SrcAddr);
-                                        // Update UDP checksum for the change in source port
-                                        incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
-                                    }
+                            auto od = NatManager::instance().get_mapping(key);
+                            if (od) {
+                                uint32_t old_src_ip = ip->SrcAddr;
+                                ip->SrcAddr = od->ip;
+                                incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
+                                if (ip->Proto == IPPROTO_TCP) {
+                                    PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + ip_hdr_len);
+                                    uint16_t old_src_port = tcp->SrcPort;
+                                    tcp->SrcPort = od->port;
+                                    incremental_checksum_update(&tcp->Csum, old_src_ip, ip->SrcAddr);
+                                    incremental_checksum_update(&tcp->Csum, old_src_port, tcp->SrcPort);
                                 } else {
-                                    // No mapping found. Packet is not modified, but we still recalculate checksums
-                                    // because capturing the packet breaks NDIS Checksum Offload context.
-                                    recalculate_ip_checksum(ip);
-                                    recalculate_tcp_udp_checksum(ip);
+                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
+                                    uint16_t old_src_port = udp->SrcPort;
+                                    udp->SrcPort = od->port;
+                                    incremental_checksum_update(&udp->Csum, old_src_ip, ip->SrcAddr);
+                                    incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
                                 }
+                            } else {
+                                recalculate_ip_checksum(ip);
+                                recalculate_tcp_udp_checksum(ip);
                             }
-                            packets_to_send.push_back(std::move(p)); handled = true;
                         }
+                        results.push_back({ buffer_ptr, PacketDestination::TO_ADAPTER });
+                        handled = true;
                     }
                 }
             }
-            if (!handled) p.outbound ? packets_to_send.push_back(std::move(p)) : packets_to_mstcp.push_back(std::move(p));
+            if (!handled) {
+                results.push_back({ buffer_ptr, outbound ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP });
+            }
         }
         
         m_stat_work_time_us += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_time).count();
         local_queue.clear();
-        if (!packets_to_send.empty() || !packets_to_mstcp.empty()) {
+        if (!results.empty()) {
             std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-            for (auto& pkt : packets_to_send) m_results_queue.packets.push_back({ pkt.data.release(), PacketDestination::TO_ADAPTER });
-            for (auto& pkt : packets_to_mstcp) m_results_queue.packets.push_back({ pkt.data.release(), PacketDestination::TO_MSTCP });
+            m_results_queue.packets.splice(m_results_queue.packets.end(), std::list<ProcessedPacket>(std::make_move_iterator(results.begin()), std::make_move_iterator(results.end())));
             SetEvent(m_results_event);
         }
     }
@@ -392,121 +369,135 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
 void WinPkFilterDriver::run() {
     std::list<ProcessedPacket> local_results;
     HANDLE wait_events[2] = { m_wait_event, m_results_event };
+    
+    in_addr gateway_addr_struct{};
+    inet_pton(AF_INET, g_config.tap_ip.c_str(), &gateway_addr_struct);
+    ULONG gateway_ip = gateway_addr_struct.s_addr;
+
     while (m_running) {
         WaitForMultipleObjects(2, wait_events, FALSE, 10);
         if (!m_running) break;
 
         // 1. Read & Dispatch
-        for (int r = 0; r < 1 && m_running; ++r) {
-            m_read_request->dwPacketsNumber = BATCH_SIZE;
-            if (m_ndis_api.ReadPackets(m_read_request) && m_read_request->dwPacketsSuccess > 0) {
-                std::vector<std::list<QueuedPacket>> groups(m_num_workers);
-                for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
-                    PINTERMEDIATE_BUFFER b = m_read_request->EthPacket[i].Buffer;
-                    if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) { // Outbound from local stack (Upload)
-                        m_stat_ul_pkts++; m_stat_ul_bytes += b->m_Length;
-                    } else { // Inbound from network (Download)
-                        m_stat_dl_pkts++; m_stat_dl_bytes += b->m_Length;
-                    }
+        m_read_request->dwPacketsNumber = BATCH_SIZE;
+        if (m_ndis_api.ReadPackets(m_read_request) && m_read_request->dwPacketsSuccess > 0) {
+            std::vector<std::list<QueuedPacket>> groups(m_num_workers);
+            for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
+                PINTERMEDIATE_BUFFER b = m_read_request->EthPacket[i].Buffer;
+                bool handled = false;
 
-                    // --- Fast Path ---
-                    bool handled = false;
-                    if (b->m_Length >= 14) {
-                        unsigned char* buffer = b->m_IBuffer;
-                        USHORT ether_type = ntohs(*(USHORT*)(buffer + 12));
+                if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) {
+                    m_stat_ul_pkts++; m_stat_ul_bytes += b->m_Length;
+                } else {
+                    m_stat_dl_pkts++; m_stat_dl_bytes += b->m_Length;
+                }
 
-                        if (ether_type == ETHERTYPE_ARP && b->m_Length >= 14 + sizeof(ARP_HEADER)) {
-                            PARP_HEADER arp = (PARP_HEADER)(buffer + 14);
-                            if (b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && arp->OpCode == htons(1) && arp->DstIp == m_gateway_ip) {
-                                PINTERMEDIATE_BUFFER reply_buffer = PacketPool::instance().acquire();
-                                if (reply_buffer) {
-                                    uint8_t* reply = reply_buffer->m_IBuffer;
-                                    memcpy(reply, buffer + 6, 6); 
-                                    memcpy(reply + 6, m_adapter_mac, 6);
-                                    *(USHORT*)(reply + 12) = htons(ETHERTYPE_ARP);
-                                    PARP_HEADER rarp = (PARP_HEADER)(reply + 14);
-                                    rarp->HwType = htons(1); rarp->ProtoType = htons(ETHERTYPE_IP); rarp->HwLen = 6; rarp->ProtoLen = 4; rarp->OpCode = htons(2);
-                                    memcpy(rarp->SrcMac, m_adapter_mac, 6); rarp->SrcIp = m_gateway_ip; memcpy(rarp->DstMac, arp->SrcMac, 6); rarp->DstIp = arp->SrcIp;
-                                    reply_buffer->m_Length = 60;
+                if (b->m_Length >= 14) {
+                    unsigned char* buffer = b->m_IBuffer;
+                    USHORT ether_type = ntohs(*(USHORT*)(buffer + 12));
 
-                                    std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-                                    m_results_queue.packets.push_back({ reply_buffer, PacketDestination::TO_ADAPTER });
-                                    SetEvent(m_results_event);
-                                }
-                                handled = true;
+                    if (ether_type == ETHERTYPE_ARP && b->m_Length >= 14 + sizeof(ARP_HEADER)) {
+                        PARP_HEADER arp = (PARP_HEADER)(buffer + 14);
+                        if (b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && arp->OpCode == htons(1) && arp->DstIp == gateway_ip) {
+                            PINTERMEDIATE_BUFFER rb = PacketPool::instance().acquire();
+                            if (rb) {
+                                uint8_t* r = rb->m_IBuffer;
+                                memcpy(r, buffer + 6, 6); memcpy(r + 6, m_adapter_mac, 6);
+                                *(USHORT*)(r + 12) = htons(ETHERTYPE_ARP);
+                                PARP_HEADER ra = (PARP_HEADER)(r + 14);
+                                ra->HwType = htons(1); ra->ProtoType = htons(ETHERTYPE_IP); ra->HwLen = 6; ra->ProtoLen = 4; ra->OpCode = htons(2);
+                                memcpy(ra->SrcMac, m_adapter_mac, 6); ra->SrcIp = gateway_ip; memcpy(ra->DstMac, arp->SrcMac, 6); ra->DstIp = arp->SrcIp;
+                                rb->m_Length = 60;
+                                std::lock_guard<std::mutex> lock(m_results_queue.mtx);
+                                m_results_queue.packets.push_back({ rb, PacketDestination::TO_ADAPTER });
+                                SetEvent(m_results_event);
                             }
-                        } else if (ether_type == ETHERTYPE_IP && b->m_Length >= 34) {
-                            PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
-                            int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
-
-                            if (ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
-                                PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ip_hdr_len);
-                                if (icmp->Type == 8 && ip->DstAddr == m_gateway_ip) {
-                                    // In-place modification for echo reply
-                                    uint8_t tmac[6]; 
-                                    memcpy(tmac, buffer, 6); 
-                                    memcpy(buffer, buffer + 6, 6); 
-                                    memcpy(buffer + 6, tmac, 6);
-                                    ULONG tip = ip->SrcAddr; 
-                                    ip->SrcAddr = ip->DstAddr; 
-                                    ip->DstAddr = tip;
-                                    icmp->Type = 0; 
-                                    recalculate_ip_checksum(ip); 
-                                    recalculate_tcp_udp_checksum(ip);
-
+                            handled = true;
+                        }
+                    } else if (ether_type == ETHERTYPE_IP && b->m_Length >= 34) {
+                        PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
+                        int ihl = (ip->Ver_HLen & 0x0F) * 4;
+                        if (ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND) {
+                            PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ihl);
+                            if (icmp->Type == 8 && ip->DstAddr == gateway_ip) {
+                                uint8_t tmac[6]; memcpy(tmac, buffer, 6); memcpy(buffer, buffer + 6, 6); memcpy(buffer + 6, tmac, 6);
+                                ULONG tip = ip->SrcAddr; ip->SrcAddr = ip->DstAddr; ip->DstAddr = tip;
+                                icmp->Type = 0; recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
+                                {
                                     std::lock_guard<std::mutex> lock(m_results_queue.mtx);
                                     m_results_queue.packets.push_back({ b, PacketDestination::TO_ADAPTER });
-                                    m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred
-                                    handled = true;
                                 }
-                            } else if (ip->Proto == IPPROTO_UDP && b->m_Length >= 14 + ip_hdr_len + sizeof(UDP_HEADER)) {
-                                PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
-                                USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
-                                if (sp == 67 || dp == 67 || sp == 68 || dp == 68) { // DHCP Fast Path
-                                    PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
+                                m_read_request->EthPacket[i].Buffer = nullptr;
+                                SetEvent(m_results_event);
+                                handled = true;
+                            }
+                        } else if (ip->Proto == IPPROTO_UDP && b->m_Length >= 14 + ihl + 8) {
+                            PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ihl);
+                            USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
+                            if (sp == 67 || dp == 67 || sp == 68 || dp == 68) {
+                                PacketDestination d = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
+                                {
                                     std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-                                    m_results_queue.packets.push_back({ b, dest });
-                                    m_read_request->EthPacket[i].Buffer = nullptr; // 所有权转移
-                                    SetEvent(m_results_event);
-                                    handled = true;
-                                } else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) { // Drop Discovery
-                                    PacketPool::instance().release(b);
-                                    m_read_request->EthPacket[i].Buffer = nullptr; // 释放
-                                    handled = true;
+                                    m_results_queue.packets.push_back({ b, d });
                                 }
-                                    // Other broadcast/multicast traffic
-                                    PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
-                                    std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-                                    m_results_queue.packets.push_back({ b, dest });
-                                    m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred
-                                    SetEvent(m_results_event);
-                                    handled = true;
+                                m_read_request->EthPacket[i].Buffer = nullptr; handled = true;
+                                SetEvent(m_results_event);
+                            } else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) {
+                                PacketPool::instance().release(b); m_read_request->EthPacket[i].Buffer = nullptr; handled = true;
+                            }
+                        } else if (ip->Proto == IPPROTO_TCP && b->m_Length >= 14 + ihl + 20) {
+                            PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + ihl);
+                            int thl = (tcp->HdrLen >> 4) * 4;
+                            if (b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && ntohs(tcp->DstPort) == 80) {
+                                int pl = ntohs(ip->Len) - ihl - thl;
+                                bool hook = (ip->DstAddr == gateway_ip);
+                                if (!hook && pl > 0) hook = is_generate_204_request((unsigned char*)tcp + thl, (size_t)pl);
+                                if (hook && pl > 0) {
+                                    PINTERMEDIATE_BUFFER rb = PacketPool::instance().acquire();
+                                    if (rb) {
+                                        unsigned char* r = rb->m_IBuffer;
+                                        memcpy(r, buffer + 6, 6); memcpy(r + 6, buffer, 6); *(USHORT*)(r + 12) = htons(0x0800);
+                                        PIP_HEADER ri = (PIP_HEADER)(r + 14);
+                                        ri->Ver_HLen = 0x45; ri->TOS = 0; ri->ID = htons(0x1234); ri->Flags_Frag = 0; ri->TTL = 64; ri->Proto = IPPROTO_TCP;
+                                        ri->SrcAddr = ip->DstAddr; ri->DstAddr = ip->SrcAddr;
+                                        PTCP_HEADER rt = (PTCP_HEADER)((char*)ri + 20);
+                                        rt->SrcPort = tcp->DstPort; rt->DstPort = tcp->SrcPort;
+                                        rt->SeqNum = tcp->AckNum; rt->AckNum = htonl(ntohl(tcp->SeqNum) + (uint32_t)pl);
+                                        rt->HdrLen = 0x50; rt->Flags = 0x19; rt->WinSize = htons(65535); rt->UrgPtr = 0;
+                                        const char* c = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+                                        int cl = (int)strlen(c); memcpy((char*)rt + 20, c, cl);
+                                        ri->Len = htons(40 + cl); rb->m_Length = 14 + 40 + cl;
+                                        recalculate_ip_checksum(ri); recalculate_tcp_udp_checksum(ri);
+                                        {
+                                            std::lock_guard<std::mutex> lock(m_results_queue.mtx);
+                                            m_results_queue.packets.push_back({ rb, PacketDestination::TO_ADAPTER });
+                                        }
+                                        SetEvent(m_results_event);
+                                    }
+                                    PacketPool::instance().release(b); m_read_request->EthPacket[i].Buffer = nullptr; handled = true;
                                 }
                             }
                         }
                     }
-
-                    // --- Slow Path (if not handled by fast path) ---
-                    if (!handled) {
-                        groups[get_flow_hash((char*)b->m_IBuffer, b->m_Length) % m_num_workers].push_back({ b });
-                        m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred to worker
-                    }
-
-                    // Replace the used buffer in the read request
-                    PINTERMEDIATE_BUFFER next_b = PacketPool::instance().acquire();
-                    if (next_b) {
-                        m_read_request->EthPacket[i].Buffer = next_b;
-                    }
                 }
-                for (unsigned int i = 0; i < m_num_workers; ++i) {
-                    if (!groups[i].empty()) {
-                        std::lock_guard<std::mutex> lock(m_worker_queues[i]->mtx);
-                        m_worker_queues[i]->packets.splice(m_worker_queues[i]->packets.end(), groups[i]);
-                        m_worker_queues[i]->cv.notify_one();
-                    }
+
+                if (!handled) {
+                    groups[get_flow_hash((char*)b->m_IBuffer, b->m_Length) % m_num_workers].push_back({ b });
+                    m_read_request->EthPacket[i].Buffer = nullptr;
                 }
-            } else break;
-        }
+
+                if (m_read_request->EthPacket[i].Buffer == nullptr) {
+                    m_read_request->EthPacket[i].Buffer = PacketPool::instance().acquire();
+                }
+            }
+            for (unsigned int j = 0; j < m_num_workers; ++j) {
+                if (!groups[j].empty()) {
+                    std::lock_guard<std::mutex> lock(m_worker_queues[j]->mtx);
+                    m_worker_queues[j]->packets.splice(m_worker_queues[j]->packets.end(), groups[j]);
+                    m_worker_queues[j]->cv.notify_one();
+                }
+            }
+        } else break;
 
         // 2. Write Results
         {
@@ -514,38 +505,28 @@ void WinPkFilterDriver::run() {
             if (!m_results_queue.packets.empty()) local_results.splice(local_results.end(), m_results_queue.packets);
         }
         if (!local_results.empty()) {
-            m_write_request->hAdapterHandle = m_adapter_handle; 
-            m_mstcp_request->hAdapterHandle = m_adapter_handle;
-            m_write_request->dwPacketsNumber = 0; 
-            m_mstcp_request->dwPacketsNumber = 0;
-
+            m_write_request->hAdapterHandle = m_adapter_handle; m_mstcp_request->hAdapterHandle = m_adapter_handle;
             auto it = local_results.begin();
             while (it != local_results.end()) {
-                if (it->destination == PacketDestination::TO_ADAPTER) {
-                    if (m_write_request->dwPacketsNumber < BATCH_SIZE) {
-                        m_write_request->EthPacket[m_write_request->dwPacketsNumber++].Buffer = it->buffer;
-                        it = local_results.erase(it);
-                    } else break;
-                } else { // TO_MSTCP
-                    if (m_mstcp_request->dwPacketsNumber < BATCH_SIZE) {
-                        m_mstcp_request->EthPacket[m_mstcp_request->dwPacketsNumber++].Buffer = it->buffer;
-                        it = local_results.erase(it);
-                    } else break;
+                m_write_request->dwPacketsNumber = 0; m_mstcp_request->dwPacketsNumber = 0;
+                while (it != local_results.end() && m_write_request->dwPacketsNumber < BATCH_SIZE && m_mstcp_request->dwPacketsNumber < BATCH_SIZE) {
+                    if (it->destination == PacketDestination::TO_ADAPTER) m_write_request->EthPacket[m_write_request->dwPacketsNumber++].Buffer = it->buffer;
+                    else m_mstcp_request->EthPacket[m_mstcp_request->dwPacketsNumber++].Buffer = it->buffer;
+                    it = local_results.erase(it);
                 }
-            }
-
-            if (m_write_request->dwPacketsNumber > 0) {
-                if (m_ndis_api.SendPacketsToAdapter(m_write_request)) {
-                    for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) PacketPool::instance().release(m_write_request->EthPacket[i].Buffer);
-                } else {
-                    for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) local_results.push_back({m_write_request->EthPacket[i].Buffer, PacketDestination::TO_ADAPTER});
+                if (m_write_request->dwPacketsNumber > 0) {
+                    if (m_ndis_api.SendPacketsToAdapter(m_write_request)) {
+                        for (UINT j = 0; j < m_write_request->dwPacketsNumber; ++j) PacketPool::instance().release(m_write_request->EthPacket[j].Buffer);
+                    } else {
+                        for (UINT j = 0; j < m_write_request->dwPacketsNumber; ++j) local_results.push_back({ m_write_request->EthPacket[j].Buffer, PacketDestination::TO_ADAPTER });
+                    }
                 }
-            }
-            if (m_mstcp_request->dwPacketsNumber > 0) {
-                if (m_ndis_api.SendPacketsToMstcp(m_mstcp_request)) {
-                    for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) PacketPool::instance().release(m_mstcp_request->EthPacket[i].Buffer);
-                } else {
-                    for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) local_results.push_back({m_mstcp_request->EthPacket[i].Buffer, PacketDestination::TO_MSTCP});
+                if (m_mstcp_request->dwPacketsNumber > 0) {
+                    if (m_ndis_api.SendPacketsToMstcp(m_mstcp_request)) {
+                        for (UINT j = 0; j < m_mstcp_request->dwPacketsNumber; ++j) PacketPool::instance().release(m_mstcp_request->EthPacket[j].Buffer);
+                    } else {
+                        for (UINT j = 0; j < m_mstcp_request->dwPacketsNumber; ++j) local_results.push_back({ m_mstcp_request->EthPacket[j].Buffer, PacketDestination::TO_MSTCP });
+                    }
                 }
             }
         }
