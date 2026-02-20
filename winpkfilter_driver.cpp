@@ -437,12 +437,14 @@ void WinPkFilterDriver::run() {
                     if (next_b) {
                         m_read_request->EthPacket[i].Buffer = next_b;
                     } else {
-                        groups[get_flow_hash((char*)b->m_IBuffer, b->m_Length) % m_num_workers].pop_back();
-                        if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) {
-                            m_stat_ul_pkts--;
-                        } else {
-                            m_stat_dl_pkts--;
-                        }
+                        // The packet pool is exhausted. This indicates that the worker threads are backed up
+                        // and we are reading from the adapter faster than we can process.
+                        // Instead of dropping the packet (which was the bug), we apply back-pressure
+                        // by simply stopping the read loop. The packet that was just read (`b`)
+                        // has been queued to the worker, and we will not read any more packets until
+                        // the workers have had a chance to catch up and free some buffers.
+                        LOG_WARN("Packet pool exhausted, applying back-pressure.");
+                        break; // Stop reading for this cycle.
                     }
                 }
                 for (unsigned int i = 0; i < m_num_workers; ++i) {
