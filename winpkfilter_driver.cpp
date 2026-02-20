@@ -360,7 +360,9 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
         local_queue.clear();
         if (!results.empty()) {
             std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-            m_results_queue.packets.splice(m_results_queue.packets.end(), std::list<ProcessedPacket>(std::make_move_iterator(results.begin()), std::make_move_iterator(results.end())));
+            for (const auto& r : results) {
+                m_results_queue.packets.push_back(r);
+            }
             SetEvent(m_results_event);
         }
     }
@@ -434,16 +436,22 @@ void WinPkFilterDriver::run() {
                         } else if (ip->Proto == IPPROTO_UDP && b->m_Length >= 14 + ihl + 8) {
                             PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ihl);
                             USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
+                            // DHCP Fast Path: 透明转发
                             if (sp == 67 || dp == 67 || sp == 68 || dp == 68) {
                                 PacketDestination d = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
                                 {
                                     std::lock_guard<std::mutex> lock(m_results_queue.mtx);
                                     m_results_queue.packets.push_back({ b, d });
                                 }
-                                m_read_request->EthPacket[i].Buffer = nullptr; handled = true;
+                                m_read_request->EthPacket[i].Buffer = nullptr; 
+                                handled = true;
                                 SetEvent(m_results_event);
-                            } else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) {
-                                PacketPool::instance().release(b); m_read_request->EthPacket[i].Buffer = nullptr; handled = true;
+                            } 
+                            // SSDP/mDNS Fast Path: 直接丢弃
+                            else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) {
+                                PacketPool::instance().release(b); 
+                                m_read_request->EthPacket[i].Buffer = nullptr; 
+                                handled = true;
                             }
                         } else if (ip->Proto == IPPROTO_TCP && b->m_Length >= 14 + ihl + 20) {
                             PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + ihl);
@@ -516,16 +524,16 @@ void WinPkFilterDriver::run() {
                 }
                 if (m_write_request->dwPacketsNumber > 0) {
                     if (m_ndis_api.SendPacketsToAdapter(m_write_request)) {
-                        for (UINT j = 0; j < m_write_request->dwPacketsNumber; ++j) PacketPool::instance().release(m_write_request->EthPacket[j].Buffer);
+                        for (UINT k = 0; k < m_write_request->dwPacketsNumber; ++k) PacketPool::instance().release(m_write_request->EthPacket[k].Buffer);
                     } else {
-                        for (UINT j = 0; j < m_write_request->dwPacketsNumber; ++j) local_results.push_back({ m_write_request->EthPacket[j].Buffer, PacketDestination::TO_ADAPTER });
+                        for (UINT k = 0; k < m_write_request->dwPacketsNumber; ++k) local_results.push_back({ m_write_request->EthPacket[k].Buffer, PacketDestination::TO_ADAPTER });
                     }
                 }
                 if (m_mstcp_request->dwPacketsNumber > 0) {
                     if (m_ndis_api.SendPacketsToMstcp(m_mstcp_request)) {
-                        for (UINT j = 0; j < m_mstcp_request->dwPacketsNumber; ++j) PacketPool::instance().release(m_mstcp_request->EthPacket[j].Buffer);
+                        for (UINT k = 0; k < m_mstcp_request->dwPacketsNumber; ++k) PacketPool::instance().release(m_mstcp_request->EthPacket[k].Buffer);
                     } else {
-                        for (UINT j = 0; j < m_mstcp_request->dwPacketsNumber; ++j) local_results.push_back({ m_mstcp_request->EthPacket[j].Buffer, PacketDestination::TO_MSTCP });
+                        for (UINT k = 0; k < m_mstcp_request->dwPacketsNumber; ++k) local_results.push_back({ m_mstcp_request->EthPacket[k].Buffer, PacketDestination::TO_MSTCP });
                     }
                 }
             }
@@ -537,13 +545,9 @@ void WinPkFilterDriver::run() {
         if (elapsed_ms >= 1000) {
             uint64_t dl_pkts = m_stat_dl_pkts.exchange(0); uint64_t dl_bytes = m_stat_dl_bytes.exchange(0);
             uint64_t ul_pkts = m_stat_ul_pkts.exchange(0); uint64_t ul_bytes = m_stat_ul_bytes.exchange(0);
-            uint64_t work_us = m_stat_work_time_us.exchange(0);
-            double dl_mbps = (dl_bytes * 8.0) / (elapsed_ms * 1000.0);
-            double ul_mbps = (ul_bytes * 8.0) / (elapsed_ms * 1000.0);
             size_t backlog = 0; for(auto& q : m_worker_queues) backlog += q->packets.size();
-            uint64_t total_pkts = dl_pkts + ul_pkts;
-            LOG_INFO("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us", 
-                dl_mbps, dl_pkts, ul_mbps, ul_pkts, backlog, total_pkts > 0 ? work_us / total_pkts : 0);
+            LOG_INFO("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu", 
+                (dl_bytes * 8.0) / (elapsed_ms * 1000.0), dl_pkts, (ul_bytes * 8.0) / (elapsed_ms * 1000.0), ul_pkts, backlog);
             m_last_stat_time = now;
         }
     }
