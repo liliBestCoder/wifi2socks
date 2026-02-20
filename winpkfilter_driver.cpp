@@ -438,7 +438,11 @@ void WinPkFilterDriver::run() {
                         m_read_request->EthPacket[i].Buffer = next_b;
                     } else {
                         groups[get_flow_hash((char*)b->m_IBuffer, b->m_Length) % m_num_workers].pop_back();
-                        m_stat_rx_pkts--; 
+                        if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) {
+                            m_stat_ul_pkts--;
+                        } else {
+                            m_stat_dl_pkts--;
+                        }
                     }
                 }
                 for (unsigned int i = 0; i < m_num_workers; ++i) {
