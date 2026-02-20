@@ -374,21 +374,18 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                                         PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                         uint16_t old_src_port = tcp->SrcPort;
                                         tcp->SrcPort = od->port;
-
-                                        uint32_t old_ip_port = (old_src_ip & 0xFFFF) + (old_src_ip >> 16) + old_src_port;
-                                        uint32_t new_ip_port = (ip->SrcAddr & 0xFFFF) + (ip->SrcAddr >> 16) + tcp->SrcPort;
-
-                                        incremental_checksum_update(&tcp->Csum, old_ip_port, new_ip_port);
-
+                                        // Update TCP checksum for the change in pseudo-header (IP address)
+                                        incremental_checksum_update(&tcp->Csum, old_src_ip, ip->SrcAddr);
+                                        // Update TCP checksum for the change in source port
+                                        incremental_checksum_update(&tcp->Csum, old_src_port, tcp->SrcPort);
                                     } else { // UDP
                                         PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                         uint16_t old_src_port = udp->SrcPort;
                                         udp->SrcPort = od->port;
-                                        
-                                        uint32_t old_ip_port = (old_src_ip & 0xFFFF) + (old_src_ip >> 16) + old_src_port;
-                                        uint32_t new_ip_port = (ip->SrcAddr & 0xFFFF) + (ip->SrcAddr >> 16) + udp->SrcPort;
-
-                                        incremental_checksum_update(&udp->Csum, old_ip_port, new_ip_port);
+                                        // Update UDP checksum for the change in pseudo-header (IP address)
+                                        incremental_checksum_update(&udp->Csum, old_src_ip, ip->SrcAddr);
+                                        // Update UDP checksum for the change in source port
+                                        incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
                                     }
                                 } else {
                                     // No mapping found. Packet is not modified, but we still recalculate checksums
