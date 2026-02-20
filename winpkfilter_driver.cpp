@@ -365,13 +365,30 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                             if (sport == NAT_TARGET_PORT) {
                                 auto od = NatManager::instance().get_mapping(NatManager::make_key(ip->DstAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort : ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort));
                                 if (od) {
-                                    ip->SrcAddr = od->ip; if (ip->Proto == IPPROTO_TCP) ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort = od->port;
-                                    else ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort = od->port;
+                                    // Mapping found, packet is modified. Use incremental checksum update.
+                                    uint32_t old_src_ip = ip->SrcAddr;
+                                    ip->SrcAddr = od->ip;
+                                    incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
+
+                                    if (ip->Proto == IPPROTO_TCP) {
+                                        PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                        uint16_t old_src_port = tcp->SrcPort;
+                                        tcp->SrcPort = od->port;
+                                        incremental_checksum_update(&tcp->Csum, old_src_ip, ip->SrcAddr);
+                                        incremental_checksum_update(&tcp->Csum, old_src_port, tcp->SrcPort);
+                                    } else { // UDP
+                                        PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                        uint16_t old_src_port = udp->SrcPort;
+                                        udp->SrcPort = od->port;
+                                        incremental_checksum_update(&udp->Csum, old_src_ip, ip->SrcAddr);
+                                        incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
+                                    }
+                                } else {
+                                    // No mapping found. Packet is not modified, but we still recalculate checksums
+                                    // because capturing the packet breaks NDIS Checksum Offload context.
+                                    recalculate_ip_checksum(ip);
+                                    recalculate_tcp_udp_checksum(ip);
                                 }
-                                // Always recalculate checksums for traffic we intercept on the proxy port,
-                                // because capturing the packet breaks NDIS Checksum Offload context.
-                                recalculate_ip_checksum(ip); 
-                                recalculate_tcp_udp_checksum(ip);
                             }
                             packets_to_send.push_back(std::move(p)); handled = true;
                         }
