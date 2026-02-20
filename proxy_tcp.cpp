@@ -175,7 +175,9 @@ void ProxyTCP::on_client_read(char* buf, int len) {
         const auto buf_size = m_initial_buffer.size();
 
         // Hook for any HTTP request to the gateway on port 80
-        if (m_original_dest.ip == inet_addr(g_config.tap_ip.c_str()) && ntohs(m_original_dest.port) == 80) {
+        in_addr gateway_addr_struct{};
+        if (inet_pton(AF_INET, g_config.tap_ip.c_str(), &gateway_addr_struct) == 1 &&
+            m_original_dest.ip == gateway_addr_struct.s_addr && ntohs(m_original_dest.port) == 80) {
             std::string_view payload((const char*)buf_data, buf_size);
             // Check for common HTTP methods that would appear at the start of the payload
             if (payload.find("GET ") == 0 || payload.find("POST ") == 0 || payload.find("HEAD ") == 0 || payload.find("OPTIONS ") == 0) {
