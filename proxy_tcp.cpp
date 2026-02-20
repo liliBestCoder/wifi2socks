@@ -10,6 +10,7 @@
 #include <mswsock.h>
 #include <vector>
 #include <algorithm>
+#include <string_view>
 
 ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
     : m_state(INITIAL),
@@ -172,6 +173,19 @@ void ProxyTCP::on_client_read(char* buf, int len) {
     if (m_state == INITIAL) {
         const auto* buf_data = m_initial_buffer.data();
         const auto buf_size = m_initial_buffer.size();
+
+        // Hook for any HTTP request to the gateway on port 80
+        if (m_original_dest.ip == inet_addr(g_config.tap_ip.c_str()) && ntohs(m_original_dest.port) == 80) {
+            std::string_view payload((const char*)buf_data, buf_size);
+            // Check for common HTTP methods that would appear at the start of the payload
+            if (payload.find("GET ") == 0 || payload.find("POST ") == 0 || payload.find("HEAD ") == 0 || payload.find("OPTIONS ") == 0) {
+                LOG_INFO("[ProxyTCP] Hooking HTTP request to gateway on port 80. Returning 204.");
+                const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+                WorkerPool::instance().send_async(m_client_socket, (const uint8_t*)response, (int)strlen(response));
+                close_session();
+                return;
+            }
+        }
 
         // Check for /generate_204 hook on port 80
         if (ntohs(m_original_dest.port) == 80 && is_generate_204_request(buf_data, buf_size)) {
