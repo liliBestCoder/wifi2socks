@@ -427,7 +427,11 @@ void WinPkFilterDriver::run() {
                 std::vector<std::list<QueuedPacket>> groups(m_num_workers);
                 for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
                     PINTERMEDIATE_BUFFER b = m_read_request->EthPacket[i].Buffer;
-                    m_stat_rx_pkts++; m_stat_rx_bytes += b->m_Length;
+                    if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) { // Outbound from local stack (Upload)
+                        m_stat_ul_pkts++; m_stat_ul_bytes += b->m_Length;
+                    } else { // Inbound from network (Download)
+                        m_stat_dl_pkts++; m_stat_dl_bytes += b->m_Length;
+                    }
                     groups[get_flow_hash((char*)b->m_IBuffer, b->m_Length) % m_num_workers].push_back({ b });
                     PINTERMEDIATE_BUFFER next_b = PacketPool::instance().acquire();
                     if (next_b) {
@@ -458,7 +462,6 @@ void WinPkFilterDriver::run() {
             while (it != local_results.end()) {
                 m_write_request->dwPacketsNumber = 0; m_mstcp_request->dwPacketsNumber = 0;
                 while (it != local_results.end() && m_write_request->dwPacketsNumber < BATCH_SIZE && m_mstcp_request->dwPacketsNumber < BATCH_SIZE) {
-                    m_stat_tx_pkts++; m_stat_tx_bytes += it->buffer->m_Length;
                     if (it->destination == PacketDestination::TO_ADAPTER) m_write_request->EthPacket[m_write_request->dwPacketsNumber++].Buffer = it->buffer;
                     else m_mstcp_request->EthPacket[m_mstcp_request->dwPacketsNumber++].Buffer = it->buffer;
                     it++;
@@ -474,14 +477,15 @@ void WinPkFilterDriver::run() {
         auto now = std::chrono::steady_clock::now();
         auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_stat_time).count();
         if (elapsed_ms >= 1000) {
-            uint64_t rx_pkts = m_stat_rx_pkts.exchange(0); uint64_t rx_bytes = m_stat_rx_bytes.exchange(0);
-            uint64_t tx_pkts = m_stat_tx_pkts.exchange(0); uint64_t tx_bytes = m_stat_tx_bytes.exchange(0);
+            uint64_t dl_pkts = m_stat_dl_pkts.exchange(0); uint64_t dl_bytes = m_stat_dl_bytes.exchange(0);
+            uint64_t ul_pkts = m_stat_ul_pkts.exchange(0); uint64_t ul_bytes = m_stat_ul_bytes.exchange(0);
             uint64_t work_us = m_stat_work_time_us.exchange(0);
-            double rx_mbps = (rx_bytes * 8.0) / (elapsed_ms * 1000.0);
-            double tx_mbps = (tx_bytes * 8.0) / (elapsed_ms * 1000.0);
+            double dl_mbps = (dl_bytes * 8.0) / (elapsed_ms * 1000.0);
+            double ul_mbps = (ul_bytes * 8.0) / (elapsed_ms * 1000.0);
             size_t backlog = 0; for(auto& q : m_worker_queues) backlog += q->packets.size();
-            LOG_INFO("[Perf] RX: %.2f Mbps (%llu p) | TX: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us", 
-                rx_mbps, rx_pkts, tx_mbps, tx_pkts, backlog, rx_pkts > 0 ? work_us / rx_pkts : 0);
+            uint64_t total_pkts = dl_pkts + ul_pkts;
+            LOG_INFO("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us", 
+                dl_mbps, dl_pkts, ul_mbps, ul_pkts, backlog, total_pkts > 0 ? work_us / total_pkts : 0);
             m_last_stat_time = now;
         }
     }

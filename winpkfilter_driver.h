@@ -111,10 +111,10 @@ private:
     HANDLE m_results_event; // Win32 Event for signaling
 
     // Statistics counters (Pure atomic, no logging overhead in worker loop)
-    std::atomic<uint64_t> m_stat_rx_pkts{0};
-    std::atomic<uint64_t> m_stat_rx_bytes{0};
-    std::atomic<uint64_t> m_stat_tx_pkts{0};
-    std::atomic<uint64_t> m_stat_tx_bytes{0};
+    std::atomic<uint64_t> m_stat_dl_pkts{0};
+    std::atomic<uint64_t> m_stat_dl_bytes{0};
+    std::atomic<uint64_t> m_stat_ul_pkts{0};
+    std::atomic<uint64_t> m_stat_ul_bytes{0};
     std::atomic<uint64_t> m_stat_work_time_us{0};
     std::chrono::steady_clock::time_point m_last_stat_time;
 
