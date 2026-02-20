@@ -14,9 +14,6 @@
 #include "logger.h"
 #include "nat_manager.h"
 #include "geo_checker.h"
-#include "dhcp_server.h"
-
-extern DhcpServer* g_dhcp_server_ptr;
 
 // --- Protocol Header Definitions ---
 #include <pshpack1.h>
@@ -465,25 +462,18 @@ void WinPkFilterDriver::run() {
                             } else if (ip->Proto == IPPROTO_UDP && b->m_Length >= 14 + ip_hdr_len + sizeof(UDP_HEADER)) {
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
                                 USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
-                                if (sp == 67 || dp == 67) { // DHCP
-                                    if (b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && g_dhcp_server_ptr) {
-                                        sockaddr_in client_addr = { 0 };
-                                        client_addr.sin_family = AF_INET;
-                                        client_addr.sin_addr.s_addr = ip->SrcAddr;
-                                        client_addr.sin_port = udp->SrcPort;
-                                        g_dhcp_server_ptr->handle_request((const char*)b->m_IBuffer, b->m_Length, client_addr);
-                                        // Packet is handled by DHCP server, release the buffer
-                                        PacketPool::instance().release(b);
-                                    } else {
-                                        // Outbound DHCP responses or other DHCP traffic, forward as usual
-                                        PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
-                                        std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-                                        m_results_queue.packets.push_back({ b, dest });
-                                        SetEvent(m_results_event);
-                                    }
-                                    m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred or released
+                                if (sp == 67 || dp == 67 || sp == 68 || dp == 68) { // DHCP Fast Path
+                                    PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
+                                    std::lock_guard<std::mutex> lock(m_results_queue.mtx);
+                                    m_results_queue.packets.push_back({ b, dest });
+                                    m_read_request->EthPacket[i].Buffer = nullptr; // 所有权转移
+                                    SetEvent(m_results_event);
                                     handled = true;
-                                } else if (sp == 68 || dp == 68 || sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) {
+                                } else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) { // Drop Discovery
+                                    PacketPool::instance().release(b);
+                                    m_read_request->EthPacket[i].Buffer = nullptr; // 释放
+                                    handled = true;
+                                }
                                     // Other broadcast/multicast traffic
                                     PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
                                     std::lock_guard<std::mutex> lock(m_results_queue.mtx);
