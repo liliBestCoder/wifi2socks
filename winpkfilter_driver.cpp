@@ -461,20 +461,40 @@ void WinPkFilterDriver::run() {
             if (!m_results_queue.packets.empty()) local_results.splice(local_results.end(), m_results_queue.packets);
         }
         if (!local_results.empty()) {
-            m_write_request->hAdapterHandle = m_adapter_handle; m_mstcp_request->hAdapterHandle = m_adapter_handle;
+            m_write_request->hAdapterHandle = m_adapter_handle; 
+            m_mstcp_request->hAdapterHandle = m_adapter_handle;
+            m_write_request->dwPacketsNumber = 0; 
+            m_mstcp_request->dwPacketsNumber = 0;
+
             auto it = local_results.begin();
             while (it != local_results.end()) {
-                m_write_request->dwPacketsNumber = 0; m_mstcp_request->dwPacketsNumber = 0;
-                while (it != local_results.end() && m_write_request->dwPacketsNumber < BATCH_SIZE && m_mstcp_request->dwPacketsNumber < BATCH_SIZE) {
-                    if (it->destination == PacketDestination::TO_ADAPTER) m_write_request->EthPacket[m_write_request->dwPacketsNumber++].Buffer = it->buffer;
-                    else m_mstcp_request->EthPacket[m_mstcp_request->dwPacketsNumber++].Buffer = it->buffer;
-                    it++;
+                if (it->destination == PacketDestination::TO_ADAPTER) {
+                    if (m_write_request->dwPacketsNumber < BATCH_SIZE) {
+                        m_write_request->EthPacket[m_write_request->dwPacketsNumber++].Buffer = it->buffer;
+                        it = local_results.erase(it);
+                    } else break;
+                } else { // TO_MSTCP
+                    if (m_mstcp_request->dwPacketsNumber < BATCH_SIZE) {
+                        m_mstcp_request->EthPacket[m_mstcp_request->dwPacketsNumber++].Buffer = it->buffer;
+                        it = local_results.erase(it);
+                    } else break;
                 }
-                if (m_write_request->dwPacketsNumber > 0) m_ndis_api.SendPacketsToAdapter(m_write_request);
-                if (m_mstcp_request->dwPacketsNumber > 0) m_ndis_api.SendPacketsToMstcp(m_mstcp_request);
             }
-            for (auto& r : local_results) PacketPool::instance().release(r.buffer);
-            local_results.clear();
+
+            if (m_write_request->dwPacketsNumber > 0) {
+                if (m_ndis_api.SendPacketsToAdapter(m_write_request)) {
+                    for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) PacketPool::instance().release(m_write_request->EthPacket[i].Buffer);
+                } else {
+                    for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) local_results.push_back({m_write_request->EthPacket[i].Buffer, PacketDestination::TO_ADAPTER});
+                }
+            }
+            if (m_mstcp_request->dwPacketsNumber > 0) {
+                if (m_ndis_api.SendPacketsToMstcp(m_mstcp_request)) {
+                    for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) PacketPool::instance().release(m_mstcp_request->EthPacket[i].Buffer);
+                } else {
+                    for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) local_results.push_back({m_mstcp_request->EthPacket[i].Buffer, PacketDestination::TO_MSTCP});
+                }
+            }
         }
 
         // 3. Stats
