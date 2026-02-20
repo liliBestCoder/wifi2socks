@@ -70,4 +70,9 @@ private:
 
     std::atomic<size_t> m_client_send_queue_size{0};
     std::atomic<size_t> m_remote_send_queue_size{0};
+
+    // Flow control from remote to client
+    static const size_t HIGH_WATER_MARK = 256 * 1024; // 256KB
+    static const size_t LOW_WATER_MARK = 64 * 1024;   // 64KB
+    std::atomic<bool> m_remote_read_paused{false};
 };

@@ -281,10 +281,19 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
             m_client_send_queue_size += len;
         }
         try_send(m_client_socket);
+
+        // Flow control: Check if we need to pause reading from the remote.
+        if (m_client_send_queue_size > HIGH_WATER_MARK) {
+            m_remote_read_paused = true;
+            // Stop reading from remote until the client queue drains.
+            return; 
+        }
     }
 
-    // Continue the read loop unconditionally.
-    WorkerPool::instance().read_async(m_remote_socket);
+    // Continue the read loop only if not paused.
+    if (!m_remote_read_paused) {
+        WorkerPool::instance().read_async(m_remote_socket);
+    }
 }
 
 void ProxyTCP::try_send(SOCKET socket) {
@@ -358,6 +367,7 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
         }
         self->try_send(socket);
     } else if (socket == m_client_socket) {
+        bool should_resume_reading = false;
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
             if (!attempted_buffers.empty()) {
@@ -377,6 +387,12 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
                 m_client_send_queue_size -= len;
             }
 
+            // Flow control: Check if we should resume reading from remote.
+            if (m_remote_read_paused && m_client_send_queue_size < LOW_WATER_MARK) {
+                m_remote_read_paused = false;
+                should_resume_reading = true;
+            }
+
             if (m_remote_at_eof && m_client_send_queue.empty()) {
                 shutdown(m_client_socket, SD_SEND);
                 WorkerPool::instance().queue_task([self]() {
@@ -385,6 +401,10 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
                 });
                 return;
             }
+        }
+        // Resume reading outside the lock.
+        if (should_resume_reading) {
+            WorkerPool::instance().read_async(m_remote_socket);
         }
         self->try_send(socket);
     }
