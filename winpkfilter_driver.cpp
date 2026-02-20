@@ -414,7 +414,7 @@ void WinPkFilterDriver::run() {
                                 m_results_queue.packets.push_back({ rb, PacketDestination::TO_ADAPTER });
                                 SetEvent(m_results_event);
                             }
-                            handled = true;
+                            handled = true; // ARP 请求已被响应，原包无需再处理
                         }
                     } else if (ether_type == ETHERTYPE_IP && b->m_Length >= 34) {
                         PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
@@ -494,6 +494,7 @@ void WinPkFilterDriver::run() {
                     m_read_request->EthPacket[i].Buffer = nullptr;
                 }
 
+                // 统一补充缓冲区
                 if (m_read_request->EthPacket[i].Buffer == nullptr) {
                     m_read_request->EthPacket[i].Buffer = PacketPool::instance().acquire();
                 }
