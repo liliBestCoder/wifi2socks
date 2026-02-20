@@ -100,6 +100,30 @@ static uint16_t csum_finalize(uint32_t sum) {
     return (result == 0) ? 0xFFFF : result;
 }
 
+// 增量更新16位字段的校验和
+static void incremental_checksum_update(uint16_t* checksum, uint16_t old_val, uint16_t new_val) {
+    uint32_t sum = (~(*checksum)) & 0xFFFF;
+    sum += (~old_val) & 0xFFFF;
+    sum += new_val;
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    *checksum = ~((uint16_t)sum);
+}
+
+// 增量更新32位字段的校验和
+static void incremental_checksum_update(uint16_t* checksum, uint32_t old_val, uint32_t new_val) {
+    uint32_t sum = (~(*checksum)) & 0xFFFF;
+    sum += (~(old_val & 0xFFFF)) & 0xFFFF;
+    sum += (~(old_val >> 16)) & 0xFFFF;
+    sum += (new_val & 0xFFFF);
+    sum += (new_val >> 16);
+    while (sum >> 16) {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    *checksum = ~((uint16_t)sum);
+}
+
 static void recalculate_ip_checksum(PIP_HEADER ip) {
     ip->Csum = 0;
     ip->Csum = csum_finalize(csum_partial(ip, (ip->Ver_HLen & 0x0F) * 4, 0));
@@ -315,14 +339,27 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                         if (should_intercept) {
                             OriginalDestination od(ip->DstAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort : ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort, ip->SrcAddr);
                             uint64_t key = NatManager::make_key(ip->SrcAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort : ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
+                            uint32_t old_dst_ip = ip->DstAddr;
                             if (ip->Proto == IPPROTO_TCP) {
                                 PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                od.port = tcp->DstPort; NatManager::instance().create_tcp_mapping(key, od); ip->DstAddr = m_gateway_ip; tcp->DstPort = htons(NAT_TARGET_PORT);
+                                uint16_t old_dst_port = tcp->DstPort;
+                                od.port = tcp->DstPort; NatManager::instance().create_tcp_mapping(key, od);
+                                ip->DstAddr = m_gateway_ip;
+                                tcp->DstPort = htons(NAT_TARGET_PORT);
+                                incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
+                                incremental_checksum_update(&tcp->Csum, old_dst_ip, ip->DstAddr);
+                                incremental_checksum_update(&tcp->Csum, old_dst_port, tcp->DstPort);
                             } else {
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                od.port = udp->DstPort; NatManager::instance().create_or_update_udp_mapping(key, od); ip->DstAddr = m_gateway_ip; udp->DstPort = htons(NAT_TARGET_PORT);
+                                uint16_t old_dst_port = udp->DstPort;
+                                od.port = udp->DstPort; NatManager::instance().create_or_update_udp_mapping(key, od);
+                                ip->DstAddr = m_gateway_ip;
+                                udp->DstPort = htons(NAT_TARGET_PORT);
+                                incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
+                                incremental_checksum_update(&udp->Csum, old_dst_ip, ip->DstAddr);
+                                incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
                             }
-                            recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip); packets_to_mstcp.push_back(std::move(p)); handled = true;
+                            packets_to_mstcp.push_back(std::move(p)); handled = true;
                         } else if (p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP)) {
                             USHORT sport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort) : ntohs(((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
                             if (sport == NAT_TARGET_PORT) {
