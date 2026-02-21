@@ -168,9 +168,15 @@ static uint32_t get_target_worker(const char* packet, size_t length, uint32_t de
     USHORT ether_type = ntohs(*(USHORT*)(packet + 12));
     if (ether_type != ETHERTYPE_IP) {
         // Non-IP packets (ARP, IPv6, EAPOL, etc.)
-        // Hash Source MAC (offset 6) to keep device traffic on the same worker
-        // This is crucial for EAPOL (4-way handshake) ordering.
-        const uint8_t* mac = (const uint8_t*)(packet + 6);
+        // Strategy: Hash the "Client" MAC to keep the session pinned to one worker.
+        // ON_SEND (Stack->Adapter): Destination is Client (Offset 0).
+        // ON_RECEIVE (Adapter->Stack): Source is Client (Offset 6).
+        const uint8_t* mac;
+        if (device_flags == PACKET_FLAG_ON_SEND) {
+             mac = (const uint8_t*)(packet + 0); // Dst MAC
+        } else {
+             mac = (const uint8_t*)(packet + 6); // Src MAC
+        }
         uint32_t hash = mac[0] ^ mac[1] ^ mac[2] ^ mac[3] ^ mac[4] ^ mac[5];
         return hash % num_workers;
     }
