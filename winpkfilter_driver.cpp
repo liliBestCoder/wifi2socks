@@ -396,29 +396,21 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                             if (sport == NAT_TARGET_PORT) {
                                 auto od = NatManager::instance().get_mapping(NatManager::make_key(ip->DstAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort : ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort));
                                 if (od) {
-                                    // Mapping found, packet is modified. Use incremental checksum update.
-                                    uint32_t old_src_ip = ip->SrcAddr;
+                                    // Mapping found, packet is modified.
+                                    // FORCE RECALCULATION: NDIS Checksum Offload might leave Csum as 0.
+                                    // Incremental update on 0 results in an invalid checksum.
                                     ip->SrcAddr = od->ip;
-                                    incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
-
+                                    
                                     if (ip->Proto == IPPROTO_TCP) {
                                         PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                        uint16_t old_src_port = tcp->SrcPort;
                                         tcp->SrcPort = od->port;
-                                        // Update TCP checksum for the change in pseudo-header (IP address)
-                                        incremental_checksum_update(&tcp->Csum, old_src_ip, ip->SrcAddr);
-                                        // Update TCP checksum for the change in source port
-                                        incremental_checksum_update(&tcp->Csum, old_src_port, tcp->SrcPort);
                                     }
                                     else { // UDP
                                         PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                        uint16_t old_src_port = udp->SrcPort;
                                         udp->SrcPort = od->port;
-                                        // Update UDP checksum for the change in pseudo-header (IP address)
-                                        incremental_checksum_update(&udp->Csum, old_src_ip, ip->SrcAddr);
-                                        // Update UDP checksum for the change in source port
-                                        incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
                                     }
+                                    recalculate_ip_checksum(ip);
+                                    recalculate_tcp_udp_checksum(ip);
                                 }
                                 else {
                                     // No mapping found. Packet is not modified, but we still recalculate checksums
@@ -502,6 +494,10 @@ void WinPkFilterDriver::run() {
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
                                 USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
                                 if (sp == 67 || dp == 67 || sp == 68 || dp == 68) { // DHCP Fast Path
+                                    // Recalculate checksums to ensure validity after capture
+                                    recalculate_ip_checksum(ip);
+                                    recalculate_tcp_udp_checksum(ip);
+
                                     PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
                                     std::lock_guard<std::mutex> lock(m_results_queue.mtx);
                                     m_results_queue.packets.push_back({ b, dest });
