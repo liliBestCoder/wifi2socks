@@ -151,8 +151,14 @@ void ProxyTCP::on_remote_connect() {
 void ProxyTCP::on_client_read(char* buf, int len) {
     if (len <= 0) {
         m_client_at_eof = true;
+        // If we have no data pending for the remote, we can tell it we are done sending.
         if (m_remote_send_queue_size == 0) {
-            close_session();
+            if (m_remote_socket != INVALID_SOCKET && m_state == ESTABLISHED) {
+                shutdown(m_remote_socket, SD_SEND);
+            }
+            if (m_remote_at_eof) {
+                close_session();
+            }
         }
         return;
     }
@@ -188,7 +194,7 @@ void ProxyTCP::on_client_read(char* buf, int len) {
                 LOG_INFO("[ProxyTCP] Hooking HTTP request to gateway on port 80. Returning 204.");
                 const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
                 WorkerPool::instance().send_async(m_client_socket, (const uint8_t*)response, (int)strlen(response));
-                close_session();
+                m_close_after_write = true;
                 return;
             }
         }
@@ -201,7 +207,7 @@ void ProxyTCP::on_client_read(char* buf, int len) {
             LOG_INFO("[ProxyTCP] Hooking /generate_204 request on port 80 to %s from client", ip_str);
             const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
             WorkerPool::instance().send_async(m_client_socket, (const uint8_t*)response, (int)strlen(response));
-            close_session();
+            m_close_after_write = true;
             return;
         }
 
@@ -272,8 +278,14 @@ void ProxyTCP::on_client_read(char* buf, int len) {
 void ProxyTCP::on_remote_read(char* buf, int len) {
     if (len <= 0) {
         m_remote_at_eof = true;
+        // If we have no data pending for the client, we can tell it we are done sending.
         if (m_client_send_queue_size == 0) {
-            close_session();
+            if (m_client_socket != INVALID_SOCKET && m_state == ESTABLISHED) {
+                shutdown(m_client_socket, SD_SEND);
+            }
+            if (m_client_at_eof) {
+                close_session();
+            }
         }
         return;
     }
@@ -368,7 +380,12 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
             }
 
             if (m_client_at_eof && m_remote_send_queue.empty()) {
-                close_session();
+                if (m_remote_socket != INVALID_SOCKET && m_state == ESTABLISHED) {
+                    shutdown(m_remote_socket, SD_SEND);
+                }
+                if (m_remote_at_eof) {
+                    close_session();
+                }
                 return;
             }
         }
@@ -396,6 +413,11 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
                 m_client_send_queue_size -= len;
             }
 
+            if (m_close_after_write && m_client_send_queue.empty()) {
+                close_session();
+                return;
+            }
+
             // Flow control: Check if we should resume reading from remote.
             if (m_remote_read_paused && m_client_send_queue_size < LOW_WATER_MARK) {
                 m_remote_read_paused = false;
@@ -403,11 +425,12 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
             }
 
             if (m_remote_at_eof && m_client_send_queue.empty()) {
-                shutdown(m_client_socket, SD_SEND);
-                WorkerPool::instance().queue_task([self]() {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    self->close_session();
-                    });
+                if (m_client_socket != INVALID_SOCKET && m_state == ESTABLISHED) {
+                    shutdown(m_client_socket, SD_SEND);
+                }
+                if (m_client_at_eof) {
+                    close_session();
+                }
                 return;
             }
         }

@@ -75,4 +75,7 @@ private:
     static const size_t HIGH_WATER_MARK = 512 * 1024; // 256KB
     static const size_t LOW_WATER_MARK = 256 * 1024;   // 64KB
     std::atomic<bool> m_remote_read_paused{false};
+
+    // Flag to close session after write completes (for 204 responses)
+    std::atomic<bool> m_close_after_write{false};
 };
