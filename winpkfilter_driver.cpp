@@ -245,7 +245,7 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
     m_read_request->hAdapterHandle = m_adapter_handle;
 
     m_reader_thread = std::thread(&WinPkFilterDriver::run, this);
-    SetThreadPriority(m_reader_thread.native_handle(), THREAD_PRIORITY_HIGHEST);
+    SetThreadPriority(m_reader_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
     for (unsigned int i = 0; i < m_num_workers; ++i) {
         m_worker_threads.emplace_back(&WinPkFilterDriver::worker_loop, this, i);
         SetThreadPriority(m_worker_threads.back().native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
@@ -405,7 +405,7 @@ void WinPkFilterDriver::run() {
         if (!m_running) break;
 
         // 1. Read & Dispatch
-        for (int r = 0; r < 1 && m_running; ++r) {
+        for (int r = 0; r < 10 && m_running; ++r) {
             m_read_request->dwPacketsNumber = BATCH_SIZE;
             if (m_ndis_api.ReadPackets(m_read_request) && m_read_request->dwPacketsSuccess > 0) {
                 std::vector<std::list<QueuedPacket>> groups(m_num_workers);
@@ -510,70 +510,69 @@ void WinPkFilterDriver::run() {
                 }
             }
         }
-        else break;
-    }
 
-    // 2. Write Results
-    {
-        std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-        if (!m_results_queue.packets.empty()) local_results.splice(local_results.end(), m_results_queue.packets);
-    }
-    if (!local_results.empty()) {
-        m_write_request->hAdapterHandle = m_adapter_handle;
-        m_mstcp_request->hAdapterHandle = m_adapter_handle;
-        m_write_request->dwPacketsNumber = 0;
-        m_mstcp_request->dwPacketsNumber = 0;
+        // 2. Write Results
+        {
+            std::lock_guard<std::mutex> lock(m_results_queue.mtx);
+            if (!m_results_queue.packets.empty()) local_results.splice(local_results.end(), m_results_queue.packets);
+        }
+        if (!local_results.empty()) {
+            m_write_request->hAdapterHandle = m_adapter_handle;
+            m_mstcp_request->hAdapterHandle = m_adapter_handle;
+            m_write_request->dwPacketsNumber = 0;
+            m_mstcp_request->dwPacketsNumber = 0;
 
-        auto it = local_results.begin();
-        while (it != local_results.end()) {
-            if (it->destination == PacketDestination::TO_ADAPTER) {
-                if (m_write_request->dwPacketsNumber < BATCH_SIZE) {
-                    m_write_request->EthPacket[m_write_request->dwPacketsNumber++].Buffer = it->buffer;
-                    it = local_results.erase(it);
+            auto it = local_results.begin();
+            while (it != local_results.end()) {
+                if (it->destination == PacketDestination::TO_ADAPTER) {
+                    if (m_write_request->dwPacketsNumber < BATCH_SIZE) {
+                        m_write_request->EthPacket[m_write_request->dwPacketsNumber++].Buffer = it->buffer;
+                        it = local_results.erase(it);
+                    }
+                    else break;
                 }
-                else break;
-            }
-            else { // TO_MSTCP
-                if (m_mstcp_request->dwPacketsNumber < BATCH_SIZE) {
-                    m_mstcp_request->EthPacket[m_mstcp_request->dwPacketsNumber++].Buffer = it->buffer;
-                    it = local_results.erase(it);
+                else { // TO_MSTCP
+                    if (m_mstcp_request->dwPacketsNumber < BATCH_SIZE) {
+                        m_mstcp_request->EthPacket[m_mstcp_request->dwPacketsNumber++].Buffer = it->buffer;
+                        it = local_results.erase(it);
+                    }
+                    else break;
                 }
-                else break;
+            }
+
+            if (m_write_request->dwPacketsNumber > 0) {
+                if (m_ndis_api.SendPacketsToAdapter(m_write_request)) {
+                    for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) PacketPool::instance().release(m_write_request->EthPacket[i].Buffer);
+                }
+                else {
+                    for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) local_results.push_back({ m_write_request->EthPacket[i].Buffer, PacketDestination::TO_ADAPTER });
+                }
+            }
+            if (m_mstcp_request->dwPacketsNumber > 0) {
+                if (m_ndis_api.SendPacketsToMstcp(m_mstcp_request)) {
+                    for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) PacketPool::instance().release(m_mstcp_request->EthPacket[i].Buffer);
+                }
+                else {
+                    for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) local_results.push_back({ m_mstcp_request->EthPacket[i].Buffer, PacketDestination::TO_MSTCP });
+                }
             }
         }
 
-        if (m_write_request->dwPacketsNumber > 0) {
-            if (m_ndis_api.SendPacketsToAdapter(m_write_request)) {
-                for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) PacketPool::instance().release(m_write_request->EthPacket[i].Buffer);
-            }
-            else {
-                for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) local_results.push_back({ m_write_request->EthPacket[i].Buffer, PacketDestination::TO_ADAPTER });
-            }
+        // 3. Stats
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_stat_time).count();
+        if (elapsed_ms >= 1000) {
+            uint64_t dl_pkts = m_stat_dl_pkts.exchange(0); uint64_t dl_bytes = m_stat_dl_bytes.exchange(0);
+            uint64_t ul_pkts = m_stat_ul_pkts.exchange(0); uint64_t ul_bytes = m_stat_ul_bytes.exchange(0);
+            uint64_t work_us = m_stat_work_time_us.exchange(0);
+            double dl_mbps = (dl_bytes * 8.0) / (elapsed_ms * 1000.0);
+            double ul_mbps = (ul_bytes * 8.0) / (elapsed_ms * 1000.0);
+            size_t backlog = 0; for (auto& q : m_worker_queues) backlog += q->packets.size();
+            uint64_t total_pkts = dl_pkts + ul_pkts;
+            LOG_INFO("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us",
+                dl_mbps, dl_pkts, ul_mbps, ul_pkts, backlog, total_pkts > 0 ? work_us / total_pkts : 0);
+            m_last_stat_time = now;
         }
-        if (m_mstcp_request->dwPacketsNumber > 0) {
-            if (m_ndis_api.SendPacketsToMstcp(m_mstcp_request)) {
-                for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) PacketPool::instance().release(m_mstcp_request->EthPacket[i].Buffer);
-            }
-            else {
-                for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) local_results.push_back({ m_mstcp_request->EthPacket[i].Buffer, PacketDestination::TO_MSTCP });
-            }
-        }
-    }
-
-    // 3. Stats
-    auto now = std::chrono::steady_clock::now();
-    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_last_stat_time).count();
-    if (elapsed_ms >= 1000) {
-        uint64_t dl_pkts = m_stat_dl_pkts.exchange(0); uint64_t dl_bytes = m_stat_dl_bytes.exchange(0);
-        uint64_t ul_pkts = m_stat_ul_pkts.exchange(0); uint64_t ul_bytes = m_stat_ul_bytes.exchange(0);
-        uint64_t work_us = m_stat_work_time_us.exchange(0);
-        double dl_mbps = (dl_bytes * 8.0) / (elapsed_ms * 1000.0);
-        double ul_mbps = (ul_bytes * 8.0) / (elapsed_ms * 1000.0);
-        size_t backlog = 0; for (auto& q : m_worker_queues) backlog += q->packets.size();
-        uint64_t total_pkts = dl_pkts + ul_pkts;
-        LOG_INFO("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us",
-            dl_mbps, dl_pkts, ul_mbps, ul_pkts, backlog, total_pkts > 0 ? work_us / total_pkts : 0);
-        m_last_stat_time = now;
     }
 }
 }

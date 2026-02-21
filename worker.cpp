@@ -51,7 +51,7 @@ void Worker::start(int core_index) {
     if (m_running) return;
     m_running = true;
     m_thread = std::thread(&Worker::loop, this);
-    SetThreadPriority(m_thread.native_handle(), THREAD_PRIORITY_HIGHEST);
+    SetThreadPriority(m_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
 
     if (core_index >= 0) {
         DWORD_PTR mask = (static_cast<DWORD_PTR>(1) << (core_index % (sizeof(DWORD_PTR) * 8)));
