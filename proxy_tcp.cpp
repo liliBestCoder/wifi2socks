@@ -14,12 +14,12 @@
 
 ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
     : m_state(INITIAL),
-      m_client_socket(client_socket),
-      m_remote_socket(INVALID_SOCKET),
-      m_original_dest(dest),
-      m_is_direct(false),
-      m_client_write_in_progress(false),
-      m_remote_write_in_progress(false)
+    m_client_socket(client_socket),
+    m_remote_socket(INVALID_SOCKET),
+    m_original_dest(dest),
+    m_is_direct(false),
+    m_client_write_in_progress(false),
+    m_remote_write_in_progress(false)
 {
     u_long mode = 1;
     ioctlsocket(m_client_socket, FIONBIO, &mode);
@@ -50,7 +50,7 @@ void ProxyTCP::start() {
 void ProxyTCP::connect_remote() {
     m_state = CONNECTING;
     auto self = shared_from_this();
-    sockaddr_in remote_addr = {0};
+    sockaddr_in remote_addr = { 0 };
     remote_addr.sin_family = AF_INET;
 
     unsigned char* ip_bytes = (unsigned char*)&m_original_dest.ip;
@@ -61,15 +61,16 @@ void ProxyTCP::connect_remote() {
         LOG_INFO("[ProxyTCP] Routing DIRECT for %s (IP: %s)", m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str(), ip_str);
         remote_addr.sin_addr.s_addr = m_original_dest.ip;
         remote_addr.sin_port = m_original_dest.port;
-    } else {
+    }
+    else {
         LOG_INFO("[ProxyTCP] Routing PROXY for %s (IP: %s)", m_detected_domain.empty() ? "(Domain unknown)" : m_detected_domain.c_str(), ip_str);
         inet_pton(AF_INET, g_config.proxy_ip.c_str(), &remote_addr.sin_addr);
         remote_addr.sin_port = htons(g_config.proxy_port);
     }
-    
+
     m_remote_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if(m_remote_socket == INVALID_SOCKET) { close_session(); return; }
-    
+    if (m_remote_socket == INVALID_SOCKET) { close_session(); return; }
+
     int buf_size = 1024 * 1024;
     setsockopt(m_remote_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
     setsockopt(m_remote_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
@@ -77,13 +78,14 @@ void ProxyTCP::connect_remote() {
     setsockopt(m_remote_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
     u_long mode = 1;
     ioctlsocket(m_remote_socket, FIONBIO, &mode);
-    
+
     auto on_read_handler = [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); };
     auto on_write_handler = [self](int len, const std::vector<std::shared_ptr<std::vector<char>>>& bufs) { self->on_write_complete(self->m_remote_socket, len, bufs); };
-    
+
     if (m_is_direct) {
         WorkerPool::instance().connect_async(m_remote_socket, remote_addr, [self]() { self->on_remote_connect(); }, on_read_handler, on_write_handler);
-    } else {
+    }
+    else {
         WorkerPool::instance().connect_async(m_remote_socket, remote_addr, [self]() { self->on_remote_connect(); }, [self](char* b, int l, sockaddr_in*) { self->on_proxy_connect_response(b, l); }, on_write_handler);
     }
 }
@@ -107,7 +109,8 @@ void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
             m_state = ESTABLISHED;
             // Connection is established. Try to send any buffered data.
             try_send(m_remote_socket);
-        } else {
+        }
+        else {
             close_session();
         }
     }
@@ -119,15 +122,16 @@ void ProxyTCP::on_remote_connect() {
     int error = 0;
     int elen = sizeof(error);
     getsockopt(m_remote_socket, SOL_SOCKET, SO_ERROR, (char*)&error, &elen);
-    if (error != 0) { 
-        close_session(); 
-        return; 
+    if (error != 0) {
+        close_session();
+        return;
     }
 
     if (m_is_direct) {
         m_state = ESTABLISHED;
         try_send(m_remote_socket);
-    } else {
+    }
+    else {
         m_state = AWAITING_CONNECT_RESPONSE;
         std::string target_host = m_detected_domain;
         if (target_host.empty()) {
@@ -138,7 +142,7 @@ void ProxyTCP::on_remote_connect() {
         }
         uint16_t target_port = ntohs(m_original_dest.port);
         std::string connect_req = "CONNECT " + target_host + ":" + std::to_string(target_port) + " HTTP/1.1\r\nHost: " + target_host + ":" + std::to_string(target_port) + "\r\n\r\n";
-        
+
         // Use raw pointer send_async for simple string
         WorkerPool::instance().send_async(m_remote_socket, (const uint8_t*)connect_req.data(), connect_req.length());
     }
@@ -173,6 +177,33 @@ void ProxyTCP::on_client_read(char* buf, int len) {
     if (m_state == INITIAL) {
         const auto* buf_data = m_initial_buffer.data();
         const auto buf_size = m_initial_buffer.size();
+
+        // Hook for any HTTP request to the gateway on port 80
+        in_addr gateway_addr_struct{};
+        if (inet_pton(AF_INET, g_config.tap_ip.c_str(), &gateway_addr_struct) == 1 &&
+            m_original_dest.ip == gateway_addr_struct.s_addr && ntohs(m_original_dest.port) == 80) {
+            std::string_view payload((const char*)buf_data, buf_size);
+            // Check for common HTTP methods that would appear at the start of the payload
+            if (payload.find("GET ") == 0 || payload.find("POST ") == 0 || payload.find("HEAD ") == 0 || payload.find("OPTIONS ") == 0) {
+                LOG_INFO("[ProxyTCP] Hooking HTTP request to gateway on port 80. Returning 204.");
+                const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+                WorkerPool::instance().send_async(m_client_socket, (const uint8_t*)response, (int)strlen(response));
+                close_session();
+                return;
+            }
+        }
+
+        // Check for /generate_204 hook on port 80
+        if (ntohs(m_original_dest.port) == 80 && is_generate_204_request(buf_data, buf_size)) {
+            unsigned char* ip_bytes = (unsigned char*)&m_original_dest.ip;
+            char ip_str[INET_ADDRSTRLEN];
+            snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+            LOG_INFO("[ProxyTCP] Hooking /generate_204 request on port 80 to %s from client", ip_str);
+            const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+            WorkerPool::instance().send_async(m_client_socket, (const uint8_t*)response, (int)strlen(response));
+            close_session();
+            return;
+        }
 
         std::string sni;
         bool proceed = false;
@@ -210,7 +241,8 @@ void ProxyTCP::on_client_read(char* buf, int len) {
                         m_is_direct = true;
                     }
                 }
-            } else {
+            }
+            else {
                 uint32_t ip_h = ntohl(m_original_dest.ip);
                 RouteAction rule = RuleManager::instance().match_ip(ip_h);
                 if (GeoChecker::is_private_ip(ip_h) || rule == RouteAction::DIRECT) m_is_direct = true;
@@ -218,7 +250,7 @@ void ProxyTCP::on_client_read(char* buf, int len) {
                 else if (rule == RouteAction::BLOCK) { close_session(); return; }
                 else { m_is_direct = GeoChecker::instance().is_cn_ip(ip_h); }
             }
-            
+
             // "Burn after reading": Clear the initial buffer (no lock needed).
             m_initial_buffer.clear();
 
@@ -230,7 +262,7 @@ void ProxyTCP::on_client_read(char* buf, int len) {
     }
     else if (m_state == ESTABLISHED) {
         try_send(m_remote_socket);
-    } 
+    }
     // For CONNECTING or AWAITING_PROXY_RESPONSE, we just buffer. Data is already in the queue.
 
     // Continue the read loop unconditionally.
@@ -259,7 +291,7 @@ void ProxyTCP::on_remote_read(char* buf, int len) {
         if (m_client_send_queue_size > HIGH_WATER_MARK) {
             m_remote_read_paused = true;
             // Stop reading from remote until the client queue drains.
-            return; 
+            return;
         }
     }
 
@@ -288,7 +320,8 @@ void ProxyTCP::try_send(SOCKET socket) {
             m_remote_write_in_progress = true;
         }
         WorkerPool::instance().send_batch_async(m_remote_socket, std::move(buffers));
-    } else if (socket == m_client_socket) {
+    }
+    else if (socket == m_client_socket) {
         std::vector<std::shared_ptr<std::vector<char>>> buffers;
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
@@ -317,7 +350,7 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
             if (!attempted_buffers.empty()) {
                 m_remote_write_in_progress = false;
-                
+
                 // POP confirmed bytes from the head of the REAL queue.
                 int remaining = len;
                 while (remaining > 0 && !m_remote_send_queue.empty()) {
@@ -325,7 +358,8 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
                     if (remaining < (int)front_buffer->size()) {
                         front_buffer->erase(front_buffer->begin(), front_buffer->begin() + remaining);
                         remaining = 0;
-                    } else {
+                    }
+                    else {
                         remaining -= (int)front_buffer->size();
                         m_remote_send_queue.pop_front();
                     }
@@ -339,7 +373,8 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
             }
         }
         self->try_send(socket);
-    } else if (socket == m_client_socket) {
+    }
+    else if (socket == m_client_socket) {
         bool should_resume_reading = false;
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
@@ -352,7 +387,8 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
                     if (remaining < (int)front_buffer->size()) {
                         front_buffer->erase(front_buffer->begin(), front_buffer->begin() + remaining);
                         remaining = 0;
-                    } else {
+                    }
+                    else {
                         remaining -= (int)front_buffer->size();
                         m_client_send_queue.pop_front();
                     }
@@ -371,7 +407,7 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
                 WorkerPool::instance().queue_task([self]() {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     self->close_session();
-                });
+                    });
                 return;
             }
         }
