@@ -440,7 +440,18 @@ void WinPkFilterDriver::run() {
                         unsigned char* buffer = b->m_IBuffer;
                         USHORT ether_type = ntohs(*(USHORT*)(buffer + 12));
 
-                        if (ether_type == ETHERTYPE_IP && b->m_Length >= 34) {
+                        // Non-IP Fast Path (ARP, EAPOL, IPv6, etc.)
+                        // Directly inject to results queue to avoid worker latency/reordering
+                        if (ether_type != ETHERTYPE_IP) {
+                            PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
+                            std::lock_guard<std::mutex> lock(m_results_queue.mtx);
+                            m_results_queue.packets.push_back({ b, dest });
+                            m_read_request->EthPacket[i].Buffer = nullptr; // Transfer ownership
+                            SetEvent(m_results_event);
+                            handled = true;
+                        }
+
+                        if (!handled && ether_type == ETHERTYPE_IP && b->m_Length >= 34) {
                             PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
                             int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
 
