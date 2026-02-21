@@ -443,6 +443,12 @@ void WinPkFilterDriver::run() {
                         // Non-IP Fast Path (ARP, EAPOL, IPv6, etc.)
                         // Directly inject to results queue to avoid worker latency/reordering
                         if (ether_type != ETHERTYPE_IP) {
+                            if (ether_type == ETHERTYPE_ARP) {
+                                LOG_INFO("[FastPath] Injecting ARP packet");
+                            } else if (ether_type == htons(0x888E)) { // EAPOL
+                                LOG_INFO("[FastPath] Injecting EAPOL packet");
+                            }
+
                             PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
                             std::lock_guard<std::mutex> lock(m_results_queue.mtx);
                             m_results_queue.packets.push_back({ b, dest });
