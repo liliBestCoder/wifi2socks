@@ -161,25 +161,35 @@ static void recalculate_tcp_udp_checksum(PIP_HEADER ip) {
     }
 }
 
-// Fixed symmetric hash function
-static uint32_t get_flow_hash(const char* packet, size_t length) {
+// Direction-aware hash function to maintain flow affinity across NAT
+static uint32_t get_flow_hash(const char* packet, size_t length, uint32_t device_flags) {
     if (length < 14 + sizeof(IP_HEADER)) return 0;
     PIP_HEADER ip = (PIP_HEADER)(packet + 14);
 
-    // IP part: XOR ensures A^B == B^A
-    uint32_t hash = ip->SrcAddr ^ ip->DstAddr ^ ip->Proto;
+    uint32_t target_ip;
+    uint32_t target_port = 0;
+
+    // Strategy: Always hash the "Client" side (or the stable side).
+    // ON_SEND (Stack->Adapter): Use Destination (Remote/Client).
+    // ON_RECEIVE (Adapter->Stack): Use Source (Remote/Client).
+    if (device_flags == PACKET_FLAG_ON_SEND) {
+        target_ip = ip->DstAddr;
+    } else {
+        target_ip = ip->SrcAddr;
+    }
 
     int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
     if (ip->Proto == IPPROTO_TCP && length >= 14 + ip_hdr_len + sizeof(TCP_HEADER)) {
         PTCP_HEADER tcp = (PTCP_HEADER)((uint8_t*)ip + ip_hdr_len);
-        // Port part: Use XOR for symmetry
-        hash ^= (tcp->SrcPort ^ tcp->DstPort);
+        target_port = (device_flags == PACKET_FLAG_ON_SEND) ? tcp->DstPort : tcp->SrcPort;
     }
     else if (ip->Proto == IPPROTO_UDP && length >= 14 + ip_hdr_len + sizeof(UDP_HEADER)) {
         PUDP_HEADER udp = (PUDP_HEADER)((uint8_t*)ip + ip_hdr_len);
-        hash ^= (udp->SrcPort ^ udp->DstPort);
+        target_port = (device_flags == PACKET_FLAG_ON_SEND) ? udp->DstPort : udp->SrcPort;
     }
-    return hash;
+
+    // Simple mix hash
+    return (target_ip ^ ((uint32_t)target_port << 16) ^ target_port);
 }
 
 WinPkFilterDriver::WinPkFilterDriver()
@@ -492,7 +502,7 @@ void WinPkFilterDriver::run() {
 
                 // --- Slow Path (if not handled by fast path) ---
                 if (!handled) {
-                    groups[get_flow_hash((char*)b->m_IBuffer, b->m_Length) % m_num_workers].push_back({ b });
+                    groups[get_flow_hash((char*)b->m_IBuffer, b->m_Length, b->m_dwDeviceFlags) % m_num_workers].push_back({ b });
                     m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred to worker
                 }
 
