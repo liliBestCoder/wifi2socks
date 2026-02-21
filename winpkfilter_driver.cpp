@@ -477,7 +477,28 @@ void WinPkFilterDriver::run() {
                             PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
                             int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
 
-                            if (ip->Proto == IPPROTO_UDP && b->m_Length >= 14 + ip_hdr_len + sizeof(UDP_HEADER)) {
+                            if (ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
+                                PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ip_hdr_len);
+                                if (icmp->Type == 8 && ip->DstAddr == m_gateway_ip) {
+                                    // In-place modification for echo reply
+                                    uint8_t tmac[6];
+                                    memcpy(tmac, buffer, 6);
+                                    memcpy(buffer, buffer + 6, 6);
+                                    memcpy(buffer + 6, tmac, 6);
+                                    ULONG tip = ip->SrcAddr;
+                                    ip->SrcAddr = ip->DstAddr;
+                                    ip->DstAddr = tip;
+                                    icmp->Type = 0;
+                                    recalculate_ip_checksum(ip);
+                                    recalculate_tcp_udp_checksum(ip);
+
+                                    std::lock_guard<std::mutex> lock(m_results_queue.mtx);
+                                    m_results_queue.packets.push_back({ b, PacketDestination::TO_ADAPTER });
+                                    m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred
+                                    handled = true;
+                                }
+                            }
+                            else if (ip->Proto == IPPROTO_UDP && b->m_Length >= 14 + ip_hdr_len + sizeof(UDP_HEADER)) {
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
                                 USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
                                 if (sp == 67 || dp == 67 || sp == 68 || dp == 68) { // DHCP Fast Path
