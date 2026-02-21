@@ -459,9 +459,17 @@ void WinPkFilterDriver::run() {
 
                         if (!handled && ether_type == ETHERTYPE_IP && b->m_Length >= 34) {
                             PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
+                            
+                            // BLOCK ICS DHCP NAK: Drop packets from 192.168.137.1
+                            if (ip->SrcAddr == 0x0189A8C0) {
+                                PacketPool::instance().release(b);
+                                m_read_request->EthPacket[i].Buffer = nullptr;
+                                handled = true;
+                            }
+
                             int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
 
-                            if (ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
+                            if (!handled && ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
                                 PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ip_hdr_len);
                                 if (icmp->Type == 8 && ip->DstAddr == m_gateway_ip) {
                                     // In-place modification for echo reply
@@ -482,7 +490,7 @@ void WinPkFilterDriver::run() {
                                     handled = true;
                                 }
                             }
-                            else if (ip->Proto == IPPROTO_UDP && b->m_Length >= 14 + ip_hdr_len + sizeof(UDP_HEADER)) {
+                            else if (!handled && ip->Proto == IPPROTO_UDP && b->m_Length >= 14 + ip_hdr_len + sizeof(UDP_HEADER)) {
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
                                 USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
                                 if (sp == 67 || dp == 67 || sp == 68 || dp == 68) { // DHCP Fast Path
