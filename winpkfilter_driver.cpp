@@ -486,6 +486,17 @@ void WinPkFilterDriver::run() {
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
                                 USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
                                 if (sp == 67 || dp == 67 || sp == 68 || dp == 68) { // DHCP Fast Path
+                                    // Fix ICMP Port Unreachable: Redirect Broadcast to Gateway IP
+                                    // Windows stack might reject Broadcast if socket is bound to specific IP.
+                                    if (b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && ip->DstAddr == 0xFFFFFFFF) {
+                                        uint32_t old_dest = ip->DstAddr;
+                                        ip->DstAddr = m_gateway_ip;
+                                        incremental_checksum_update(&ip->Csum, old_dest, ip->DstAddr);
+                                        if (udp->Csum != 0) {
+                                            incremental_checksum_update(&udp->Csum, old_dest, ip->DstAddr);
+                                        }
+                                    }
+
                                     PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
                                     std::lock_guard<std::mutex> lock(m_results_queue.mtx);
                                     m_results_queue.packets.push_back({ b, dest });
