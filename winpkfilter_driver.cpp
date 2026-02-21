@@ -469,6 +469,18 @@ void WinPkFilterDriver::run() {
 
                             int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
 
+                            // Suppress Outbound ICMP Port Unreachable from Gateway
+                            // This prevents Windows from confusing the client when it receives a packet 
+                            // that the driver handled but the OS thinks is unhandled.
+                            if (!handled && ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
+                                PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ip_hdr_len);
+                                if (icmp->Type == 3 && ip->SrcAddr == m_gateway_ip) {
+                                    PacketPool::instance().release(b);
+                                    m_read_request->EthPacket[i].Buffer = nullptr;
+                                    handled = true;
+                                }
+                            }
+
                             if (!handled && ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
                                 PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ip_hdr_len);
                                 if (icmp->Type == 8 && ip->DstAddr == m_gateway_ip) {
