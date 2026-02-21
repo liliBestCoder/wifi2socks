@@ -10,13 +10,9 @@
 #include <iphlpapi.h>
 
 #include <vector>
-#include <atomic>
+#include <mutex>
 #include <cstdint>
 #include <memory>
-
-#ifndef JUMBO_FRAME_SUPPORTED
-#define JUMBO_FRAME_SUPPORTED 1
-#endif
 
 #include "Common.h"
 
@@ -33,6 +29,7 @@ public:
     void init(size_t size = 8192);
     RawPacket* acquire();
     void release(RawPacket* p);
+    void release_batch(RawPacket** p, size_t count);
 
 private:
     PacketPool() = default;
@@ -40,7 +37,7 @@ private:
 
     std::vector<RawPacket> m_storage;
     std::vector<RawPacket*> m_pool;
-    std::atomic_flag m_lock = ATOMIC_FLAG_INIT;
+    std::mutex m_mutex;
 };
 
 struct PacketPoolDeleter {

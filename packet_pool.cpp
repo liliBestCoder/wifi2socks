@@ -6,9 +6,8 @@ PacketPool& PacketPool::instance() {
 }
 
 void PacketPool::init(size_t size) {
-    while (m_lock.test_and_set(std::memory_order_acquire));
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (!m_storage.empty()) {
-        m_lock.clear(std::memory_order_release);
         return;
     }
 
@@ -17,24 +16,28 @@ void PacketPool::init(size_t size) {
     for (size_t i = 0; i < size; ++i) {
         m_pool.push_back(&m_storage[i]);
     }
-    m_lock.clear(std::memory_order_release);
 }
 
 RawPacket* PacketPool::acquire() {
-    while (m_lock.test_and_set(std::memory_order_acquire));
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (m_pool.empty()) {
-        m_lock.clear(std::memory_order_release);
         return nullptr;
     }
     RawPacket* p = m_pool.back();
     m_pool.pop_back();
-    m_lock.clear(std::memory_order_release);
     return p;
 }
 
 void PacketPool::release(RawPacket* p) {
     if (!p) return;
-    while (m_lock.test_and_set(std::memory_order_acquire));
+    std::lock_guard<std::mutex> lock(m_mutex);
     m_pool.push_back(p);
-    m_lock.clear(std::memory_order_release);
+}
+
+void PacketPool::release_batch(RawPacket** p, size_t count) {
+    if (!p || count == 0) return;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (size_t i = 0; i < count; ++i) {
+        if (p[i]) m_pool.push_back(p[i]);
+    }
 }

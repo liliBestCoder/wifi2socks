@@ -405,7 +405,7 @@ void WinPkFilterDriver::run() {
         if (!m_running) break;
 
         // 1. Read & Dispatch
-        for (int r = 0; r < 10 && m_running; ++r) {
+        for (int r = 0; r < 20 && m_running; ++r) {
             m_read_request->dwPacketsNumber = BATCH_SIZE;
             if (m_ndis_api.ReadPackets(m_read_request) && m_read_request->dwPacketsSuccess > 0) {
                 std::vector<std::list<QueuedPacket>> groups(m_num_workers);
@@ -500,6 +500,10 @@ void WinPkFilterDriver::run() {
                 PINTERMEDIATE_BUFFER next_b = PacketPool::instance().acquire();
                 if (next_b) {
                     m_read_request->EthPacket[i].Buffer = next_b;
+                } else {
+                    LOG_ERROR("[Driver] Packet pool exhausted! Stopping read batch.");
+                    m_read_request->dwPacketsSuccess = i; // Adjust for partial dispatch
+                    break;
                 }
             }
             for (unsigned int i = 0; i < m_num_workers; ++i) {
@@ -511,49 +515,58 @@ void WinPkFilterDriver::run() {
             }
         }
 
-        // 2. Write Results
+        // 2. Write Results (DRAIN COMPLETELY)
         {
             std::lock_guard<std::mutex> lock(m_results_queue.mtx);
             if (!m_results_queue.packets.empty()) local_results.splice(local_results.end(), m_results_queue.packets);
         }
+
         if (!local_results.empty()) {
-            m_write_request->hAdapterHandle = m_adapter_handle;
-            m_mstcp_request->hAdapterHandle = m_adapter_handle;
-            m_write_request->dwPacketsNumber = 0;
-            m_mstcp_request->dwPacketsNumber = 0;
+            std::list<PINTERMEDIATE_BUFFER> to_adapter;
+            std::list<PINTERMEDIATE_BUFFER> to_mstcp;
 
-            auto it = local_results.begin();
-            while (it != local_results.end()) {
-                if (it->destination == PacketDestination::TO_ADAPTER) {
-                    if (m_write_request->dwPacketsNumber < BATCH_SIZE) {
-                        m_write_request->EthPacket[m_write_request->dwPacketsNumber++].Buffer = it->buffer;
-                        it = local_results.erase(it);
-                    }
-                    else break;
-                }
-                else { // TO_MSTCP
-                    if (m_mstcp_request->dwPacketsNumber < BATCH_SIZE) {
-                        m_mstcp_request->EthPacket[m_mstcp_request->dwPacketsNumber++].Buffer = it->buffer;
-                        it = local_results.erase(it);
-                    }
-                    else break;
-                }
+            // Sort packets into separate queues once
+            for (auto& pr : local_results) {
+                if (pr.destination == PacketDestination::TO_ADAPTER) to_adapter.push_back(pr.buffer);
+                else to_mstcp.push_back(pr.buffer);
             }
+            local_results.clear();
 
-            if (m_write_request->dwPacketsNumber > 0) {
+            // Drain adapter queue
+            while (!to_adapter.empty() && m_running) {
+                m_write_request->dwPacketsNumber = 0;
+                while (!to_adapter.empty() && m_write_request->dwPacketsNumber < BATCH_SIZE) {
+                    m_write_request->EthPacket[m_write_request->dwPacketsNumber++].Buffer = to_adapter.front();
+                    to_adapter.pop_front();
+                }
+                m_write_request->hAdapterHandle = m_adapter_handle;
                 if (m_ndis_api.SendPacketsToAdapter(m_write_request)) {
-                    for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) PacketPool::instance().release(m_write_request->EthPacket[i].Buffer);
-                }
-                else {
-                    for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) local_results.push_back({ m_write_request->EthPacket[i].Buffer, PacketDestination::TO_ADAPTER });
+                    std::vector<RawPacket*> ptrs;
+                    for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) ptrs.push_back(m_write_request->EthPacket[i].Buffer);
+                    PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
+                } else {
+                    std::vector<RawPacket*> ptrs;
+                    for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) ptrs.push_back(m_write_request->EthPacket[i].Buffer);
+                    PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
                 }
             }
-            if (m_mstcp_request->dwPacketsNumber > 0) {
-                if (m_ndis_api.SendPacketsToMstcp(m_mstcp_request)) {
-                    for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) PacketPool::instance().release(m_mstcp_request->EthPacket[i].Buffer);
+
+            // Drain mstcp queue
+            while (!to_mstcp.empty() && m_running) {
+                m_mstcp_request->dwPacketsNumber = 0;
+                while (!to_mstcp.empty() && m_mstcp_request->dwPacketsNumber < BATCH_SIZE) {
+                    m_mstcp_request->EthPacket[m_mstcp_request->dwPacketsNumber++].Buffer = to_mstcp.front();
+                    to_mstcp.pop_front();
                 }
-                else {
-                    for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) local_results.push_back({ m_mstcp_request->EthPacket[i].Buffer, PacketDestination::TO_MSTCP });
+                m_mstcp_request->hAdapterHandle = m_adapter_handle;
+                if (m_ndis_api.SendPacketsToMstcp(m_mstcp_request)) {
+                    std::vector<RawPacket*> ptrs;
+                    for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) ptrs.push_back(m_mstcp_request->EthPacket[i].Buffer);
+                    PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
+                } else {
+                    std::vector<RawPacket*> ptrs;
+                    for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) ptrs.push_back(m_mstcp_request->EthPacket[i].Buffer);
+                    PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
                 }
             }
         }
