@@ -161,7 +161,7 @@ static void recalculate_tcp_udp_checksum(PIP_HEADER ip) {
     }
 }
 
-// Smart worker dispatch: Check NAT mapping first, fallback to stable hash
+// Smart worker dispatch: Pin by Client IP to handle fragments and ensure ordering
 static uint32_t get_target_worker(const char* packet, size_t length, uint32_t device_flags, uint32_t num_workers) {
     if (length < 14) return 0;
     
@@ -169,8 +169,6 @@ static uint32_t get_target_worker(const char* packet, size_t length, uint32_t de
     if (ether_type != ETHERTYPE_IP) {
         // Non-IP packets (ARP, IPv6, EAPOL, etc.)
         // Strategy: Hash the "Client" MAC to keep the session pinned to one worker.
-        // ON_SEND (Stack->Adapter): Destination is Client (Offset 0).
-        // ON_RECEIVE (Adapter->Stack): Source is Client (Offset 6).
         const uint8_t* mac;
         if (device_flags == PACKET_FLAG_ON_SEND) {
              mac = (const uint8_t*)(packet + 0); // Dst MAC
@@ -185,50 +183,19 @@ static uint32_t get_target_worker(const char* packet, size_t length, uint32_t de
     PIP_HEADER ip = (PIP_HEADER)(packet + 14);
 
     uint32_t stable_ip;
-    uint16_t stable_port = 0;
-    bool valid_l4 = false;
-
-    int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
 
     // Strategy: Always anchor to "Client" side (Stable Side)
     // ON_SEND (Stack->Adapter): Use Destination (Remote/Client).
     // ON_RECEIVE (Adapter->Stack): Use Source (Remote/Client).
     if (device_flags == PACKET_FLAG_ON_SEND) {
         stable_ip = ip->DstAddr;
-        if (ip->Proto == IPPROTO_TCP && length >= 14 + ip_hdr_len + sizeof(TCP_HEADER)) {
-            stable_port = ((PTCP_HEADER)((char*)ip + ip_hdr_len))->DstPort;
-            valid_l4 = true;
-        } else if (ip->Proto == IPPROTO_UDP && length >= 14 + ip_hdr_len + sizeof(UDP_HEADER)) {
-            stable_port = ((PUDP_HEADER)((char*)ip + ip_hdr_len))->DstPort;
-            valid_l4 = true;
-        }
     } else {
         stable_ip = ip->SrcAddr;
-        if (ip->Proto == IPPROTO_TCP && length >= 14 + ip_hdr_len + sizeof(TCP_HEADER)) {
-            stable_port = ((PTCP_HEADER)((char*)ip + ip_hdr_len))->SrcPort;
-            valid_l4 = true;
-        } else if (ip->Proto == IPPROTO_UDP && length >= 14 + ip_hdr_len + sizeof(UDP_HEADER)) {
-            stable_port = ((PUDP_HEADER)((char*)ip + ip_hdr_len))->SrcPort;
-            valid_l4 = true;
-        }
     }
 
-    if (valid_l4) {
-        // 1. Try Lookup
-        uint64_t key = NatManager::make_key(stable_ip, stable_port);
-        auto mapping = NatManager::instance().get_mapping(key);
-        if (mapping) {
-            return mapping->worker_id; // Found established flow
-        }
-
-        // 2. Fallback: Consistent Hash (for new flows)
-        // Combine IP, Port and Protocol. Avoid XOR-only zeros.
-        // Mix bits to ensure good distribution.
-        uint32_t hash = stable_ip ^ ((uint32_t)stable_port << 16) ^ stable_port ^ ip->Proto;
-        return hash % num_workers;
-    }
-
-    return 0; // Default to worker 0 for non-IP/non-L4
+    // Hash the Client IP only. This ensures all flows (TCP/UDP) and ALL FRAGMENTS
+    // from the same client are processed by the same worker.
+    return stable_ip % num_workers;
 }
 
 WinPkFilterDriver::WinPkFilterDriver()
