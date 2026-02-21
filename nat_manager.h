@@ -22,10 +22,11 @@ struct OriginalDestination {
     uint32_t ip;
     uint16_t port;
     uint32_t original_client_ip;
+    uint32_t worker_id;
 
-    OriginalDestination() : ip(0), port(0), original_client_ip(0) {}
-    OriginalDestination(uint32_t i, uint16_t p, uint32_t oc) 
-        : ip(i), port(p), original_client_ip(oc) {}
+    OriginalDestination() : ip(0), port(0), original_client_ip(0), worker_id(0) {}
+    OriginalDestination(uint32_t i, uint16_t p, uint32_t oc, uint32_t w = 0) 
+        : ip(i), port(p), original_client_ip(oc), worker_id(w) {}
 };
 
 class NatManager {
@@ -37,8 +38,8 @@ public:
         return ((uint64_t)ip << 16) | port;
     }
 
-    void create_tcp_mapping(uint64_t key, const OriginalDestination& dest);
-    void create_or_update_udp_mapping(uint64_t key, const OriginalDestination& dest);
+    void create_tcp_mapping(uint64_t key, const OriginalDestination& dest, uint32_t worker_id);
+    void create_or_update_udp_mapping(uint64_t key, const OriginalDestination& dest, uint32_t worker_id);
     
     std::optional<OriginalDestination> get_mapping(uint64_t key);
     void remove_tcp_mapping(uint64_t key);

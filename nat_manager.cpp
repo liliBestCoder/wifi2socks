@@ -12,10 +12,12 @@ NatManager& NatManager::instance() {
 NatManager::NatManager() {}
 NatManager::~NatManager() {}
 
-void NatManager::create_tcp_mapping(uint64_t key, const OriginalDestination& dest) {
+void NatManager::create_tcp_mapping(uint64_t key, const OriginalDestination& dest, uint32_t worker_id) {
     auto& shard = m_shards[key % NUM_SHARDS];
     
     uint64_t now = GetTickCount64();
+    OriginalDestination d = dest;
+    d.worker_id = worker_id;
     
     // Lazy cleanup logic
     if (now - shard.last_cleanup_time > 10000) { 
@@ -37,10 +39,10 @@ void NatManager::create_tcp_mapping(uint64_t key, const OriginalDestination& des
             }
         }
         shard.last_cleanup_time = now;
-        shard.tcp_map[key] = { dest, now };
+        shard.tcp_map[key] = { d, now };
     } else {
         std::unique_lock<std::shared_mutex> lock(shard.mtx);
-        shard.tcp_map[key] = { dest, now };
+        shard.tcp_map[key] = { d, now };
     }
 }
 
@@ -50,10 +52,12 @@ void NatManager::remove_tcp_mapping(uint64_t key) {
     shard.tcp_map.erase(key);
 }
 
-void NatManager::create_or_update_udp_mapping(uint64_t key, const OriginalDestination& dest) {
+void NatManager::create_or_update_udp_mapping(uint64_t key, const OriginalDestination& dest, uint32_t worker_id) {
     auto& shard = m_shards[key % NUM_SHARDS];
     std::unique_lock<std::shared_mutex> lock(shard.mtx);
-    shard.udp_map[key] = { dest, GetTickCount64() };
+    OriginalDestination d = dest;
+    d.worker_id = worker_id;
+    shard.udp_map[key] = { d, GetTickCount64() };
 }
 
 std::optional<OriginalDestination> NatManager::get_mapping(uint64_t key) {
