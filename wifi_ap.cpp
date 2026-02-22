@@ -232,11 +232,20 @@ bool ForceSetStaticIP(const std::string& targetIp) {
 void StopICSService() {
     SC_HANDLE scm = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (scm) {
-        SC_HANDLE svc = OpenService(scm, L"SharedAccess", SERVICE_STOP | SERVICE_QUERY_STATUS);
+        // Request CHANGE_CONFIG access to disable the service
+        SC_HANDLE svc = OpenService(scm, L"SharedAccess", SERVICE_STOP | SERVICE_QUERY_STATUS | SERVICE_CHANGE_CONFIG);
         if (svc) {
             SERVICE_STATUS status;
+            // 1. Stop the service
             ControlService(svc, SERVICE_CONTROL_STOP, &status);
+            
+            // 2. Disable the service (StartType = SERVICE_DISABLED) to prevent auto-restart
+            ChangeServiceConfig(svc, SERVICE_NO_CHANGE, SERVICE_DISABLED, SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+            
             CloseServiceHandle(svc);
+            LOG_INFO("ICS (SharedAccess) service stopped and disabled.");
+        } else {
+            LOG_WARN("Could not open SharedAccess service. Error: %d", GetLastError());
         }
         CloseServiceHandle(scm);
     }
