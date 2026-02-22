@@ -112,6 +112,12 @@ void WiFiAPManager::Start() {
 }
 
 void WiFiAPManager::StartListener() {
+    // Fix: Remove previous event handler if listener exists to prevent duplicate callbacks
+    if (_connectionListener) {
+        _connectionListener->remove_ConnectionRequested(_connectionRequestedToken);
+        _connectionListener.Reset();
+    }
+
     Windows::Foundation::ActivateInstance(HStringReference(RuntimeClass_Windows_Devices_WiFiDirect_WiFiDirectConnectionListener).Get(), &_connectionListener);
     _connectionListener->add_ConnectionRequested(Callback<ConnectionRequestedHandler>([this](IWiFiDirectConnectionListener* sender, IWiFiDirectConnectionRequestedEventArgs* args) -> HRESULT {
         ComPtr<IWiFiDirectConnectionRequest> request;

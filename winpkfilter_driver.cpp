@@ -483,7 +483,7 @@ void WinPkFilterDriver::run() {
 
                             if (!handled && ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
                                 PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ip_hdr_len);
-                                if (icmp->Type == 8 && ip->DstAddr == m_gateway_ip) {
+                                if (icmp->Type == 8) {
                                     // In-place modification for echo reply
                                     uint8_t tmac[6];
                                     memcpy(tmac, buffer, 6);
@@ -515,8 +515,7 @@ void WinPkFilterDriver::run() {
                                 }
                                 else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) { // Drop Discovery
                                     PacketPool::instance().release(b);
-                                    m_read_request->EthPacket[i].Buffer = nullptr; // 释放
-                                    handled = true;
+                                    m_read_request->EthPacket[i].Buffer = nullptr; // 释放\n                                    handled = true;
                                 }
                             }
                         }
