@@ -81,7 +81,7 @@ bool DhcpServer::start() {
     
     sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    inet_pton(AF_INET, g_config.tap_ip.c_str(), &server_addr.sin_addr);
     server_addr.sin_port = htons(listen_port_);
 
     if (bind(sock_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {

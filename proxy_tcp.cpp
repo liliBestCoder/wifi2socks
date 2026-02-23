@@ -324,14 +324,10 @@ void ProxyTCP::try_send(SOCKET socket) {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
             if (m_remote_write_in_progress || m_remote_send_queue.empty()) return;
 
-            // Batch up to 1024 buffers OR up to HIGH_WATER_MARK bytes.
-            // DO NOT pop here. Only pop in on_write_complete upon success.
-            size_t count = 0;
-            size_t total_bytes = 0;
-            for (auto& buf : m_remote_send_queue) {
-                buffers.push_back(buf);
-                total_bytes += buf->size();
-                if (++count >= 1024 || total_bytes >= HIGH_WATER_MARK) break;
+            // Batch up to 1024 buffers. Byte limit is naturally handled by backpressure at the queue level.
+            size_t count = std::min((size_t)1024, m_remote_send_queue.size());
+            for (size_t i = 0; i < count; ++i) {
+                buffers.push_back(m_remote_send_queue[i]);
             }
             m_remote_write_in_progress = true;
         }
@@ -343,12 +339,9 @@ void ProxyTCP::try_send(SOCKET socket) {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
             if (m_client_write_in_progress || m_client_send_queue.empty()) return;
 
-            size_t count = 0;
-            size_t total_bytes = 0;
-            for (auto& buf : m_client_send_queue) {
-                buffers.push_back(buf);
-                total_bytes += buf->size();
-                if (++count >= 1024 || total_bytes >= HIGH_WATER_MARK) break;
+            size_t count = std::min((size_t)1024, m_client_send_queue.size());
+            for (size_t i = 0; i < count; ++i) {
+                buffers.push_back(m_client_send_queue[i]);
             }
             m_client_write_in_progress = true;
         }
