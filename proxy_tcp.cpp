@@ -24,10 +24,6 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
     u_long mode = 1;
     ioctlsocket(m_client_socket, FIONBIO, &mode);
 
-    int buf_size = 16 * 1024 * 1024; // 16MB
-    setsockopt(m_client_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
-    setsockopt(m_client_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
-
     BOOL nodelay = TRUE;
     setsockopt(m_client_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
 }
@@ -71,9 +67,6 @@ void ProxyTCP::connect_remote() {
     m_remote_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (m_remote_socket == INVALID_SOCKET) { close_session(); return; }
 
-    int buf_size = 1024 * 1024;
-    setsockopt(m_remote_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
-    setsockopt(m_remote_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
     BOOL nodelay = TRUE;
     setsockopt(m_remote_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
     u_long mode = 1;
@@ -268,11 +261,20 @@ void ProxyTCP::on_client_read(char* buf, int len) {
     }
     else if (m_state == ESTABLISHED) {
         try_send(m_remote_socket);
+
+        // Flow control: Check if we need to pause reading from the client.
+        if (m_remote_send_queue_size > HIGH_WATER_MARK) {
+            m_client_read_paused = true;
+            // Stop reading from client until the remote queue drains.
+            return;
+        }
     }
     // For CONNECTING or AWAITING_PROXY_RESPONSE, we just buffer. Data is already in the queue.
 
-    // Continue the read loop unconditionally.
-    WorkerPool::instance().read_async(m_client_socket);
+    // Continue the read loop only if not paused.
+    if (!m_client_read_paused) {
+        WorkerPool::instance().read_async(m_client_socket);
+    }
 }
 
 void ProxyTCP::on_remote_read(char* buf, int len) {
@@ -322,12 +324,14 @@ void ProxyTCP::try_send(SOCKET socket) {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
             if (m_remote_write_in_progress || m_remote_send_queue.empty()) return;
 
-            // Batch up to 1024 buffers (approx 1.4MB) to fill the pipe.
+            // Batch up to 1024 buffers OR up to HIGH_WATER_MARK bytes.
             // DO NOT pop here. Only pop in on_write_complete upon success.
             size_t count = 0;
+            size_t total_bytes = 0;
             for (auto& buf : m_remote_send_queue) {
                 buffers.push_back(buf);
-                if (++count >= 1024) break;
+                total_bytes += buf->size();
+                if (++count >= 1024 || total_bytes >= HIGH_WATER_MARK) break;
             }
             m_remote_write_in_progress = true;
         }
@@ -340,9 +344,11 @@ void ProxyTCP::try_send(SOCKET socket) {
             if (m_client_write_in_progress || m_client_send_queue.empty()) return;
 
             size_t count = 0;
+            size_t total_bytes = 0;
             for (auto& buf : m_client_send_queue) {
                 buffers.push_back(buf);
-                if (++count >= 1024) break;
+                total_bytes += buf->size();
+                if (++count >= 1024 || total_bytes >= HIGH_WATER_MARK) break;
             }
             m_client_write_in_progress = true;
         }
@@ -358,6 +364,7 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
 
     auto self = shared_from_this();
     if (socket == m_remote_socket) {
+        bool should_resume_reading = false;
         {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
             if (!attempted_buffers.empty()) {
@@ -379,6 +386,12 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
                 m_remote_send_queue_size -= len;
             }
 
+            // Flow control: Check if we should resume reading from client.
+            if (m_client_read_paused && m_remote_send_queue_size < LOW_WATER_MARK) {
+                m_client_read_paused = false;
+                should_resume_reading = true;
+            }
+
             if (m_client_at_eof && m_remote_send_queue.empty()) {
                 if (m_remote_socket != INVALID_SOCKET && m_state == ESTABLISHED) {
                     shutdown(m_remote_socket, SD_SEND);
@@ -388,6 +401,10 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
                 }
                 return;
             }
+        }
+        // Resume reading outside the lock.
+        if (should_resume_reading) {
+            WorkerPool::instance().read_async(m_client_socket);
         }
         self->try_send(socket);
     }
