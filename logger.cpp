@@ -12,7 +12,7 @@ AsyncLogger& AsyncLogger::instance() {
     return inst;
 }
 
-AsyncLogger::AsyncLogger() : m_running(true) {
+AsyncLogger::AsyncLogger() : m_running(true), m_min_level(LOG_LEVEL_INFO) {
     m_thread = std::thread(&AsyncLogger::worker_loop, this);
 }
 
@@ -65,9 +65,7 @@ void AsyncLogger::log(LogLevel level, const char* format, ...) {
 
     std::string final_msg = ss.str();
 
-    // Print to Console immediately (optional, can be moved to worker if console IO is slow)
-    // Using printf for thread safety on console is tricky, but std::cout is buffered.
-    // For simplicity and immediate feedback:
+    // Print to Console immediately 
     printf("%s\n", final_msg.c_str());
 
     {
@@ -91,7 +89,6 @@ void AsyncLogger::worker_loop() {
 
         if (m_file.is_open()) {
             m_file << msg << std::endl;
-            // m_file.flush(); // Frequent flush impacts performance, rely on OS buffering or periodical flush
         }
     }
 }

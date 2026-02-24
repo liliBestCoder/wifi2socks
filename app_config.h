@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include "logger.h" // Include logger.h for LogLevel and AsyncLogger
 
 // --- Configuration Struct ---
 struct AppConfig {
@@ -56,31 +57,14 @@ struct AppConfig {
 extern AppConfig g_config;
 
 // Keep some defines for backward compatibility if needed, or point them to g_config
-// But best to replace usages.
-
 #define TAP_WIN_PATH "\\\\.\\%s.tap"
 #define TAP_CONTROL_CODE(request, method) CTL_CODE(FILE_DEVICE_UNKNOWN, request, method, FILE_ANY_ACCESS)
 #define TAP_IOCTL_SET_MEDIA_STATUS TAP_CONTROL_CODE(6, METHOD_BUFFERED)
 
 #include <stdio.h>
-#include "logger.h"
 
-enum LogLevel {
-    LOG_LEVEL_DEBUG = 0,
-    LOG_LEVEL_INFO = 1,
-    LOG_LEVEL_ERROR = 2,
-    LOG_LEVEL_NONE = 99
-};
-
-extern LogLevel g_log_level;
-
-
-#define LOG_PRINT(level, fmt, ...) do { \
-    if (level >= g_log_level) { \
-        AsyncLogger::instance().log(fmt, ##__VA_ARGS__); \
-    } \
-} while(0)
-
-#define LOG_DEBUG(fmt, ...) LOG_PRINT(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...)  LOG_PRINT(LOG_LEVEL_INFO, fmt, ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...)  LOG_PRINT(LOG_LEVEL_ERROR, fmt, ##__VA_ARGS__)
+// Macros update: Pass level to AsyncLogger::log
+#define LOG_DEBUG(fmt, ...) AsyncLogger::instance().log(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)  AsyncLogger::instance().log(LOG_LEVEL_INFO, fmt, ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...)  AsyncLogger::instance().log(LOG_LEVEL_WARN, fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...) AsyncLogger::instance().log(LOG_LEVEL_ERROR, fmt, ##__VA_ARGS__)

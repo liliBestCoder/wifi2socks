@@ -654,7 +654,6 @@ void WinPkFilterDriver::run() {
         }
     }
 }
-}
 
 bool WinPkFilterDriver::get_adapter_mac(const std::string& adapter_name, uint8_t* mac) {
     PIP_ADAPTER_ADDRESSES pAddrs = (PIP_ADAPTER_ADDRESSES)malloc(15000); ULONG len = 15000;
