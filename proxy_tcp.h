@@ -56,12 +56,12 @@ private:
 
     // Data flow to Client (from Remote)
     std::deque<std::shared_ptr<std::vector<char>>> m_client_send_queue;
-    std::atomic<bool> m_client_write_in_progress{ false };
+    int m_client_writes_inflight{ 0 };
     std::mutex m_client_queue_mutex;
 
     // Data flow to Remote (from Client)
     std::deque<std::shared_ptr<std::vector<char>>> m_remote_send_queue;
-    std::atomic<bool> m_remote_write_in_progress{ false };
+    int m_remote_writes_inflight{ 0 };
     std::mutex m_remote_queue_mutex;
 
     // Graceful closure flags
@@ -74,6 +74,8 @@ private:
     // Flow control watermarks
     static const size_t HIGH_WATER_MARK = 4 * 1024 * 1024; // 4MB
     static const size_t LOW_WATER_MARK = 1 * 1024 * 1024;  // 1MB
+    static const int MAX_INFLIGHT_WRITES = 4;
+    static const size_t MAX_WRITE_BATCH_SIZE = 256;
     
     // Flow control flags
     std::atomic<bool> m_remote_read_paused{false};
