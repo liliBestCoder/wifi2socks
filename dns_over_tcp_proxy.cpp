@@ -28,7 +28,7 @@ DnsOverTcpProxy::~DnsOverTcpProxy() {
 void DnsOverTcpProxy::start() {
     m_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (m_socket == INVALID_SOCKET) {
-        LOG_ERROR("[DoT] Failed to create socket.");
+        LOG_DEBUG("[DoT] Failed to create socket.");
         return;
     }
     
@@ -58,7 +58,7 @@ void DnsOverTcpProxy::on_connect() {
     int len = sizeof(error);
     getsockopt(m_socket, SOL_SOCKET, SO_ERROR, (char*)&error, &len);
     if (error != 0) {
-        LOG_ERROR("[DoT] Connection failed with error %d", error);
+        LOG_DEBUG("[DoT] Connection failed with error %d", error);
         on_close();
         return;
     }
@@ -104,7 +104,7 @@ void DnsOverTcpProxy::on_read(char* buf, int len) {
                 m_read_buffer.erase(m_read_buffer.begin(), it + 4);
                 send_dns_query();
             } else {
-                LOG_ERROR("[DoT] Proxy CONNECT failed: %s", header.c_str());
+                LOG_DEBUG("[DoT] Proxy CONNECT failed: %s", header.c_str());
                 on_close();
                 return;
             }
