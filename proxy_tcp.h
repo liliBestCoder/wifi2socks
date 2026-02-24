@@ -72,8 +72,8 @@ private:
     std::atomic<size_t> m_remote_send_queue_size{0};
 
     // Flow control watermarks
-    static const size_t HIGH_WATER_MARK = 512 * 1024; // 512KB
-    static const size_t LOW_WATER_MARK = 256 * 1024;  // 256KB
+    static const size_t HIGH_WATER_MARK = 4 * 1024 * 1024; // 4MB
+    static const size_t LOW_WATER_MARK = 1 * 1024 * 1024;  // 1MB
     
     // Flow control flags
     std::atomic<bool> m_remote_read_paused{false};
