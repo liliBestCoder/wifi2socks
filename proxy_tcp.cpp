@@ -52,12 +52,12 @@ void ProxyTCP::connect_remote() {
     snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
 
     if (m_is_direct) {
-        LOG_INFO("[ProxyTCP] Routing DIRECT for %s (IP: %s)", m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str(), ip_str);
+        LOG_INFO("[TCP] Routing DIRECT for %s (IP: %s)", m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str(), ip_str);
         remote_addr.sin_addr.s_addr = m_original_dest.ip;
         remote_addr.sin_port = m_original_dest.port;
     }
     else {
-        LOG_INFO("[ProxyTCP] Routing PROXY for %s (IP: %s)", m_detected_domain.empty() ? "(Domain unknown)" : m_detected_domain.c_str(), ip_str);
+        LOG_INFO("[TCP] Routing PROXY for %s (IP: %s)", m_detected_domain.empty() ? "(Domain unknown)" : m_detected_domain.c_str(), ip_str);
         inet_pton(AF_INET, g_config.proxy_ip.c_str(), &remote_addr.sin_addr);
         remote_addr.sin_port = htons(g_config.proxy_port);
     }
@@ -182,7 +182,7 @@ void ProxyTCP::on_client_read(char* buf, int len) {
             std::string_view payload((const char*)buf_data, buf_size);
             // Check for common HTTP methods that would appear at the start of the payload
             if (payload.find("GET ") == 0 || payload.find("POST ") == 0 || payload.find("HEAD ") == 0 || payload.find("OPTIONS ") == 0) {
-                LOG_INFO("[ProxyTCP] Hooking HTTP request to gateway on port 80. Returning 204.");
+                LOG_INFO("[TCP] Hooking HTTP request to gateway on port 80. Returning 204.");
                 const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
                 WorkerPool::instance().send_async(m_client_socket, (const uint8_t*)response, (int)strlen(response));
                 m_close_after_write = true;
@@ -195,7 +195,7 @@ void ProxyTCP::on_client_read(char* buf, int len) {
             unsigned char* ip_bytes = (unsigned char*)&m_original_dest.ip;
             char ip_str[INET_ADDRSTRLEN];
             snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-            LOG_INFO("[ProxyTCP] Hooking /generate_204 request on port 80 to %s from client", ip_str);
+            LOG_INFO("[TCP] Hooking /generate_204 request on port 80 to %s from client", ip_str);
             const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
             WorkerPool::instance().send_async(m_client_socket, (const uint8_t*)response, (int)strlen(response));
             m_close_after_write = true;
