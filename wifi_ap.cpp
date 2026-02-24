@@ -245,7 +245,7 @@ void StopICSService() {
             CloseServiceHandle(svc);
             LOG_INFO("ICS (SharedAccess) service stopped and disabled.");
         } else {
-            LOG_WARN("Could not open SharedAccess service. Error: %d", GetLastError());
+            LOG_ERROR("Could not open SharedAccess service. Error: %d", GetLastError());
         }
         CloseServiceHandle(scm);
     }
