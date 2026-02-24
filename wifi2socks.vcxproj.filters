@@ -45,9 +45,7 @@
     <ClCompile Include="nat_manager.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
-    <ClCompile Include="packet_monitor.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
+
     <ClCompile Include="packet_pool.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -116,9 +114,7 @@
     <ClInclude Include="nat_manager.h">
       <Filter>头文件</Filter>
     </ClInclude>
-    <ClInclude Include="packet_monitor.h">
-      <Filter>头文件</Filter>
-    </ClInclude>
+
     <ClInclude Include="packet_pool.h">
       <Filter>头文件</Filter>
     </ClInclude>

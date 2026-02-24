@@ -174,7 +174,7 @@
     <ClCompile Include="main_dispatcher.cpp" />
     <ClCompile Include="connection_pool.cpp" />
     <ClCompile Include="packet_pool.cpp" />
-    <ClCompile Include="packet_monitor.cpp" />
+
     <ClCompile Include="nat_manager.cpp" />
     <ClCompile Include="app_listener.cpp" />
     <ClCompile Include="dns_over_tcp_proxy.cpp" />
@@ -201,7 +201,7 @@
     <ClInclude Include="wifi_ap_listener.h" />
     <ClInclude Include="connection_pool.h" />
     <ClInclude Include="packet_pool.h" />
-    <ClInclude Include="packet_monitor.h" />
+
     <ClInclude Include="nat_manager.h" />
     <ClInclude Include="app_listener.h" />
     <ClInclude Include="dns_over_tcp_proxy.h" />

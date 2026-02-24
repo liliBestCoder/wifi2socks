@@ -16,7 +16,7 @@ LogLevel g_log_level = LOG_LEVEL_INFO;
 
 #include "winpkfilter_driver.h"
 #include "packet_pool.h"
-#include "packet_monitor.h"
+
 #include "dhcp_server.h"
 #include "worker.h"
 #include "proxy_tcp.h"
@@ -100,7 +100,7 @@ int main() {
     LOG_INFO("[CORE] GeoChecker Initialized.");
 
     PacketPool::instance().init(1024 * 64);
-    PacketMonitor::instance().start();
+
 
     std::string adapter_name = find_adapter_by_ip(g_config.gateway_ip);
     static WinPkFilterDriver pk_driver;
