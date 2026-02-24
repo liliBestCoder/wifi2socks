@@ -230,7 +230,7 @@ public:
                 if (cached_ip != 0) {
                     char ip_str[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &cached_ip, ip_str, INET_ADDRSTRLEN);
-                    LOG_INFO("[DNS] Cache Hit for '%s' -> %s", domain.c_str(), ip_str);
+                    LOG_DEBUG("[DNS] Cache Hit for '%s' -> %s", domain.c_str(), ip_str); // LOG_INFO -> LOG_DEBUG
                     
                     std::vector<char> resp = build_dns_a_response(data, len, cached_ip);
                     if (!resp.empty()) {
@@ -252,7 +252,7 @@ public:
                         if (resp_len > 0) {
                             DnsResponse res = parse_dns_response(dns_resp, resp_len);
                             if (res.parse_error) {
-                                LOG_ERROR("[DNS] Failed to parse DoT DNS response for '%s'.", domain.c_str());
+                                LOG_DEBUG("[DNS] Failed to parse DoT DNS response for '%s'.", domain.c_str()); // LOG_ERROR -> LOG_DEBUG
                             } else {
                                 if (res.rcode == 0 && !res.addresses.empty()) {
                                     std::string ips;
@@ -262,7 +262,7 @@ public:
                                         if (i < res.addresses.size() - 1) ips += ", ";
                                         if (i == 0) inet_pton(AF_INET, res.addresses[i].c_str(), &first_ip_nbo);
                                     }
-                                    LOG_INFO("[DNS] Resolved '%s' to [%s] via DoT.", res.qname.c_str(), ips.c_str());
+                                    LOG_DEBUG("[DNS] Resolved '%s' to [%s] via DoT.", res.qname.c_str(), ips.c_str()); // LOG_INFO -> LOG_DEBUG
                                     
                                     // *** Write to Cache ***
                                     if (first_ip_nbo != 0) {
@@ -271,14 +271,14 @@ public:
                                     // **********************
 
                                 } else if (res.rcode != 0) {
-                                    LOG_INFO("[DNS] Failed to resolve '%s' via DoT. RCODE: %d", res.qname.c_str(), res.rcode);
+                                    LOG_DEBUG("[DNS] Failed to resolve '%s' via DoT. RCODE: %d", res.qname.c_str(), res.rcode); // LOG_INFO -> LOG_DEBUG
                                 } else {
-                                    LOG_INFO("[DNS] Received response for '%s' via DoT (RCODE: 0, no A records).", res.qname.c_str());
+                                    LOG_DEBUG("[DNS] Received response for '%s' via DoT (RCODE: 0, no A records).", res.qname.c_str()); // LOG_INFO -> LOG_DEBUG
                                 }
                             }
                             sendto(listener_socket, dns_resp, resp_len, 0, (const sockaddr*)&client_addr, sizeof(client_addr));
                         } else {
-                            LOG_ERROR("[DNS] Received empty or invalid response for '%s' from DoT proxy.", domain.c_str());
+                            LOG_DEBUG("[DNS] Received empty or invalid response for '%s' from DoT proxy.", domain.c_str()); // LOG_ERROR -> LOG_DEBUG
                         }
                     };
                     std::vector<uint8_t> query_vec((uint8_t*)data, (uint8_t*)data + len);
@@ -352,7 +352,7 @@ private:
         if (from_addr->sin_addr.s_addr == direct_dns_addr.sin_addr.s_addr) {
             DnsResponse res = parse_dns_response(buf, len);
             if (res.parse_error) {
-                LOG_ERROR("[DNS] Failed to parse direct DNS response.");
+                LOG_DEBUG("[DNS] Failed to parse direct DNS response."); // LOG_ERROR -> LOG_DEBUG
             }
             else {
                 if (res.rcode == 0 && !res.addresses.empty()) {
@@ -363,7 +363,7 @@ private:
                         if (i < res.addresses.size() - 1) ips += ", ";
                         if (i == 0) inet_pton(AF_INET, res.addresses[i].c_str(), &first_ip_nbo);
                     }
-                    LOG_INFO("[DNS] Resolved '%s' to [%s] via DIRECT.", res.qname.c_str(), ips.c_str());
+                    LOG_DEBUG("[DNS] Resolved '%s' to [%s] via DIRECT.", res.qname.c_str(), ips.c_str()); // LOG_INFO -> LOG_DEBUG
 
                     // *** Write to Cache ***
                     if (first_ip_nbo != 0) {
@@ -373,10 +373,10 @@ private:
 
                 }
                 else if (res.rcode != 0) {
-                    LOG_INFO("[DNS] Failed to resolve '%s' via DIRECT. RCODE: %d", res.qname.c_str(), res.rcode);
+                    LOG_DEBUG("[DNS] Failed to resolve '%s' via DIRECT. RCODE: %d", res.qname.c_str(), res.rcode); // LOG_INFO -> LOG_DEBUG
                 }
                 else {
-                    LOG_INFO("[DNS] Received response for '%s' via DIRECT (RCODE: 0, no A records).", res.qname.c_str());
+                    LOG_DEBUG("[DNS] Received response for '%s' via DIRECT (RCODE: 0, no A records).", res.qname.c_str()); // LOG_INFO -> LOG_DEBUG
                 }
             }
         }
