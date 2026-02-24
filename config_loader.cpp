@@ -57,6 +57,7 @@ bool load_config(const char* filepath) {
             else if (key == "http_api_port") g_config.http_api_port = (uint16_t)std::stoi(value);
             else if (key == "wifi_ssid") g_config.wifi_ssid = value;
             else if (key == "wifi_password") g_config.wifi_password = value;
+            else if (key == "log_level") g_config.log_level = value;
             
             // Rules
             else if (key == "direct_ip_list") g_config.direct_ip_list = split(value, ',');
@@ -98,7 +99,8 @@ bool save_config(const char* filepath) {
 
     file << "http_api_port = " << g_config.http_api_port << "\n";
     file << "wifi_ssid = " << g_config.wifi_ssid << "\n";
-    file << "wifi_password = " << g_config.wifi_password << "\n\n";
+    file << "wifi_password = " << g_config.wifi_password << "\n";
+    file << "log_level = " << g_config.log_level << "\n\n";
 
     file << "[Rules]\n";
     file << "direct_ip_list = " << join(g_config.direct_ip_list, ',') << "\n";

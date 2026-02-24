@@ -12,7 +12,7 @@
 
 #include "app_config.h"
 
-LogLevel g_log_level = LOG_LEVEL_INFO;
+// Removed redundant g_log_level, now managed by AsyncLogger
 
 #include "winpkfilter_driver.h"
 #include "packet_pool.h"
@@ -25,9 +25,11 @@ LogLevel g_log_level = LOG_LEVEL_INFO;
 #include "geo_checker.h"
 #include "config_loader.h"
 #include "app_listener.h"
+#include "logger.h" // Added include for Logger configuration
 #include <iostream>
 #include <thread>
 #include <shellapi.h>
+#include <algorithm> // For std::transform
 
 #include "traffic_manager.h"
 #include "http_server.h"
@@ -54,7 +56,7 @@ std::string find_adapter_by_ip(const std::string& target_ip) {
                         std::string name = pCurr->AdapterName;
                         LOG_INFO("MATCH FOUND BY IP: %s", name.c_str());
                         free(pAddresses);
-                        return "\\DEVICE\\" + name;
+                        return "\\\\DEVICE\\\\" + name;
                     }
                 }
             }
@@ -76,6 +78,16 @@ int main() {
     if (FAILED(initialize)) return 1;
 
     load_config("config.ini");
+
+    // Configure Log Level
+    std::string level_str = g_config.log_level;
+    std::transform(level_str.begin(), level_str.end(), level_str.begin(), ::tolower);
+    if (level_str == "debug") AsyncLogger::instance().set_level(LOG_LEVEL_DEBUG);
+    else if (level_str == "warn") AsyncLogger::instance().set_level(LOG_LEVEL_WARN);
+    else if (level_str == "error") AsyncLogger::instance().set_level(LOG_LEVEL_ERROR);
+    else AsyncLogger::instance().set_level(LOG_LEVEL_INFO); // Default
+
+    AsyncLogger::instance().init("wifi2socks.log");
 
     static Wifi2SocksWiFiListener wifi_listener;
     try {
@@ -100,7 +112,6 @@ int main() {
     LOG_INFO("[CORE] GeoChecker Initialized.");
 
     PacketPool::instance().init(1024 * 64);
-
 
     std::string adapter_name = find_adapter_by_ip(g_config.gateway_ip);
     static WinPkFilterDriver pk_driver;

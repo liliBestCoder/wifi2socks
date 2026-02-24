@@ -16,6 +16,7 @@ struct AppConfig {
     std::string direct_dns_server;
     
     uint16_t http_api_port;
+    std::string log_level; // New field
 
     // WiFi settings
     std::string wifi_ssid;
@@ -31,7 +32,7 @@ struct AppConfig {
 
     // Defaults
     AppConfig() {
-        gateway_ip = "10.0.0.1";
+        gateway_ip = "192.168.11.1"; // Updated default to match user preference
         
         upstream_ip = "127.0.0.1";
         upstream_port = 2080;
@@ -40,6 +41,7 @@ struct AppConfig {
         direct_dns_server = "223.5.5.5";
         
         http_api_port = 8080;
+        log_level = "info"; // Default log level
 
         wifi_ssid = "wifi2socks_ap";
         wifi_password = "password123";
