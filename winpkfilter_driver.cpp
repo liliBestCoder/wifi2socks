@@ -161,19 +161,22 @@ static void recalculate_tcp_udp_checksum(PIP_HEADER ip) {
     }
 }
 
-// Smart worker dispatch: Pin by Client IP to handle fragments and ensure ordering
+// Smart worker dispatch: Symmetric Hash (Client IP ^ Client Port)
+// This ensures that all packets for the same flow (both directions) go to the same worker.
+// WARNING: This assumes NO IP FRAGMENTATION. If packets are fragmented, port info is missing
+// in subsequent fragments, which might lead to mis-hashing. We rely on DHCP MTU=1300 to avoid this.
 static uint32_t get_target_worker(const char* packet, size_t length, uint32_t device_flags, uint32_t num_workers) {
     if (length < 14) return 0;
     
     USHORT ether_type = ntohs(*(USHORT*)(packet + 12));
     if (ether_type != ETHERTYPE_IP) {
         // Non-IP packets (ARP, IPv6, EAPOL, etc.)
-        // Strategy: Hash the "Client" MAC to keep the session pinned to one worker.
+        // Fallback: Hash the "Client" MAC to keep the session pinned to one worker.
         const uint8_t* mac;
         if (device_flags == PACKET_FLAG_ON_SEND) {
-             mac = (const uint8_t*)(packet + 0); // Dst MAC
+             mac = (const uint8_t*)(packet + 0); // Dst MAC (Client)
         } else {
-             mac = (const uint8_t*)(packet + 6); // Src MAC
+             mac = (const uint8_t*)(packet + 6); // Src MAC (Client)
         }
         uint32_t hash = mac[0] ^ mac[1] ^ mac[2] ^ mac[3] ^ mac[4] ^ mac[5];
         return hash % num_workers;
@@ -181,21 +184,40 @@ static uint32_t get_target_worker(const char* packet, size_t length, uint32_t de
 
     if (length < 14 + sizeof(IP_HEADER)) return 0;
     PIP_HEADER ip = (PIP_HEADER)(packet + 14);
+    int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
 
-    uint32_t stable_ip;
+    uint32_t client_ip;
+    uint32_t client_port = 0; // Use 32-bit for convenient XOR
 
-    // Strategy: Always anchor to "Client" side (Stable Side)
-    // ON_SEND (Stack->Adapter): Use Destination (Remote/Client).
-    // ON_RECEIVE (Adapter->Stack): Use Source (Remote/Client).
     if (device_flags == PACKET_FLAG_ON_SEND) {
-        stable_ip = ip->DstAddr;
+        // Outbound (Stack -> Adapter): Destination is Client
+        client_ip = ip->DstAddr;
+        
+        // Attempt to extract Dest Port (Client Port)
+        if (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) {
+            // Check if packet is large enough to contain the port
+            if (length >= 14 + ip_hdr_len + 4) {
+                // DstPort is at offset 2 in TCP/UDP header
+                client_port = *(uint16_t*)(packet + 14 + ip_hdr_len + 2);
+            }
+        }
     } else {
-        stable_ip = ip->SrcAddr;
+        // Inbound (Adapter -> Stack): Source is Client
+        client_ip = ip->SrcAddr;
+
+        // Attempt to extract Src Port (Client Port)
+        if (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) {
+            // Check if packet is large enough to contain the port
+            if (length >= 14 + ip_hdr_len + 2) {
+                // SrcPort is at offset 0 in TCP/UDP header
+                client_port = *(uint16_t*)(packet + 14 + ip_hdr_len);
+            }
+        }
     }
 
-    // Hash the Client IP only. This ensures all flows (TCP/UDP) and ALL FRAGMENTS
-    // from the same client are processed by the same worker.
-    return stable_ip % num_workers;
+    // Symmetric Hash: Client IP ^ Client Port
+    // If it's a fragment without port, client_port will be 0, degrading to IP-only hash.
+    return (client_ip ^ client_port) % num_workers;
 }
 
 WinPkFilterDriver::WinPkFilterDriver()
@@ -631,6 +653,7 @@ void WinPkFilterDriver::run() {
             m_last_stat_time = now;
         }
     }
+}
 }
 
 bool WinPkFilterDriver::get_adapter_mac(const std::string& adapter_name, uint8_t* mac) {

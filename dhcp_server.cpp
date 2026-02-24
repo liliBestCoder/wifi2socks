@@ -290,9 +290,9 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
     uint32_t lease_time_n = htonl((uint32_t)lease_duration_.count());
     memcpy(resp_options, &lease_time_n, 4); resp_options += 4;
 
-    // Option 26: Interface MTU (1400 bytes to be safe over proxy/tunnels)
+    // Option 26: Interface MTU (1300 bytes to be safe over proxy/tunnels)
     *resp_options++ = 26; *resp_options++ = 2;
-    uint16_t mtu_n = htons(1400);
+    uint16_t mtu_n = htons(1300);
     memcpy(resp_options, &mtu_n, 2); resp_options += 2;
     
     // Option 255: End
