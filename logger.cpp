@@ -12,7 +12,8 @@ AsyncLogger& AsyncLogger::instance() {
     return inst;
 }
 
-AsyncLogger::AsyncLogger() : m_running(true), m_min_level(LOG_LEVEL_INFO) {
+// Default to DEBUG level so we can see the DNS logs you asked for.
+AsyncLogger::AsyncLogger() : m_running(true), m_min_level(LOG_LEVEL_DEBUG) {
     m_thread = std::thread(&AsyncLogger::worker_loop, this);
 }
 
@@ -65,9 +66,6 @@ void AsyncLogger::log(LogLevel level, const char* format, ...) {
 
     std::string final_msg = ss.str();
 
-    // Print to Console immediately 
-    printf("%s\n", final_msg.c_str());
-
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_queue.push(std::move(final_msg));
@@ -87,6 +85,11 @@ void AsyncLogger::worker_loop() {
             m_queue.pop();
         }
 
+        // Print to Console (stdout)
+        printf("%s\n", msg.c_str());
+        // fflush(stdout); // Optional: if lines are not appearing immediately
+
+        // Write to File
         if (m_file.is_open()) {
             m_file << msg << std::endl;
         }
