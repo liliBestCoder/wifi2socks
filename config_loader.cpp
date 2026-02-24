@@ -48,10 +48,9 @@ bool load_config(const char* filepath) {
         std::string value = trim(line.substr(delimiterPos + 1));
         
         try {
-            // Renamed keys
-            if (key == "gateway_ip" || key == "tap_ip") g_config.gateway_ip = value;
-            else if (key == "upstream_ip" || key == "proxy_ip") g_config.upstream_ip = value;
-            else if (key == "upstream_port" || key == "proxy_port") g_config.upstream_port = (uint16_t)std::stoi(value);
+            if (key == "gateway_ip") g_config.gateway_ip = value;
+            else if (key == "upstream_ip") g_config.upstream_ip = value;
+            else if (key == "upstream_port") g_config.upstream_port = (uint16_t)std::stoi(value);
             
             else if (key == "proxy_dns_server") g_config.proxy_dns_server = value;
             else if (key == "direct_dns_server") g_config.direct_dns_server = value;
