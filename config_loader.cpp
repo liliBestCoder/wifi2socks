@@ -48,19 +48,18 @@ bool load_config(const char* filepath) {
         std::string value = trim(line.substr(delimiterPos + 1));
         
         try {
-            if (key == "tap_ip") g_config.tap_ip = value;
-            else if (key == "tap_netmask") g_config.tap_netmask = value;
-            else if (key == "tap_gateway") g_config.tap_gateway = value;
-            else if (key == "tap_mac") g_config.tap_mac = value;
-            else if (key == "proxy_ip") g_config.proxy_ip = value;
-            else if (key == "proxy_port") g_config.proxy_port = (uint16_t)std::stoi(value);
+            // Renamed keys
+            if (key == "gateway_ip" || key == "tap_ip") g_config.gateway_ip = value;
+            else if (key == "upstream_ip" || key == "proxy_ip") g_config.upstream_ip = value;
+            else if (key == "upstream_port" || key == "proxy_port") g_config.upstream_port = (uint16_t)std::stoi(value);
+            
             else if (key == "proxy_dns_server") g_config.proxy_dns_server = value;
             else if (key == "direct_dns_server") g_config.direct_dns_server = value;
-            else if (key == "lwip_listen_port") g_config.lwip_listen_port = (uint16_t)std::stoi(value);
-            else if (key == "max_sni_len") g_config.max_sni_len = (uint32_t)std::stoul(value);
             else if (key == "http_api_port") g_config.http_api_port = (uint16_t)std::stoi(value);
             else if (key == "wifi_ssid") g_config.wifi_ssid = value;
             else if (key == "wifi_password") g_config.wifi_password = value;
+            
+            // Rules
             else if (key == "direct_ip_list") g_config.direct_ip_list = split(value, ',');
             else if (key == "direct_domain_list") g_config.direct_domain_list = split(value, ',');
             else if (key == "block_ip_list") g_config.block_ip_list = split(value, ',');
@@ -91,18 +90,13 @@ bool save_config(const char* filepath) {
     if (!file.is_open()) return false;
 
     file << "[Common]\n";
-    file << "tap_ip = " << g_config.tap_ip << "\n";
-    file << "tap_netmask = " << g_config.tap_netmask << "\n";
-    file << "tap_gateway = " << g_config.tap_gateway << "\n";
-    file << "tap_mac = " << g_config.tap_mac << "\n\n";
+    file << "gateway_ip = " << g_config.gateway_ip << "\n\n";
 
-    file << "proxy_ip = " << g_config.proxy_ip << "\n";
-    file << "proxy_port = " << g_config.proxy_port << "\n";
+    file << "upstream_ip = " << g_config.upstream_ip << "\n";
+    file << "upstream_port = " << g_config.upstream_port << "\n";
     file << "proxy_dns_server = " << g_config.proxy_dns_server << "\n";
     file << "direct_dns_server = " << g_config.direct_dns_server << "\n\n";
 
-    file << "lwip_listen_port = " << g_config.lwip_listen_port << "\n";
-    file << "max_sni_len = " << g_config.max_sni_len << "\n";
     file << "http_api_port = " << g_config.http_api_port << "\n";
     file << "wifi_ssid = " << g_config.wifi_ssid << "\n";
     file << "wifi_password = " << g_config.wifi_password << "\n\n";

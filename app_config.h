@@ -7,18 +7,14 @@
 
 // --- Configuration Struct ---
 struct AppConfig {
-    std::string tap_ip;
-    std::string tap_netmask;
-    std::string tap_gateway;
-    std::string tap_mac; // e.g. "00:FF:..."
+    std::string gateway_ip; // Previously tap_ip
     
-    std::string proxy_ip;
-    uint16_t proxy_port;
+    std::string upstream_ip;   // Previously proxy_ip
+    uint16_t upstream_port;    // Previously proxy_port
+    
     std::string proxy_dns_server;
     std::string direct_dns_server;
     
-    uint16_t lwip_listen_port;
-    uint32_t max_sni_len;
     uint16_t http_api_port;
 
     // WiFi settings
@@ -35,18 +31,14 @@ struct AppConfig {
 
     // Defaults
     AppConfig() {
-        tap_ip = "10.0.0.1";
-        tap_netmask = "255.255.255.0";
-        tap_gateway = "10.0.0.1";
-        tap_mac = "00:FF:92:EA:69:5C";
+        gateway_ip = "10.0.0.1";
         
-        proxy_ip = "127.0.0.1";
-        proxy_port = 2080;
+        upstream_ip = "127.0.0.1";
+        upstream_port = 2080;
+        
         proxy_dns_server = "8.8.8.8";
         direct_dns_server = "223.5.5.5";
         
-        lwip_listen_port = 7000;
-        max_sni_len = 4096;
         http_api_port = 8080;
 
         wifi_ssid = "wifi2socks_ap";

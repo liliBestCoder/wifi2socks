@@ -146,7 +146,7 @@ void WiFiAPManager::StartListener() {
                 std::thread([]() {
                     for (int i = 0; i < 10; ++i) { 
                         std::this_thread::sleep_for(std::chrono::seconds(2));
-                        if (ForceSetStaticIP(g_config.tap_ip)) {
+                        if (ForceSetStaticIP(g_config.gateway_ip)) {
                             // Locked. We can stop retrying if the state is stable
                             // but keep one more check to be sure ICS didn't revert it.
                             if (i > 3) break; 

@@ -90,7 +90,7 @@ int main() {
         LOG_ERROR("[CORE] Failed to start WiFi AP.");
     }
     
-    static DhcpServer dhcp_server(g_config.tap_ip);
+    static DhcpServer dhcp_server(g_config.gateway_ip);
     g_dhcp_server_ptr = &dhcp_server;
     dhcp_server.start();
 
@@ -102,7 +102,7 @@ int main() {
     PacketPool::instance().init(1024 * 64);
     PacketMonitor::instance().start();
 
-    std::string adapter_name = find_adapter_by_ip(g_config.tap_ip);
+    std::string adapter_name = find_adapter_by_ip(g_config.gateway_ip);
     static WinPkFilterDriver pk_driver;
     
     int worker_count = std::thread::hardware_concurrency();

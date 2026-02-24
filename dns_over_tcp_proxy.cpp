@@ -41,8 +41,8 @@ void DnsOverTcpProxy::start() {
     
     sockaddr_in proxy_addr;
     proxy_addr.sin_family = AF_INET;
-    inet_pton(AF_INET, g_config.proxy_ip.c_str(), &proxy_addr.sin_addr);
-    proxy_addr.sin_port = htons(g_config.proxy_port);
+    inet_pton(AF_INET, g_config.upstream_ip.c_str(), &proxy_addr.sin_addr);
+    proxy_addr.sin_port = htons(g_config.upstream_port);
 
     auto self = shared_from_this();
     WorkerPool::instance().connect_async(

@@ -45,7 +45,7 @@ DhcpServer::~DhcpServer() {
 
 void DhcpServer::init_pool() {
     uint32_t server_ip_n;
-    inet_pton(AF_INET, g_config.tap_ip.c_str(), &server_ip_n);
+    inet_pton(AF_INET, g_config.gateway_ip.c_str(), &server_ip_n);
     uint32_t server_ip_h = ntohl(server_ip_n);
     
     // Create a pool of 100 addresses, e.g., from .100 to .199
@@ -81,11 +81,11 @@ bool DhcpServer::start() {
     
     sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
-    inet_pton(AF_INET, g_config.tap_ip.c_str(), &server_addr.sin_addr);
+    inet_pton(AF_INET, g_config.gateway_ip.c_str(), &server_addr.sin_addr);
     server_addr.sin_port = htons(listen_port_);
 
     if (bind(sock_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        LOG_ERROR("Failed to bind DHCP socket to %s:%d. Error: %d", g_config.tap_ip.c_str(), listen_port_, WSAGetLastError());
+        LOG_ERROR("Failed to bind DHCP socket to %s:%d. Error: %d", g_config.gateway_ip.c_str(), listen_port_, WSAGetLastError());
         closesocket(sock_);
         WSACleanup();
         return false;
@@ -93,7 +93,7 @@ bool DhcpServer::start() {
 
     running_ = true;
     worker_thread_ = std::thread(&DhcpServer::run, this);
-    LOG_INFO("DHCP server started on port %d (Gateway: %s)", listen_port_, g_config.tap_ip.c_str());
+    LOG_INFO("DHCP server started on port %d (Gateway: %s)", listen_port_, g_config.gateway_ip.c_str());
     return true;
 }
 
@@ -258,7 +258,7 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
     resp_msg.yiaddr = yiaddr_n;
 
     uint32_t server_ip_n;
-    inet_pton(AF_INET, g_config.tap_ip.c_str(), &server_ip_n);
+    inet_pton(AF_INET, g_config.gateway_ip.c_str(), &server_ip_n);
     resp_msg.siaddr = server_ip_n;
 
     uint8_t* resp_options = resp_msg.options;

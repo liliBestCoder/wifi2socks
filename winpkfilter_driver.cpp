@@ -272,7 +272,7 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
         }
     }
     if (!found) return false;
-    m_gateway_ip = inet_addr(g_config.tap_ip.c_str());
+    m_gateway_ip = inet_addr(g_config.gateway_ip.c_str());
     get_adapter_mac(adapter_name, m_adapter_mac);
     m_batch_handler = handler;
     m_wait_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);

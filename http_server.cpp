@@ -315,8 +315,8 @@ std::string SimpleHttpServer::handle_proxy_check() {
     sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    inet_pton(AF_INET, g_config.proxy_ip.c_str(), &addr.sin_addr);
-    addr.sin_port = htons(g_config.proxy_port);
+    inet_pton(AF_INET, g_config.upstream_ip.c_str(), &addr.sin_addr);
+    addr.sin_port = htons(g_config.upstream_port);
 
     auto start = std::chrono::steady_clock::now();
 
