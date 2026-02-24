@@ -317,31 +317,45 @@ void ProxyTCP::try_send(SOCKET socket) {
     if (m_state == CLOSING) return;
 
     if (socket == m_remote_socket) {
-        std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-        
-        while (m_remote_writes_inflight < MAX_INFLIGHT_WRITES && !m_remote_send_queue.empty()) {
-            std::vector<std::shared_ptr<std::vector<char>>> buffers;
-            size_t count = std::min<size_t>(MAX_WRITE_BATCH_SIZE, m_remote_send_queue.size());
-            for (size_t i = 0; i < count; ++i) {
-                buffers.push_back(m_remote_send_queue.front());
-                m_remote_send_queue.pop_front();
+        std::vector<std::vector<std::shared_ptr<std::vector<char>>>> batches;
+        {
+            std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
+            while (m_remote_writes_inflight < MAX_INFLIGHT_WRITES && !m_remote_send_queue.empty()) {
+                std::vector<std::shared_ptr<std::vector<char>>> buffer_batch;
+                size_t count = std::min<size_t>(MAX_WRITE_BATCH_SIZE, m_remote_send_queue.size());
+                buffer_batch.reserve(count);
+                for (size_t i = 0; i < count; ++i) {
+                    buffer_batch.push_back(m_remote_send_queue.front());
+                    m_remote_send_queue.pop_front();
+                }
+                m_remote_writes_inflight++;
+                batches.push_back(std::move(buffer_batch));
             }
-            m_remote_writes_inflight++;
-            WorkerPool::instance().send_batch_async(m_remote_socket, std::move(buffers));
+        }
+        // Send outside the lock to reduce contention
+        for (auto& batch : batches) {
+            WorkerPool::instance().send_batch_async(m_remote_socket, std::move(batch));
         }
     }
     else if (socket == m_client_socket) {
-        std::lock_guard<std::mutex> lock(m_client_queue_mutex);
-
-        while (m_client_writes_inflight < MAX_INFLIGHT_WRITES && !m_client_send_queue.empty()) {
-            std::vector<std::shared_ptr<std::vector<char>>> buffers;
-            size_t count = std::min<size_t>(MAX_WRITE_BATCH_SIZE, m_client_send_queue.size());
-            for (size_t i = 0; i < count; ++i) {
-                buffers.push_back(m_client_send_queue.front());
-                m_client_send_queue.pop_front();
+        std::vector<std::vector<std::shared_ptr<std::vector<char>>>> batches;
+        {
+            std::lock_guard<std::mutex> lock(m_client_queue_mutex);
+            while (m_client_writes_inflight < MAX_INFLIGHT_WRITES && !m_client_send_queue.empty()) {
+                std::vector<std::shared_ptr<std::vector<char>>> buffer_batch;
+                size_t count = std::min<size_t>(MAX_WRITE_BATCH_SIZE, m_client_send_queue.size());
+                buffer_batch.reserve(count);
+                for (size_t i = 0; i < count; ++i) {
+                    buffer_batch.push_back(m_client_send_queue.front());
+                    m_client_send_queue.pop_front();
+                }
+                m_client_writes_inflight++;
+                batches.push_back(std::move(buffer_batch));
             }
-            m_client_writes_inflight++;
-            WorkerPool::instance().send_batch_async(m_client_socket, std::move(buffers));
+        }
+        // Send outside the lock to reduce contention
+        for (auto& batch : batches) {
+            WorkerPool::instance().send_batch_async(m_client_socket, std::move(batch));
         }
     }
 }
@@ -352,13 +366,27 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
         return;
     }
 
+    // Calculate the total size of the batch we attempted to send.
+    // We MUST subtract this full amount from the queue size counter because 
+    // these buffers were already popped from the deque in try_send.
+    // If we only subtract 'len' (bytes sent) and 'len' < batch_size (partial write/error),
+    // the queue size counter will drift and eventually cause a deadlock (permanent backpressure).
+    size_t batch_total_size = 0;
+    for (const auto& buf : attempted_buffers) {
+        batch_total_size += buf->size();
+    }
+
     auto self = shared_from_this();
     if (socket == m_remote_socket) {
         bool should_resume_reading = false;
         {
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
             m_remote_writes_inflight--;
-            m_remote_send_queue_size -= len;
+            if (m_remote_send_queue_size >= batch_total_size) {
+                m_remote_send_queue_size -= batch_total_size;
+            } else {
+                m_remote_send_queue_size = 0; // Safety clamp
+            }
 
             // Flow control: Check if we should resume reading from client.
             if (m_client_read_paused && m_remote_send_queue_size < LOW_WATER_MARK) {
@@ -387,7 +415,11 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
         {
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
             m_client_writes_inflight--;
-            m_client_send_queue_size -= len;
+            if (m_client_send_queue_size >= batch_total_size) {
+                m_client_send_queue_size -= batch_total_size;
+            } else {
+                m_client_send_queue_size = 0; // Safety clamp
+            }
 
             if (m_close_after_write && m_client_send_queue.empty() && m_client_writes_inflight == 0) {
                 close_session();
