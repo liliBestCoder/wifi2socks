@@ -328,7 +328,7 @@ void ProxyTCP::try_send(SOCKET socket) {
             }
             m_remote_writes_inflight++;
             
-            // Call send_batch_async INSIDE the lock to preserve order.
+            // Call send_batch_async INSIDE the lock to preserve order (FIFO).
             WorkerPool::instance().send_batch_async(m_remote_socket, std::move(buffer_batch));
         }
     }
@@ -361,18 +361,28 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
         return;
     }
 
-    // Calculate total size to check for partial send
-    size_t batch_total_size = 0;
+    // Calculate leftovers logic to correctly handle queue size accounting.
+    // If len < batch_total_size, we push the remainder back to the front.
+    // Then we deduct 'len' from the queue size.
+    // This ensures queue_size perfectly matches the physical queue.
+    std::vector<std::shared_ptr<std::vector<char>>> leftovers;
+    size_t bytes_confirmed = len;
+    
     for (const auto& buf : attempted_buffers) {
-        batch_total_size += buf->size();
-    }
-
-    // If len < batch_total_size, it means the stream is broken in the middle of a pipeline.
-    // We cannot re-queue because subsequent batches might already be in-flight.
-    if (len < batch_total_size) {
-        LOG_ERROR("[ProxyTCP] Partial send detected in pipeline (Sent %d < Total %d). Closing session.", len, batch_total_size);
-        close_session();
-        return;
+        if (bytes_confirmed >= buf->size()) {
+            bytes_confirmed -= buf->size();
+        } else {
+            // This buffer was partially sent or not sent at all.
+            if (bytes_confirmed > 0) {
+                // Partial sent buffer: create a new one with the remainder
+                auto new_buf = std::make_shared<std::vector<char>>(buf->begin() + bytes_confirmed, buf->end());
+                leftovers.push_back(new_buf);
+                bytes_confirmed = 0; // Remaining confirmation consumed
+            } else {
+                // Buffer completely unsent
+                leftovers.push_back(buf);
+            }
+        }
     }
 
     auto self = shared_from_this();
@@ -382,8 +392,20 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
             std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
             m_remote_writes_inflight--;
             
-            // Directly subtract len as confirmed safe.
+            // Deduct exactly what was sent.
+            // Queue size logic: 
+            // We popped Total from Deque.
+            // We push back (Total - Len) to Deque.
+            // Net physical change = -Len.
+            // So we deduct Len from counter.
             m_remote_send_queue_size -= len;
+
+            // Push unsent data back to the FRONT of the queue to maintain order.
+            if (!leftovers.empty()) {
+                for (auto it = leftovers.rbegin(); it != leftovers.rend(); ++it) {
+                    m_remote_send_queue.push_front(*it);
+                }
+            }
 
             // Flow control: Check if we should resume reading from client.
             if (m_client_read_paused && m_remote_send_queue_size < LOW_WATER_MARK) {
@@ -413,8 +435,14 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
             std::lock_guard<std::mutex> lock(m_client_queue_mutex);
             m_client_writes_inflight--;
             
-            // Directly subtract len as confirmed safe.
             m_client_send_queue_size -= len;
+
+            // Push unsent data back to the FRONT
+            if (!leftovers.empty()) {
+                for (auto it = leftovers.rbegin(); it != leftovers.rend(); ++it) {
+                    m_client_send_queue.push_front(*it);
+                }
+            }
 
             if (m_close_after_write && m_client_send_queue.empty() && m_client_writes_inflight == 0) {
                 close_session();
