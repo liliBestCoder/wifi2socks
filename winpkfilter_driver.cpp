@@ -421,128 +421,137 @@ void WinPkFilterDriver::run() {
         if (!m_running) break;
 
         // 1. Read & Dispatch
-        for (int r = 0; r < 20 && m_running; ++r) {
+        bool data_available = true;
+        for (int r = 0; r < 20 && m_running && data_available; ++r) {
             m_read_request->dwPacketsNumber = BATCH_SIZE;
-            if (m_ndis_api.ReadPackets(m_read_request) && m_read_request->dwPacketsSuccess > 0) {
-                std::vector<std::list<QueuedPacket>> groups(m_num_workers);
-                for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
-                    PINTERMEDIATE_BUFFER b = m_read_request->EthPacket[i].Buffer;
-                    if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) { // Outbound from local stack (Upload)
-                        m_stat_ul_pkts++; m_stat_ul_bytes += b->m_Length;
-                    }
-                    else { // Inbound from network (Download)
-                        m_stat_dl_pkts++; m_stat_dl_bytes += b->m_Length;
-                    }
-
-                    // --- Fast Path ---
-                    bool handled = false;
-                    if (b->m_Length >= 14) {
-                        unsigned char* buffer = b->m_IBuffer;
-                        USHORT ether_type = ntohs(*(USHORT*)(buffer + 12));
-
-                        // Non-IP Fast Path (ARP, EAPOL, IPv6, etc.)
-                        // Directly inject to results queue to avoid worker latency/reordering
-                        if (ether_type != ETHERTYPE_IP) {
-                            if (ether_type == ETHERTYPE_ARP) {
-                                LOG_INFO("[FastPath] Injecting ARP packet");
-                            } else if (ether_type == htons(0x888E)) { // EAPOL
-                                LOG_INFO("[FastPath] Injecting EAPOL packet");
-                            }
-
-                            PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
-                            std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-                            m_results_queue.packets.push_back({ b, dest });
-                            m_read_request->EthPacket[i].Buffer = nullptr; // Transfer ownership
-                            SetEvent(m_results_event);
-                            handled = true;
+            if (m_ndis_api.ReadPackets(m_read_request)) {
+                if (m_read_request->dwPacketsSuccess > 0) {
+                    std::vector<std::list<QueuedPacket>> groups(m_num_workers);
+                    for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
+                        PINTERMEDIATE_BUFFER b = m_read_request->EthPacket[i].Buffer;
+                        if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) { // Outbound from local stack (Upload)
+                            m_stat_ul_pkts++; m_stat_ul_bytes += b->m_Length;
+                        }
+                        else { // Inbound from network (Download)
+                            m_stat_dl_pkts++; m_stat_dl_bytes += b->m_Length;
                         }
 
-                        if (!handled && ether_type == ETHERTYPE_IP && b->m_Length >= 34) {
-                            PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
-                            
-                            // BLOCK ICS DHCP NAK: Drop packets from 192.168.137.1
-                            if (ip->SrcAddr == 0x0189A8C0) {
-                                PacketPool::instance().release(b);
-                                m_read_request->EthPacket[i].Buffer = nullptr;
+                        // --- Fast Path ---
+                        bool handled = false;
+                        if (b->m_Length >= 14) {
+                            unsigned char* buffer = b->m_IBuffer;
+                            USHORT ether_type = ntohs(*(USHORT*)(buffer + 12));
+
+                            // Non-IP Fast Path (ARP, EAPOL, IPv6, etc.)
+                            // Directly inject to results queue to avoid worker latency/reordering
+                            if (ether_type != ETHERTYPE_IP) {
+                                if (ether_type == ETHERTYPE_ARP) {
+                                    LOG_INFO("[FastPath] Injecting ARP packet");
+                                } else if (ether_type == htons(0x888E)) { // EAPOL
+                                    LOG_INFO("[FastPath] Injecting EAPOL packet");
+                                }
+
+                                PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
+                                std::lock_guard<std::mutex> lock(m_results_queue.mtx);
+                                m_results_queue.packets.push_back({ b, dest });
+                                m_read_request->EthPacket[i].Buffer = nullptr; // Transfer ownership
+                                SetEvent(m_results_event);
                                 handled = true;
                             }
 
-                            int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
-
-                            // Suppress Outbound ICMP Port Unreachable from Gateway
-                            // This prevents Windows from confusing the client when it receives a packet 
-                            // that the driver handled but the OS thinks is unhandled.
-                            if (!handled && ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
-                                PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ip_hdr_len);
-                                if (icmp->Type == 3 && ip->SrcAddr == m_gateway_ip) {
+                            if (!handled && ether_type == ETHERTYPE_IP && b->m_Length >= 34) {
+                                PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
+                                
+                                // BLOCK ICS DHCP NAK: Drop packets from 192.168.137.1
+                                if (ip->SrcAddr == 0x0189A8C0) {
                                     PacketPool::instance().release(b);
                                     m_read_request->EthPacket[i].Buffer = nullptr;
                                     handled = true;
                                 }
-                            }
 
-                            if (!handled && ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
-                                PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ip_hdr_len);
-                                if (icmp->Type == 8) {
-                                    // In-place modification for echo reply
-                                    uint8_t tmac[6];
-                                    memcpy(tmac, buffer, 6);
-                                    memcpy(buffer, buffer + 6, 6);
-                                    memcpy(buffer + 6, tmac, 6);
-                                    ULONG tip = ip->SrcAddr;
-                                    ip->SrcAddr = ip->DstAddr;
-                                    ip->DstAddr = tip;
-                                    icmp->Type = 0;
-                                    recalculate_ip_checksum(ip);
-                                    recalculate_tcp_udp_checksum(ip);
+                                int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
 
-                                    std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-                                    m_results_queue.packets.push_back({ b, PacketDestination::TO_ADAPTER });
-                                    m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred
-                                    handled = true;
+                                // Suppress Outbound ICMP Port Unreachable from Gateway
+                                // This prevents Windows from confusing the client when it receives a packet 
+                                // that the driver handled but the OS thinks is unhandled.
+                                if (!handled && ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
+                                    PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ip_hdr_len);
+                                    if (icmp->Type == 3 && ip->SrcAddr == m_gateway_ip) {
+                                        PacketPool::instance().release(b);
+                                        m_read_request->EthPacket[i].Buffer = nullptr;
+                                        handled = true;
+                                    }
                                 }
-                            }
-                            else if (!handled && ip->Proto == IPPROTO_UDP && b->m_Length >= 14 + ip_hdr_len + sizeof(UDP_HEADER)) {
-                                PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
-                                USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
-                                if (sp == 67 || dp == 67 || sp == 68 || dp == 68) { // DHCP Fast Path
-                                    PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
-                                    std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-                                    m_results_queue.packets.push_back({ b, dest });
-                                    m_read_request->EthPacket[i].Buffer = nullptr; // 所有权转移
-                                    SetEvent(m_results_event);
-                                    handled = true;
+
+                                if (!handled && ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
+                                    PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ip_hdr_len);
+                                    if (icmp->Type == 8) {
+                                        // In-place modification for echo reply
+                                        uint8_t tmac[6];
+                                        memcpy(tmac, buffer, 6);
+                                        memcpy(buffer, buffer + 6, 6);
+                                        memcpy(buffer + 6, tmac, 6);
+                                        ULONG tip = ip->SrcAddr;
+                                        ip->SrcAddr = ip->DstAddr;
+                                        ip->DstAddr = tip;
+                                        icmp->Type = 0;
+                                        recalculate_ip_checksum(ip);
+                                        recalculate_tcp_udp_checksum(ip);
+
+                                        std::lock_guard<std::mutex> lock(m_results_queue.mtx);
+                                        m_results_queue.packets.push_back({ b, PacketDestination::TO_ADAPTER });
+                                        m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred
+                                        handled = true;
+                                    }
                                 }
-                                else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) { // Drop Discovery
-                                    PacketPool::instance().release(b);
-                                    m_read_request->EthPacket[i].Buffer = nullptr; // 释放\n                                    handled = true;
+                                else if (!handled && ip->Proto == IPPROTO_UDP && b->m_Length >= 14 + ip_hdr_len + sizeof(UDP_HEADER)) {
+                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
+                                    USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
+                                    if (sp == 67 || dp == 67 || sp == 68 || dp == 68) { // DHCP Fast Path
+                                        PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
+                                        std::lock_guard<std::mutex> lock(m_results_queue.mtx);
+                                        m_results_queue.packets.push_back({ b, dest });
+                                        m_read_request->EthPacket[i].Buffer = nullptr; // 所有权转移
+                                        SetEvent(m_results_event);
+                                        handled = true;
+                                    }
+                                    else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) { // Drop Discovery
+                                        PacketPool::instance().release(b);
+                                        m_read_request->EthPacket[i].Buffer = nullptr; // 释放
+                                        handled = true;
+                                    }
                                 }
                             }
                         }
+
+                    // --- Slow Path (if not handled by fast path) ---
+                    if (!handled) {
+                        groups[get_target_worker((char*)b->m_IBuffer, b->m_Length, b->m_dwDeviceFlags, m_num_workers)].push_back({ b });
+                        m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred to worker
                     }
 
-                // --- Slow Path (if not handled by fast path) ---
-                if (!handled) {
-                    groups[get_target_worker((char*)b->m_IBuffer, b->m_Length, b->m_dwDeviceFlags, m_num_workers)].push_back({ b });
-                    m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred to worker
+                    // Replace the used buffer in the read request
+                    PINTERMEDIATE_BUFFER next_b = PacketPool::instance().acquire();
+                    if (next_b) {
+                        m_read_request->EthPacket[i].Buffer = next_b;
+                    } else {
+                        LOG_ERROR("[Driver] Packet pool exhausted! Stopping read batch.");
+                        m_read_request->dwPacketsSuccess = i; // Adjust for partial dispatch
+                        break;
+                    }
                 }
-
-                // Replace the used buffer in the read request
-                PINTERMEDIATE_BUFFER next_b = PacketPool::instance().acquire();
-                if (next_b) {
-                    m_read_request->EthPacket[i].Buffer = next_b;
+                for (unsigned int i = 0; i < m_num_workers; ++i) {
+                    if (!groups[i].empty()) {
+                        std::lock_guard<std::mutex> lock(m_worker_queues[i]->mtx);
+                        m_worker_queues[i]->packets.splice(m_worker_queues[i]->packets.end(), groups[i]);
+                        m_worker_queues[i]->cv.notify_one();
+                    }
+                }
                 } else {
-                    LOG_ERROR("[Driver] Packet pool exhausted! Stopping read batch.");
-                    m_read_request->dwPacketsSuccess = i; // Adjust for partial dispatch
-                    break;
+                    data_available = false; // No packets, stop loop
                 }
-            }
-            for (unsigned int i = 0; i < m_num_workers; ++i) {
-                if (!groups[i].empty()) {
-                    std::lock_guard<std::mutex> lock(m_worker_queues[i]->mtx);
-                    m_worker_queues[i]->packets.splice(m_worker_queues[i]->packets.end(), groups[i]);
-                    m_worker_queues[i]->cv.notify_one();
-                }
+            } else {
+                data_available = false; // Read failed, stop loop
             }
         }
 
@@ -611,7 +620,11 @@ void WinPkFilterDriver::run() {
             uint64_t work_us = m_stat_work_time_us.exchange(0);
             double dl_mbps = (dl_bytes * 8.0) / (elapsed_ms * 1000.0);
             double ul_mbps = (ul_bytes * 8.0) / (elapsed_ms * 1000.0);
-            size_t backlog = 0; for (auto& q : m_worker_queues) backlog += q->packets.size();
+            size_t backlog = 0; 
+            for (auto& q : m_worker_queues) {
+                std::lock_guard<std::mutex> lk(q->mtx);
+                backlog += q->packets.size();
+            }
             uint64_t total_pkts = dl_pkts + ul_pkts;
             LOG_INFO("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us",
                 dl_mbps, dl_pkts, ul_mbps, ul_pkts, backlog, total_pkts > 0 ? work_us / total_pkts : 0);
