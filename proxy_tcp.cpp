@@ -366,6 +366,12 @@ void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::
         return;
     }
 
+    // Handshake/Manual sends use raw pointers and don't populate attempted_buffers.
+    // They also don't increment inflight counters or affect queue sizes.
+    if (attempted_buffers.empty()) {
+        return;
+    }
+
     // Calculate the total size of the batch we attempted to send.
     // We MUST subtract this full amount from the queue size counter because 
     // these buffers were already popped from the deque in try_send.
