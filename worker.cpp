@@ -34,7 +34,8 @@ void release_io_context(IO_CONTEXT* io) {
     std::lock_guard<std::mutex> lock(g_io_pool_mtx);
     if (g_io_pool.size() < 4096) { // Increased pool size for high throughput
         g_io_pool.push_back(io);
-    } else {
+    }
+    else {
         delete io;
     }
 }
@@ -85,15 +86,16 @@ void Worker::loop() {
         if (io->type == IO_PROXY_BUFFER) {
             auto buf = reinterpret_cast<ProxyTCP::IoBuffer*>(overlapped);
             if (buf && buf->owner) {
-                 int err = ret ? 0 : WSAGetLastError();
-                 buf->owner->on_io_complete(buf, bytesTransferred, err);
+                int err = ret ? 0 : WSAGetLastError();
+                buf->owner->on_io_complete(buf, bytesTransferred, err);
             }
             continue;
         }
 
         if (io->type == IO_TASK) {
             if (io->task) {
-                try { io->task(); } catch (...) { LOG_ERROR("[Worker] Task execution failed."); }
+                try { io->task(); }
+                catch (...) { LOG_ERROR("[Worker] Task execution failed."); }
             }
             release_io_context(io);
             continue;
@@ -106,11 +108,12 @@ void Worker::loop() {
                 ctx->on_remove_done = io->task;
                 WorkerPool::instance().unregister_context(io->sock);
                 closesocket(io->sock);
-                
+
                 if (ctx.use_count() == 1) {
                     if (ctx->on_remove_done) ctx->on_remove_done();
                 }
-            } else if (io->task) {
+            }
+            else if (io->task) {
                 io->task();
             }
             release_io_context(io);
@@ -128,12 +131,15 @@ void Worker::loop() {
                 if (io->type == IO_READ) {
                     if (bytesTransferred > 0) {
                         if (ctx->on_read) ctx->on_read((char*)io->buf, (int)bytesTransferred, ctx->is_udp ? &io->remote_addr : nullptr);
-                    } else {
+                    }
+                    else {
                         if (ctx->on_read) ctx->on_read(nullptr, 0, nullptr);
                     }
-                } else if (io->type == IO_WRITE) {
+                }
+                else if (io->type == IO_WRITE) {
                     if (ctx->on_write) ctx->on_write((int)bytesTransferred, io->write_buffers);
-                } else if (io->type == IO_CONNECT) {
+                }
+                else if (io->type == IO_CONNECT) {
                     setsockopt(ctx->sock, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
                     if (io->task) io->task();
                     if (ctx->on_read) {
@@ -142,12 +148,15 @@ void Worker::loop() {
                         }
                     }
                 }
-            } else {
+            }
+            else {
                 if (io->type == IO_READ) {
                     if (ctx->on_read) ctx->on_read(nullptr, -1, nullptr);
-                } else if (io->type == IO_WRITE && ctx->on_write) {
+                }
+                else if (io->type == IO_WRITE && ctx->on_write) {
                     ctx->on_write(-1, io->write_buffers);
-                } else if (io->type == IO_CONNECT) {
+                }
+                else if (io->type == IO_CONNECT) {
                     LOG_ERROR("[Worker] ConnectEx async failure: %d", WSAGetLastError());
                     if (io->task) io->task();
                 }
@@ -196,14 +205,14 @@ void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in
             CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx.get(), 0);
         }
         ctx->on_read = on_read;
-        ctx->on_write = on_write; 
+        ctx->on_write = on_write;
         ctx->is_udp = is_udp;
         if (on_read) {
             for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
                 post_read(ctx);
             }
         }
-    };
+        };
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io);
 }
 
@@ -215,9 +224,9 @@ void WorkerPool::remove_socket(SOCKET s, std::function<void()> on_done) {
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io);
 }
 
-void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect, 
-                                  std::function<void(char*, int, sockaddr_in*)> on_read,
-                                  std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write) {
+void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect,
+    std::function<void(char*, int, sockaddr_in*)> on_read,
+    std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write) {
     IO_CONTEXT* init_task = acquire_io_context();
     init_task->type = IO_TASK;
     init_task->task = [this, s, addr, on_connect, on_read, on_write]() {
@@ -254,10 +263,11 @@ void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()>
                 if (io->task) io->task();
                 release_io_context(io);
             }
-        } else {
+        }
+        else {
             LOG_ERROR("[WorkerPool] Failed to get ConnectEx pointer.");
         }
-    };
+        };
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)init_task);
 }
 
@@ -304,7 +314,7 @@ void WorkerPool::read_async(SOCKET s) {
     io_task->task = [this, s]() {
         auto ctx = find_context(s);
         if (ctx) post_read(ctx);
-    };
+        };
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io_task);
 }
 
@@ -314,7 +324,7 @@ void WorkerPool::update_read_callback(SOCKET s, std::function<void(char*, int, s
     io_task->task = [this, s, on_read]() {
         auto ctx = find_context(s);
         if (ctx) ctx->on_read = on_read;
-    };
+        };
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io_task);
 }
 
@@ -362,7 +372,8 @@ void WorkerPool::post_read(const std::shared_ptr<SocketContext>& ctx) {
     if (ctx->is_udp) {
         io->remote_addr_len = sizeof(io->remote_addr);
         ret = WSARecvFrom(ctx->sock, io->wsa_bufs.data(), 1, &bytes, &flags, (sockaddr*)&io->remote_addr, &io->remote_addr_len, &io->overlapped, NULL);
-    } else {
+    }
+    else {
         ret = WSARecv(ctx->sock, io->wsa_bufs.data(), 1, &bytes, &flags, &io->overlapped, NULL);
     }
 
@@ -407,7 +418,7 @@ void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, const uin
     io->type = IO_WRITE;
     io->sock = ctx->sock;
     io->parent = ctx;
-    
+
     size_t copy_len = (std::min)(len, sizeof(io->buf));
     memcpy(io->buf, data, copy_len);
     io->data_len = copy_len;

@@ -56,7 +56,7 @@ std::string find_adapter_by_ip(const std::string& target_ip) {
                         std::string name = pCurr->AdapterName;
                         LOG_INFO("MATCH FOUND BY IP: %s", name.c_str());
                         free(pAddresses);
-                        return "\\\\DEVICE\\\\" + name;
+                        return "\\DEVICE\\" + name;
                     }
                 }
             }
