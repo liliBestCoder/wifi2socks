@@ -5,33 +5,29 @@
 #include <WS2tcpip.h>
 #include <algorithm>
 
+static const size_t TCP_BUFFER_SIZE = 32768; // 32KB
+
 // Helpers for buffer management
 ProxyTCP::IoBuffer* ProxyTCP::alloc_buffer(size_t size) {
-    // PacketPool uses fixed size buffers (MAX_ETHER_FRAME)
-    // We ignore 'size' request if it fits, or fail if too big (though MAX_ETHER_FRAME is standard)
-    if (size > MAX_ETHER_FRAME) return nullptr;
-
-    auto* packet = PacketPool::instance().acquire();
-    if (!packet) return nullptr;
-
+    // Allocate a dedicated buffer for TCP stream
     IoBuffer* buf = new IoBuffer();
-    buf->packet = packet;
-    buf->capacity = MAX_ETHER_FRAME;
+    buf->buffer = new char[TCP_BUFFER_SIZE];
+    buf->capacity = TCP_BUFFER_SIZE;
     buf->owner = this;
     
     // Default to empty read buffer
     buf->total_bytes = 0;
     buf->written_bytes = 0;
-    buf->wsa_buf.buf = (char*)packet->m_IBuffer;
-    buf->wsa_buf.len = (ULONG)MAX_ETHER_FRAME;
+    buf->wsa_buf.buf = buf->buffer; 
+    buf->wsa_buf.len = (ULONG)TCP_BUFFER_SIZE;
     
     return buf;
 }
 
 void ProxyTCP::free_buffer(IoBuffer* buffer) {
     if (!buffer) return;
-    if (buffer->packet) {
-        PacketPool::instance().release(buffer->packet);
+    if (buffer->buffer) {
+        delete[] buffer->buffer;
     }
     delete buffer;
 }
@@ -115,7 +111,7 @@ void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int err
     if (buffer->op == IoBuffer::READ) {
         buffer->total_bytes = bytes_transferred;
         // Reset wsa_buf for writing (pointer at start, len = data read)
-        buffer->wsa_buf.buf = (char*)buffer->packet->m_IBuffer;
+        buffer->wsa_buf.buf = buffer->buffer;
         buffer->wsa_buf.len = (ULONG)buffer->total_bytes;
         
         if (buffer->socket == m_client_socket) {
@@ -128,7 +124,7 @@ void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int err
         
         if (buffer->socket == m_client_socket) {
             handle_client_write_complete(buffer);
-        } else {\
+        } else {
             handle_remote_write_complete(buffer);
         }
     }
@@ -156,9 +152,6 @@ void ProxyTCP::post_reads(SOCKET socket) {
         if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
             LOG_ERROR("[ProxyTCP] WSARecv failed: %d", WSAGetLastError());
             free_buffer(buf);
-            // Don't break immediately, maybe try next? 
-            // If socket is dead, next will fail too.
-            // For safety, stop submitting.
             break; 
         }
         
@@ -167,22 +160,8 @@ void ProxyTCP::post_reads(SOCKET socket) {
 }
 
 void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
-    // 1. Dual-Write / Hooking Logic Check
-    // Note: We are now moving directly to write queue.
-    // The original logic had SNI parsing / Hooking in on_client_read.
-    // We need to RESTORE that logic here or BEFORE here.
-    // Since this is the completion of a read, we have the data in buffer.
-    
-    // WAIT! The user asked if I retained the logic for SNI parsing etc.
-    // In my previous `write_file` (the one I thought I wrote to the correct path but didn't), 
-    // I had `on_client_read` which did all that.
-    // BUT, that `on_client_read` was the OLD callback style.
-    // NOW, I am using `on_io_complete` -> `handle_client_read_complete`.
-    // The data is in `buffer`.
-    
-    // I MUST INTEGRATE the State Machine logic here.
-    
-    const uint8_t* buf_data = (const uint8_t*)buffer->packet->m_IBuffer;
+    // Logic for SNI/Host parsing and Hooking
+    const uint8_t* buf_data = (const uint8_t*)buffer->buffer;
     size_t buf_size = buffer->total_bytes;
 
     if (m_state == INITIAL) {
@@ -200,8 +179,6 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
             if (payload.find("GET ") == 0 || payload.find("POST ") == 0 || payload.find("HEAD ") == 0 || payload.find("OPTIONS ") == 0) {
                 LOG_INFO("[TCP] Hooking HTTP request to gateway on port 80. Returning 204.");
                 const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
-                // Send response directly (bypass queue for this simple case, or use a temp buffer)
-                // For simplicity and speed in this specific hook:
                 send(m_client_socket, response, (int)strlen(response), 0);
                 close_session();
                 free_buffer(buffer);
@@ -228,7 +205,7 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
         } else {
             std::string host = parse_http_host(combined_data, combined_size);
             if (!host.empty()) {
-                m_detected_domain = host; // Use host as domain
+                m_detected_domain = host; 
                 proceed = true;
             } else if (combined_size >= 4096) {
                 proceed = true; // Give up
@@ -236,40 +213,7 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
         }
 
         if (proceed) {
-            // Decision logic... (Simplified for this context, assuming we just go ahead)
-            // Real routing logic would go here (RuleManager etc).
-            // For now, let's assume we proceed to connect.
-            
-            // Note: In the new architecture, we are already "started".
-            // But we haven't connected to remote yet? 
-            // WAIT. In `start()`, I called `connect_remote()` IMMEDIATELY!
-            // This means I am NOT waiting for the first packet to decide routing.
-            // This is a DEVIATION from the original logic which waited for SNI.
-            
-            // To fix this:
-            // 1. `start()` should NOT call `connect_remote()`.
-            // 2. `start()` should only `post_reads(m_client_socket)`.
-            // 3. `handle_client_read_complete` (this function) should call `connect_remote()` once routing is decided.
-            
-            // However, the buffer that just completed reading (`buffer`) contains data that needs to be sent to remote.
-            // We should queue it.
-        } else {
-            // Need more data.
-            // Repost read.
-            // Buffer is consumed into m_initial_buffer. We can free the IoBuffer now?
-            // Yes, data is copied to m_initial_buffer.
-            // But wait, if we queue this buffer to `m_remote_write_queue`, it will be sent when we connect.
-            // That is efficient.
-            // But if we copy to `m_initial_buffer`, we are duplicating.
-            // Ideally: Keep buffer in a "pending connection" queue?
-            // Or just queue it to `m_remote_write_queue` (which will pause because state != ESTABLISHED).
-            
-            // Correct flow:
-            // 1. Queue buffer to `m_remote_write_queue`. It won't be sent yet.
-            // 2. Update `m_initial_buffer` for parsing (copy data).
-            // 3. Check parsing.
-            // 4. If ready -> `connect_remote()`.
-            // 5. If not ready -> `post_reads`.
+            // Routing decision logic could go here
         }
     }
 
@@ -281,18 +225,11 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
         }
     }
 
-    // Always queue to remote (it will handle backpressure/buffering if not connected)
     queue_write(m_remote_socket, buffer);
-    
-    // Only post more reads if we haven't made a routing decision yet? 
-    // Or just always post?
-    // If we are still sniffing (INITIAL), we need more data.
-    // If we are ESTABLISHED, we need more data.
     post_reads(m_client_socket);
     
     // Trigger connection if ready
     if (m_state == INITIAL) {
-         // Re-evaluate proceed logic briefly
          const auto* combined_data = m_initial_buffer.data();
          const auto combined_size = m_initial_buffer.size();
          bool ready = !parse_tls_sni(combined_data, combined_size).empty() || 
@@ -326,7 +263,7 @@ void ProxyTCP::queue_write(SOCKET dest_socket, IoBuffer* buffer) {
     buffer->socket = dest_socket;
     
     // Setup WSABUF for writing
-    buffer->wsa_buf.buf = (char*)buffer->packet->m_IBuffer;
+    buffer->wsa_buf.buf = buffer->buffer;
     buffer->wsa_buf.len = (ULONG)buffer->total_bytes;
 
     std::deque<IoBuffer*>* q;
@@ -419,7 +356,7 @@ void ProxyTCP::handle_client_write_complete(IoBuffer* buffer) {
         if (m_client_write_queue_size < LOW_WATER_MARK && m_remote_read_paused) {
             m_remote_read_paused = false;
             need_resume_remote = true;
-        }\
+        }
         
         process_write_queue(m_client_socket);
     }
@@ -431,7 +368,7 @@ void ProxyTCP::handle_client_write_complete(IoBuffer* buffer) {
 
 void ProxyTCP::handle_remote_write_complete(IoBuffer* buffer) {
     bool need_resume_client = false;
-
+    
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         
@@ -485,7 +422,8 @@ void ProxyTCP::close_session() {
     auto clean_queue = [this](std::deque<IoBuffer*>& q) {
         for (auto* buf : q) free_buffer(buf);
         q.clear();
-    };\n
+    };
+
     clean_queue(m_client_pending_reads);
     clean_queue(m_remote_pending_reads);
     clean_queue(m_client_write_queue);

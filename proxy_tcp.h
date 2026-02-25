@@ -10,7 +10,6 @@
 
 #include "worker.h"
 #include "nat_manager.h"
-#include "packet_pool.h"
 
 class ProxyTCP : public std::enable_shared_from_this<ProxyTCP> {
 public:
@@ -18,7 +17,7 @@ public:
         OVERLAPPED overlapped;
         IO_TYPE type; // Must be IO_PROXY_BUFFER to match worker check
 
-        RawPacket* packet; // Underlying buffer from pool
+        char* buffer;      // Dedicated buffer for TCP stream
         WSABUF wsa_buf;    // For WSARecv/WSASend
         
         size_t capacity;
@@ -31,7 +30,7 @@ public:
         ProxyTCP* owner;
         SOCKET socket; // The socket this op is associated with
         
-        IoBuffer() : type(IO_PROXY_BUFFER), packet(nullptr), capacity(0), 
+        IoBuffer() : type(IO_PROXY_BUFFER), buffer(nullptr), capacity(0), 
                      total_bytes(0), written_bytes(0), op(READ), 
                      status(IN_PROGRESS), owner(nullptr), socket(INVALID_SOCKET) {
             memset(&overlapped, 0, sizeof(OVERLAPPED));
