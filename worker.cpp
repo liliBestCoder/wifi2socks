@@ -12,12 +12,21 @@ static std::mutex g_io_pool_mtx;
 static std::vector<IO_CONTEXT*> g_io_pool;
 
 IO_CONTEXT* acquire_io_context() {
-    std::lock_guard<std::mutex> lock(g_io_pool_mtx);
-    if (g_io_pool.empty()) {
+    IO_CONTEXT* io = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_io_pool_mtx);
+        if (!g_io_pool.empty()) {
+            io = g_io_pool.back();
+            g_io_pool.pop_back();
+        }
+    }
+
+    if (!io) {
         return new IO_CONTEXT();
     }
-    IO_CONTEXT* io = g_io_pool.back();
-    g_io_pool.pop_back();
+
+    // 必须在锁外重置成员，因为清理 std::function 或 shared_ptr 可能触发析构，
+    // 如果析构函数又调用了 remove_socket，会产生递归死锁。
     memset(&io->overlapped, 0, sizeof(OVERLAPPED));
     io->task = nullptr;
     io->parent = nullptr;
@@ -29,10 +38,15 @@ IO_CONTEXT* acquire_io_context() {
 
 void release_io_context(IO_CONTEXT* io) {
     if (!io) return;
-    io->write_buffers.clear(); // Ensure shared_ptrs are released
+
+    // 在入池前清理成员（锁外执行）
+    io->task = nullptr;
+    io->parent = nullptr;
+    io->write_buffers.clear();
     io->wsa_bufs.clear();
+
     std::lock_guard<std::mutex> lock(g_io_pool_mtx);
-    if (g_io_pool.size() < 4096) { // Increased pool size for high throughput
+    if (g_io_pool.size() < 4096) {
         g_io_pool.push_back(io);
     }
     else {
