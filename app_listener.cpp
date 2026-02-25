@@ -90,8 +90,10 @@ void AppListener::tcp_listener_thread() {
 
         if (client_socket == INVALID_SOCKET) continue;
 
+        // 优化客户端 socket 性能
         int flag = 1;
-        setsockopt(client_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+        setsockopt(client_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag)); // 禁用 Nagle 算法
+        // 不设置固定缓冲区大小，让 Windows 自动调整（TCP Auto-Tuning）
 
         // Use correct key generation (Network Byte Order) to match Driver
         uint64_t key = NatManager::make_key(client_addr.sin_addr.s_addr, client_addr.sin_port);

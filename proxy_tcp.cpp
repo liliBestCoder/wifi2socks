@@ -112,6 +112,11 @@ void ProxyTCP::connect_remote() {
         return;
     }
 
+    // 优化 socket 性能
+    int optval = 1;
+    setsockopt(m_remote_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&optval, sizeof(optval)); // 禁用 Nagle 算法
+    // 不设置固定缓冲区大小，让 Windows 自动调整（TCP Auto-Tuning）
+
     auto self = shared_from_this();
     WorkerPool::instance().connect_async(
         m_remote_socket,
