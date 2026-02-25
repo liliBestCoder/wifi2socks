@@ -509,7 +509,12 @@ void ProxyTCP::process_write_queue(SOCKET socket) {
             (*inflight_count)++;
             int ret = WSASend(socket, batch_bufs, count, &bytes_sent, 0, &leader->overlapped, NULL);
             if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-                LOG_ERROR("[ProxyTCP] WSASend Gather failed: %d", WSAGetLastError());
+                int err = WSAGetLastError();
+                if (err == WSAECONNRESET) {
+                    LOG_DEBUG("[ProxyTCP] 连接被对端重置 (10054)，关闭会话");
+                } else {
+                    LOG_ERROR("[ProxyTCP] WSASend Gather failed: %d", err);
+                }
                 (*inflight_count)--;
                 IoBuffer* b = leader;
                 while (b) {
