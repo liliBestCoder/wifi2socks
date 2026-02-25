@@ -495,7 +495,7 @@ void ProxyTCP::process_write_queue(SOCKET socket) {
                     free_buffer(b);
                     b = n;
                 }
-                close_session(); break;
+                close_session_internal(); break;
             }
         }
         else {
@@ -513,7 +513,7 @@ void ProxyTCP::process_write_queue(SOCKET socket) {
         if (m_client_fin_sent && m_remote_fin_sent) {
             // Delay close slightly to allow FIN packets to be processed? 
             // Or just call close_session
-            close_session();
+            close_session_internal();
         }
     }
 }
@@ -571,6 +571,11 @@ void ProxyTCP::handle_remote_write_complete(IoBuffer* buffer) {
 }
 
 void ProxyTCP::close_session() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    close_session_internal();
+}
+
+void ProxyTCP::close_session_internal() {
     if (m_state == CLOSING) return;
     m_state = CLOSING;
 
@@ -583,7 +588,6 @@ void ProxyTCP::close_session() {
         m_remote_socket = INVALID_SOCKET;
     }
 
-    std::lock_guard<std::mutex> lock(m_mutex);
     auto clean_safe = [this](std::deque<IoBuffer*>& q) {
         for (auto* buf : q) {
             if (buf->state == IoBuffer::IO_READY || buf->state == IoBuffer::IO_DROPPED) free_buffer(buf);

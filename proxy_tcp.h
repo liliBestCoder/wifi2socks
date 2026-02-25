@@ -64,6 +64,7 @@ private:
 
     // The core function to gracefully close the session.
     void close_session();
+    void close_session_internal(); // Internal version without lock
 
     enum State {
         INITIAL,
