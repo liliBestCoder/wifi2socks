@@ -292,24 +292,24 @@ void ProxyTCP::post_reads(SOCKET socket) {
 }
 
 void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_client_pending_read_count--;
+    bool should_connect = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_client_pending_read_count--;
 
-    if (m_state == INITIAL) {
-        const uint8_t* buf_data = (const uint8_t*)buffer->buffer;
-        size_t buf_size = buffer->total_bytes;
-        m_initial_buffer.insert(m_initial_buffer.end(), buf_data, buf_data + buf_size);
+        if (m_state == INITIAL) {
+            const uint8_t* buf_data = (const uint8_t*)buffer->buffer;
+            size_t buf_size = buffer->total_bytes;
+            m_initial_buffer.insert(m_initial_buffer.end(), buf_data, buf_data + buf_size);
 
-        const auto* combined_data = m_initial_buffer.data();
-        const auto combined_size = m_initial_buffer.size();
+            const auto* combined_data = m_initial_buffer.data();
+            const auto combined_size = m_initial_buffer.size();
 
-        // Hook Gateway 80
-        in_addr gateway_addr_struct{};
-        if (inet_pton(AF_INET, g_config.gateway_ip.c_str(), &gateway_addr_struct) == 1 &&
-            m_original_dest.ip == gateway_addr_struct.s_addr && ntohs(m_original_dest.port) == 80) {
+            // Hook Gateway 80
+            in_addr gateway_addr_struct{};
+            if (inet_pton(AF_INET, g_config.gateway_ip.c_str(), &gateway_addr_struct) == 1 &&
+                m_original_dest.ip == gateway_addr_struct.s_addr && ntohs(m_original_dest.port) == 80) {
 
-            std::string_view payload((const char*)combined_data, combined_size);
-            if (payload.find("GET ") == 0 || payload.find("POST ") == 0 || payload.find("HEAD ") == 0 || payload.find("OPTIONS ") == 0) {
                 LOG_INFO("[TCP] Hooking HTTP request to gateway. Returning 204.");
                 const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
                 send(m_client_socket, response, (int)strlen(response), 0);
@@ -317,127 +317,133 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
                 close_session_internal();
                 return;
             }
-        }
 
-        // Hook /generate_204
-        if (ntohs(m_original_dest.port) == 80 && is_generate_204_request(combined_data, combined_size)) {
-            LOG_INFO("[TCP] Hooking /generate_204 request.");
-            const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-            send(m_client_socket, response, (int)strlen(response), 0);
-            buffer->state = IoBuffer::IO_DROPPED;
-            close_session_internal();
-            return;
-        }
-
-        std::string sni = parse_tls_sni(combined_data, combined_size);
-        bool proceed = false;
-        if (!sni.empty()) {
-            m_detected_domain = sni;
-            proceed = true;
-        }
-        else {
-            std::string host = parse_http_host(combined_data, combined_size);
-            if (!host.empty()) {
-                m_detected_domain = host;
-                proceed = true;
+            // Hook /generate_204
+            if (ntohs(m_original_dest.port) == 80 && is_generate_204_request(combined_data, combined_size)) {
+                LOG_INFO("[TCP] Hooking /generate_204 request.");
+                const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+                send(m_client_socket, response, (int)strlen(response), 0);
+                buffer->state = IoBuffer::IO_DROPPED;
+                close_session_internal();
+                return;
             }
-            else if (combined_size >= 4096) {
-                proceed = true;
-            }
-        }
 
-        if (proceed) {
-            if (!m_detected_domain.empty()) {
-                RouteAction rule = RuleManager::instance().match_domain(m_detected_domain);
-                if (rule == RouteAction::DIRECT) m_is_direct = true;
-                else if (rule == RouteAction::PROXY) m_is_direct = false;
-                else if (rule == RouteAction::BLOCK) {
-                    LOG_INFO("[TCP] Blocking domain: %s", m_detected_domain.c_str());
-                    buffer->state = IoBuffer::IO_DROPPED;
-                    close_session_internal(); return;
-                }
-                else {
-                    m_is_direct = GeoChecker::instance().is_cn_domain(m_detected_domain);
-                    if (!m_is_direct && GeoChecker::instance().is_cn_ip(ntohl(m_original_dest.ip))) m_is_direct = true;
-                }
+            std::string sni = parse_tls_sni(combined_data, combined_size);
+            bool proceed = false;
+            if (!sni.empty()) {
+                m_detected_domain = sni;
+                proceed = true;
             }
             else {
-                uint32_t ip_h = ntohl(m_original_dest.ip);
-                RouteAction rule = RuleManager::instance().match_ip(ip_h);
-                if (GeoChecker::is_private_ip(ip_h) || rule == RouteAction::DIRECT) m_is_direct = true;
-                else if (rule == RouteAction::PROXY) m_is_direct = false;
-                else if (rule == RouteAction::BLOCK) {
-                    LOG_INFO("[TCP] Blocking IP: %s", m_detected_domain.c_str());
-                    buffer->state = IoBuffer::IO_DROPPED;
-                    close_session_internal(); return;
+                std::string host = parse_http_host(combined_data, combined_size);
+                if (!host.empty()) {
+                    m_detected_domain = host;
+                    proceed = true;
                 }
-                else { m_is_direct = GeoChecker::instance().is_cn_ip(ip_h); }
+                else if (combined_size >= 4096) {
+                    proceed = true;
+                }
             }
-            m_initial_buffer.clear();
-            connect_remote();
+
+            if (proceed) {
+                if (!m_detected_domain.empty()) {
+                    RouteAction rule = RuleManager::instance().match_domain(m_detected_domain);
+                    if (rule == RouteAction::DIRECT) m_is_direct = true;
+                    else if (rule == RouteAction::PROXY) m_is_direct = false;
+                    else if (rule == RouteAction::BLOCK) {
+                        LOG_INFO("[TCP] Blocking domain: %s", m_detected_domain.c_str());
+                        buffer->state = IoBuffer::IO_DROPPED;
+                        close_session_internal(); return;
+                    }
+                    else {
+                        m_is_direct = GeoChecker::instance().is_cn_domain(m_detected_domain);
+                        if (!m_is_direct && GeoChecker::instance().is_cn_ip(ntohl(m_original_dest.ip))) m_is_direct = true;
+                    }
+                }
+                else {
+                    uint32_t ip_h = ntohl(m_original_dest.ip);
+                    RouteAction rule = RuleManager::instance().match_ip(ip_h);
+                    if (GeoChecker::is_private_ip(ip_h) || rule == RouteAction::DIRECT) m_is_direct = true;
+                    else if (rule == RouteAction::PROXY) m_is_direct = false;
+                    else if (rule == RouteAction::BLOCK) {
+                        LOG_INFO("[TCP] Blocking IP: %s", m_detected_domain.c_str());
+                        buffer->state = IoBuffer::IO_DROPPED;
+                        close_session_internal(); return;
+                    }
+                    else { m_is_direct = GeoChecker::instance().is_cn_ip(ip_h); }
+                }
+                m_initial_buffer.clear();
+                should_connect = true;
+            }
+        }
+
+        if (buffer->state != IoBuffer::IO_DROPPED) {
+            buffer->state = IoBuffer::IO_READY;
+            m_remote_write_queue_size += buffer->total_bytes;
+            if (m_remote_write_queue_size >= HIGH_WATER_MARK) m_client_read_paused = true;
+            process_write_queue(m_remote_socket);
+        }
+        else {
+            process_write_queue(m_remote_socket);
         }
     }
 
-    if (buffer->state != IoBuffer::IO_DROPPED) {
-        buffer->state = IoBuffer::IO_READY;
-        m_remote_write_queue_size += buffer->total_bytes;
-        if (m_remote_write_queue_size >= HIGH_WATER_MARK) m_client_read_paused = true;
-        process_write_queue(m_remote_socket);
-    }
-    else {
-        process_write_queue(m_remote_socket);
+    if (should_connect) {
+        connect_remote();
     }
     post_reads(m_client_socket);
 }
 
 void ProxyTCP::handle_remote_read_complete(IoBuffer* buffer) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_remote_pending_read_count--;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_remote_pending_read_count--;
 
-    bool is_handshake_response = false;
-    if (m_state == AWAITING_CONNECT_RESPONSE) {
-        m_proxy_response_buffer.insert(m_proxy_response_buffer.end(), buffer->buffer, buffer->buffer + buffer->total_bytes);
-        const char* crlf2 = "\r\n\r\n";
-        auto it = std::search(m_proxy_response_buffer.begin(), m_proxy_response_buffer.end(), crlf2, crlf2 + 4);
+        bool is_handshake_response = false;
+        if (m_state == AWAITING_CONNECT_RESPONSE) {
+            m_proxy_response_buffer.insert(m_proxy_response_buffer.end(), buffer->buffer, buffer->buffer + buffer->total_bytes);
+            const char* crlf2 = "\r\n\r\n";
+            auto it = std::search(m_proxy_response_buffer.begin(), m_proxy_response_buffer.end(), crlf2, crlf2 + 4);
 
-        if (it != m_proxy_response_buffer.end()) {
-            std::string header(m_proxy_response_buffer.begin(), it + 4);
-            if (header.find(" 200 ") != std::string::npos) {
-                m_state = ESTABLISHED;
-                size_t header_len = std::distance(m_proxy_response_buffer.begin(), it) + 4;
-                m_proxy_response_buffer.clear();
+            if (it != m_proxy_response_buffer.end()) {
+                std::string header(m_proxy_response_buffer.begin(), it + 4);
+                if (header.find(" 200 ") != std::string::npos) {
+                    m_state = ESTABLISHED;
+                    size_t header_len = std::distance(m_proxy_response_buffer.begin(), it) + 4;
+                    m_proxy_response_buffer.clear();
 
-                if (buffer->total_bytes > header_len) {
-                    buffer->total_bytes -= header_len;
-                    // Move remaining data to front of buffer
-                    memmove(buffer->buffer, buffer->buffer + header_len, buffer->total_bytes);
+                    if (buffer->total_bytes > header_len) {
+                        buffer->total_bytes -= header_len;
+                        // Move remaining data to front of buffer
+                        memmove(buffer->buffer, buffer->buffer + header_len, buffer->total_bytes);
+                    }
+                    else {
+                        is_handshake_response = true;
+                    }
+
+                    process_write_queue(m_remote_socket);
                 }
                 else {
-                    is_handshake_response = true;
+                    LOG_ERROR("[ProxyTCP] Proxy refused connection: %s", header.c_str());
+                    buffer->state = IoBuffer::IO_DROPPED;
+                    close_session_internal(); return;
                 }
-
-                process_write_queue(m_remote_socket);
             }
             else {
-                LOG_ERROR("[ProxyTCP] Proxy refused connection: %s", header.c_str());
-                buffer->state = IoBuffer::IO_DROPPED;
-                close_session_internal(); return;
+                is_handshake_response = true;
             }
         }
-        else {
-            is_handshake_response = true;
-        }
-    }
 
-    if (is_handshake_response) {
-        buffer->state = IoBuffer::IO_DROPPED;
+        if (is_handshake_response) {
+            buffer->state = IoBuffer::IO_DROPPED;
+        }
+        else {
+            buffer->state = IoBuffer::IO_READY;
+            m_client_write_queue_size += buffer->total_bytes;
+            if (m_client_write_queue_size >= HIGH_WATER_MARK) m_remote_read_paused = true;
+        }
+        process_write_queue(m_client_socket);
     }
-    else {
-        buffer->state = IoBuffer::IO_READY;
-        m_client_write_queue_size += buffer->total_bytes;
-        if (m_client_write_queue_size >= HIGH_WATER_MARK) m_remote_read_paused = true;
-    }
-    process_write_queue(m_client_socket);
     post_reads(m_remote_socket);
 }
 
