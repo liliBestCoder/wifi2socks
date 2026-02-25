@@ -7,29 +7,51 @@
 #include <WS2tcpip.h>
 #include <algorithm>
 
-static const size_t TCP_BUFFER_SIZE = 32768; // 32KB
+// --- IoBuffer Pool for high performance ---
+static std::mutex g_proxy_buf_mtx;
+static std::vector<ProxyTCP::IoBuffer*> g_proxy_buf_pool;
 
-// Helpers for buffer management
 ProxyTCP::IoBuffer* ProxyTCP::alloc_buffer(size_t size) {
-    IoBuffer* buf = new IoBuffer();
-    buf->buffer = new char[TCP_BUFFER_SIZE];
-    buf->capacity = TCP_BUFFER_SIZE;
+    ProxyTCP::IoBuffer* buf = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_proxy_buf_mtx);
+        if (!g_proxy_buf_pool.empty()) {
+            buf = g_proxy_buf_pool.back();
+            g_proxy_buf_pool.pop_back();
+        }
+    }
 
-    buf->state = IoBuffer::IO_READING;
+    if (!buf) {
+        buf = new IoBuffer();
+    }
+
+    // Reset buffer state for reuse
+    memset(&buf->overlapped, 0, sizeof(OVERLAPPED));
+    buf->on_complete = nullptr;
+    buf->next_in_batch = nullptr;
     buf->total_bytes = 0;
     buf->written_bytes = 0;
-    buf->next_in_batch = nullptr;
+    buf->capacity = sizeof(buf->buffer);
+    buf->state = IoBuffer::IO_READING;
     buf->flags = 0;
-
-    buf->wsa_buf.buf = buf->buffer;
-    buf->wsa_buf.len = (ULONG)TCP_BUFFER_SIZE;
+    buf->wsa_buf.buf = (char*)buf->buffer;
+    buf->wsa_buf.len = (ULONG)buf->capacity;
 
     return buf;
 }
 
 void ProxyTCP::free_buffer(IoBuffer* buffer) {
     if (!buffer) return;
-    delete buffer;
+    
+    // Clear callback to release shared_ptr references immediately
+    buffer->on_complete = nullptr;
+
+    std::lock_guard<std::mutex> lock(g_proxy_buf_mtx);
+    if (g_proxy_buf_pool.size() < 1024) { // Maintain a reasonable pool size
+        g_proxy_buf_pool.push_back(buffer);
+    } else {
+        delete buffer;
+    }
 }
 
 ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
@@ -145,27 +167,29 @@ void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int err
     if (buffer->state == IoBuffer::IO_READING) {
         if (error != 0 || bytes_transferred == 0) {
             // EOF or Error
-            if (buffer->socket == m_client_socket) {
-                m_client_eof = true;
-                m_client_pending_read_count--;
-                LOG_DEBUG("[TCP] Client sent FIN (EOF)");
-            }
-            else {
-                m_remote_eof = true;
-                m_remote_pending_read_count--;
-                LOG_DEBUG("[TCP] Remote sent FIN (EOF)");
-            }
-
-            // Mark the pre-queued buffer as DROPPED since no data was actually read
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
+                if (buffer->socket == m_client_socket) {
+                    if (!m_client_eof) {
+                        m_client_eof = true;
+                        LOG_DEBUG("[TCP] Client sent FIN (EOF)");
+                    }
+                    m_client_pending_read_count--;
+                }
+                else {
+                    if (!m_remote_eof) {
+                        m_remote_eof = true;
+                        LOG_DEBUG("[TCP] Remote sent FIN (EOF)");
+                    }
+                    m_remote_pending_read_count--;
+                }
+
                 buffer->state = IoBuffer::IO_DROPPED;
-                // Important: Trigger write processing to handle the FIN check
                 process_write_queue(m_client_socket);
                 process_write_queue(m_remote_socket);
             }
 
-            if (error != 0 && error != ERROR_NETNAME_DELETED && error != ERROR_CONNECTION_ABORTED) {
+            if (error != 0 && error != ERROR_NETNAME_DELETED && error != ERROR_CONNECTION_ABORTED && error != 10038) {
                 LOG_ERROR("[TCP] IO Error on socket: %d", error);
                 close_session();
             }
@@ -184,7 +208,7 @@ void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int err
     else if (buffer->state == IoBuffer::IO_WRITING) {
         if (error != 0) {
             free_buffer(buffer);
-            close_session();
+            if (error != 10038) close_session();
             return;
         }
 
@@ -217,7 +241,7 @@ void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int err
 }
 
 void ProxyTCP::post_reads(SOCKET socket) {
-    if (m_state == CLOSING) return;
+    if (m_state == CLOSING || socket == INVALID_SOCKET) return;
 
     std::atomic<int>* pending_count = (socket == m_client_socket) ? &m_client_pending_read_count : &m_remote_pending_read_count;
     bool paused = (socket == m_client_socket) ? m_client_read_paused : m_remote_read_paused;
@@ -248,21 +272,27 @@ void ProxyTCP::post_reads(SOCKET socket) {
         buf->flags = 0; // Reset flags for each call
         int ret = WSARecv(socket, &buf->wsa_buf, 1, &bytes, &buf->flags, &buf->overlapped, NULL);
 
-        if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-            LOG_ERROR("[ProxyTCP] WSARecv failed: %d", WSAGetLastError());
-            (*pending_count)--;
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                if (!dest_queue->empty() && dest_queue->back() == buf) dest_queue->pop_back();
+        if (ret == SOCKET_ERROR) {
+            int err = WSAGetLastError();
+            if (err != WSA_IO_PENDING) {
+                if (err != 10038 || m_state != CLOSING) {
+                    LOG_ERROR("[ProxyTCP] WSARecv failed: %d", err);
+                }
+                (*pending_count)--;
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    if (!dest_queue->empty() && dest_queue->back() == buf) dest_queue->pop_back();
+                }
+                free_buffer(buf);
+                if (err != 10038) close_session();
+                break;
             }
-            free_buffer(buf);
-            close_session();
-            break;
         }
     }
 }
 
 void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     m_client_pending_read_count--;
 
     if (m_state == INITIAL) {
@@ -283,11 +313,8 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
                 LOG_INFO("[TCP] Hooking HTTP request to gateway. Returning 204.");
                 const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
                 send(m_client_socket, response, (int)strlen(response), 0);
-                {
-                    std::lock_guard<std::mutex> lock(m_mutex);
-                    buffer->state = IoBuffer::IO_DROPPED;
-                }
-                close_session();
+                buffer->state = IoBuffer::IO_DROPPED;
+                close_session_internal();
                 return;
             }
         }
@@ -297,11 +324,8 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
             LOG_INFO("[TCP] Hooking /generate_204 request.");
             const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
             send(m_client_socket, response, (int)strlen(response), 0);
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                buffer->state = IoBuffer::IO_DROPPED;
-            }
-            close_session();
+            buffer->state = IoBuffer::IO_DROPPED;
+            close_session_internal();
             return;
         }
 
@@ -329,8 +353,8 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
                 else if (rule == RouteAction::PROXY) m_is_direct = false;
                 else if (rule == RouteAction::BLOCK) {
                     LOG_INFO("[TCP] Blocking domain: %s", m_detected_domain.c_str());
-                    { std::lock_guard<std::mutex> lock(m_mutex); buffer->state = IoBuffer::IO_DROPPED; }
-                    close_session(); return;
+                    buffer->state = IoBuffer::IO_DROPPED;
+                    close_session_internal(); return;
                 }
                 else {
                     m_is_direct = GeoChecker::instance().is_cn_domain(m_detected_domain);
@@ -344,8 +368,8 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
                 else if (rule == RouteAction::PROXY) m_is_direct = false;
                 else if (rule == RouteAction::BLOCK) {
                     LOG_INFO("[TCP] Blocking IP: %s", m_detected_domain.c_str());
-                    { std::lock_guard<std::mutex> lock(m_mutex); buffer->state = IoBuffer::IO_DROPPED; }
-                    close_session(); return;
+                    buffer->state = IoBuffer::IO_DROPPED;
+                    close_session_internal(); return;
                 }
                 else { m_is_direct = GeoChecker::instance().is_cn_ip(ip_h); }
             }
@@ -354,22 +378,20 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (buffer->state != IoBuffer::IO_DROPPED) {
-            buffer->state = IoBuffer::IO_READY;
-            m_remote_write_queue_size += buffer->total_bytes;
-            if (m_remote_write_queue_size >= HIGH_WATER_MARK) m_client_read_paused = true;
-            process_write_queue(m_remote_socket);
-        }
-        else {
-            process_write_queue(m_remote_socket);
-        }
+    if (buffer->state != IoBuffer::IO_DROPPED) {
+        buffer->state = IoBuffer::IO_READY;
+        m_remote_write_queue_size += buffer->total_bytes;
+        if (m_remote_write_queue_size >= HIGH_WATER_MARK) m_client_read_paused = true;
+        process_write_queue(m_remote_socket);
+    }
+    else {
+        process_write_queue(m_remote_socket);
     }
     post_reads(m_client_socket);
 }
 
 void ProxyTCP::handle_remote_read_complete(IoBuffer* buffer) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     m_remote_pending_read_count--;
 
     bool is_handshake_response = false;
@@ -386,23 +408,20 @@ void ProxyTCP::handle_remote_read_complete(IoBuffer* buffer) {
                 m_proxy_response_buffer.clear();
 
                 if (buffer->total_bytes > header_len) {
-                    buffer->wsa_buf.buf += header_len;
-                    buffer->wsa_buf.len -= (ULONG)header_len;
                     buffer->total_bytes -= header_len;
+                    // Move remaining data to front of buffer
+                    memmove(buffer->buffer, buffer->buffer + header_len, buffer->total_bytes);
                 }
                 else {
                     is_handshake_response = true;
                 }
 
-                {
-                    std::lock_guard<std::mutex> lock(m_mutex);
-                    process_write_queue(m_remote_socket);
-                }
+                process_write_queue(m_remote_socket);
             }
             else {
                 LOG_ERROR("[ProxyTCP] Proxy refused connection: %s", header.c_str());
-                { std::lock_guard<std::mutex> lock(m_mutex); buffer->state = IoBuffer::IO_DROPPED; }
-                close_session(); return;
+                buffer->state = IoBuffer::IO_DROPPED;
+                close_session_internal(); return;
             }
         }
         else {
@@ -410,18 +429,15 @@ void ProxyTCP::handle_remote_read_complete(IoBuffer* buffer) {
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (is_handshake_response) {
-            buffer->state = IoBuffer::IO_DROPPED;
-        }
-        else {
-            buffer->state = IoBuffer::IO_READY;
-            m_client_write_queue_size += buffer->total_bytes;
-            if (m_client_write_queue_size >= HIGH_WATER_MARK) m_remote_read_paused = true;
-        }
-        process_write_queue(m_client_socket);
+    if (is_handshake_response) {
+        buffer->state = IoBuffer::IO_DROPPED;
     }
+    else {
+        buffer->state = IoBuffer::IO_READY;
+        m_client_write_queue_size += buffer->total_bytes;
+        if (m_client_write_queue_size >= HIGH_WATER_MARK) m_remote_read_paused = true;
+    }
+    process_write_queue(m_client_socket);
     post_reads(m_remote_socket);
 }
 

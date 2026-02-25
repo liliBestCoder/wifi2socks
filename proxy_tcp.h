@@ -17,7 +17,7 @@ public:
         OVERLAPPED overlapped;
         IO_TYPE type; // Must be IO_PROXY_BUFFER to match worker check
 
-        char* buffer;      // Dedicated buffer for TCP stream
+        uint8_t buffer[131072]; // 128KB inline buffer to reduce fragmentation and overhead
         WSABUF wsa_buf;    // For WSARecv/WSASend
 
         size_t capacity;
@@ -33,18 +33,17 @@ public:
         IoBuffer* next_in_batch{ nullptr };
         DWORD flags{ 0 }; // Must be persistent for async IO
 
-        IoBuffer() : type(IO_PROXY_BUFFER), buffer(nullptr), capacity(0),
+        IoBuffer() : type(IO_PROXY_BUFFER), capacity(sizeof(buffer)),
             total_bytes(0), written_bytes(0), state(IO_READING),
             socket(INVALID_SOCKET), flags(0) {
             memset(&overlapped, 0, sizeof(OVERLAPPED));
-            memset(&wsa_buf, 0, sizeof(WSABUF));
+            memset(buffer, 0, sizeof(buffer));
+            wsa_buf.buf = (char*)buffer;
+            wsa_buf.len = (ULONG)capacity;
         }
 
         ~IoBuffer() {
-            if (buffer) {
-                delete[] buffer;
-                buffer = nullptr;
-            }
+            // buffer is now inline, no need to delete[]
         }
     };
 
@@ -110,9 +109,9 @@ private:
     size_t m_client_write_queue_size{ 0 };
     size_t m_remote_write_queue_size{ 0 };
 
-    // Flow control watermarks
-    static const size_t HIGH_WATER_MARK = 4 * 1024 * 1024; // 4MB
-    static const size_t LOW_WATER_MARK = 1 * 1024 * 1024;  // 1MB
+    // Flow control watermarks (Optimized for large file downloads)
+    static const size_t HIGH_WATER_MARK = 16 * 1024 * 1024; // 16MB
+    static const size_t LOW_WATER_MARK = 4 * 1024 * 1024;  // 4MB
     static const int MAX_PENDING_READS = 4; // Increased for Multi-path
     static const int MAX_PENDING_WRITES = 4; // Per socket
     static const int MAX_GATHER_BATCH = 16;  // Max buffers in a single WSASend
