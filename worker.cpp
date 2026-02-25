@@ -193,10 +193,10 @@ void WorkerPool::init(int count) {
     }
 }
 
-void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp) {
+void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp, std::function<void()> on_init) {
     IO_CONTEXT* io = acquire_io_context();
     io->type = IO_TASK;
-    io->task = [this, s, on_read, on_write, is_udp]() {
+    io->task = [this, s, on_read, on_write, is_udp, on_init]() {
         std::shared_ptr<SocketContext> ctx = find_context(s);
         if (!ctx) {
             ctx = std::make_shared<SocketContext>();
@@ -207,6 +207,11 @@ void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in
         ctx->on_read = on_read;
         ctx->on_write = on_write;
         ctx->is_udp = is_udp;
+
+        if (on_init) {
+            on_init();
+        }
+
         if (on_read) {
             for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
                 post_read(ctx);
@@ -226,10 +231,11 @@ void WorkerPool::remove_socket(SOCKET s, std::function<void()> on_done) {
 
 void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect,
     std::function<void(char*, int, sockaddr_in*)> on_read,
-    std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write) {
+    std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write,
+    std::function<void()> on_init) {
     IO_CONTEXT* init_task = acquire_io_context();
     init_task->type = IO_TASK;
-    init_task->task = [this, s, addr, on_connect, on_read, on_write]() {
+    init_task->task = [this, s, addr, on_connect, on_read, on_write, on_init]() {
         struct sockaddr_in bindAddr;
         memset(&bindAddr, 0, sizeof(bindAddr));
         bindAddr.sin_family = AF_INET;
@@ -246,6 +252,10 @@ void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()>
         }
         ctx->on_read = on_read;
         ctx->on_write = on_write;
+
+        if (on_init) {
+            on_init();
+        }
 
         LPFN_CONNECTEX ConnectExPtr = nullptr;
         GUID guid = WSAID_CONNECTEX;

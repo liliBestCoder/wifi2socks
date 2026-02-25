@@ -93,11 +93,12 @@ public:
     void init(int count);
     
     // 全局控制方法，现在它们会将任务投递给共享 IOCP
-    void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp = false);
+    void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp = false, std::function<void()> on_init = nullptr);
     void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
     void connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect, 
                       std::function<void(char*, int, sockaddr_in*)> on_read = nullptr,
-                      std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write = nullptr);
+                      std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write = nullptr,
+                      std::function<void()> on_init = nullptr);
     bool send_async(SOCKET s, const uint8_t* data, size_t len);
     bool send_async(SOCKET s, char* buf, int len);
     bool send_async(SOCKET s, std::shared_ptr<std::vector<char>> buffer);

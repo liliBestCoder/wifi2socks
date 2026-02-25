@@ -60,8 +60,10 @@ ProxyTCP::~ProxyTCP() {
 }
 
 void ProxyTCP::start() {
-    WorkerPool::instance().add_socket(m_client_socket, nullptr, nullptr);
-    post_reads(m_client_socket);
+    auto self = shared_from_this();
+    WorkerPool::instance().add_socket(m_client_socket, nullptr, nullptr, false, [this, self]() {
+        post_reads(m_client_socket);
+    });
 }
 
 void ProxyTCP::connect_remote() {
