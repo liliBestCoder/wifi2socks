@@ -24,15 +24,14 @@ public:
         size_t total_bytes; // Bytes read (valid data)
         size_t written_bytes; // Bytes written (progress)
         
-        enum Op { READ, WRITE } op;
-        enum Status { IN_PROGRESS, PARTIAL, COMPLETED } status;
+        enum State { IO_READING, IO_READY, IO_WRITING, IO_COMPLETED, IO_DROPPED } state;
         
         ProxyTCP* owner;
         SOCKET socket; // The socket this op is associated with
         
         IoBuffer() : type(IO_PROXY_BUFFER), buffer(nullptr), capacity(0), 
-                     total_bytes(0), written_bytes(0), op(READ), 
-                     status(IN_PROGRESS), owner(nullptr), socket(INVALID_SOCKET) {
+                     total_bytes(0), written_bytes(0), state(IO_READING), 
+                     owner(nullptr), socket(INVALID_SOCKET) {
             memset(&overlapped, 0, sizeof(OVERLAPPED));
             memset(&wsa_buf, 0, sizeof(WSABUF));
         }
@@ -99,7 +98,8 @@ private:
     std::atomic<int> m_remote_pending_read_count{0};
 
     // Queue Sizing for Backpressure
-    size_t m_client_write_queue_size{0};\n    size_t m_remote_write_queue_size{0};
+    size_t m_client_write_queue_size{0};
+    size_t m_remote_write_queue_size{0};
 
     // Flow control watermarks
     static const size_t HIGH_WATER_MARK = 4 * 1024 * 1024; // 4MB
