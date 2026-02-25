@@ -115,12 +115,6 @@ void ProxyTCP::connect_remote() {
     // 优化 socket 性能
     int optval = 1;
     setsockopt(m_remote_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&optval, sizeof(optval)); // 禁用 Nagle 算法
-    
-    // 针对家庭网络环境：设置固定缓冲区以获得更稳定的性能
-    // 如果公司网络能跑 50Mbps 但家里只有 15Mbps，可能是 Windows 自动调优过于保守
-    int buf_size = 512 * 1024; // 512KB - 更大的缓冲区以应对高延迟网络
-    setsockopt(m_remote_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
-    setsockopt(m_remote_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
 
     auto self = shared_from_this();
     WorkerPool::instance().connect_async(

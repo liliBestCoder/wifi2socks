@@ -93,10 +93,6 @@ void AppListener::tcp_listener_thread() {
         // 优化客户端 socket 性能
         int flag = 1;
         setsockopt(client_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag)); // 禁用 Nagle 算法
-        // 针对家庭网络环境：设置固定缓冲区以获得更稳定的性能
-        int buf_size = 512 * 1024; // 512KB - 更大的缓冲区以应对高延迟网络
-        setsockopt(client_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
-        setsockopt(client_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
 
         // Use correct key generation (Network Byte Order) to match Driver
         uint64_t key = NatManager::make_key(client_addr.sin_addr.s_addr, client_addr.sin_port);
