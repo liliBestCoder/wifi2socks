@@ -87,9 +87,9 @@ private:
     std::deque<IoBuffer*> m_client_write_queue;
     std::deque<IoBuffer*> m_remote_write_queue;
     
-    // Write In-flight tracking (buffers currently in IOCP)
-    std::deque<IoBuffer*> m_client_inflight_writes;
-    std::deque<IoBuffer*> m_remote_inflight_writes;
+    // Write In-flight tracking (Concurrency Control)
+    std::atomic<int> m_client_inflight_write_count{0};
+    std::atomic<int> m_remote_inflight_write_count{0};
 
     std::mutex m_mutex; // General lock for queues
 

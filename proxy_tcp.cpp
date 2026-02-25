@@ -22,7 +22,7 @@ ProxyTCP::IoBuffer* ProxyTCP::alloc_buffer(size_t size) {
     buf->total_bytes = 0;
     buf->written_bytes = 0;
     
-    // Setup for WSARecv
+    // Setup WSABUF for potential read or write
     buf->wsa_buf.buf = buf->buffer; 
     buf->wsa_buf.len = (ULONG)TCP_BUFFER_SIZE;
     
@@ -47,6 +47,8 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
     m_remote_write_queue_size = 0;
     m_client_pending_read_count = 0;
     m_remote_pending_read_count = 0;
+    m_client_inflight_write_count = 0;
+    m_remote_inflight_write_count = 0;
 }
 
 ProxyTCP::~ProxyTCP() {
@@ -180,10 +182,7 @@ void ProxyTCP::post_reads(SOCKET socket) {
     if (paused) return;
 
     // Identify which queue to push to (The Destination Queue)
-    // Client Read -> Pushed to Remote Write Queue
-    // Remote Read -> Pushed to Client Write Queue
     std::deque<IoBuffer*>* dest_queue;
-    
     if (socket == m_client_socket) {
         dest_queue = &m_remote_write_queue;
     } else {
@@ -200,7 +199,7 @@ void ProxyTCP::post_reads(SOCKET socket) {
         // Optimistically increment
         (*pending_count)++; 
 
-        // PRE-QUEUE: Push to destination write queue immediately
+        // PRE-QUEUE: Push to destination write queue immediately to preserve order
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             dest_queue->push_back(buf);
@@ -216,7 +215,6 @@ void ProxyTCP::post_reads(SOCKET socket) {
             // Failure: Remove from queue
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
-                // It should be at the back
                 if (!dest_queue->empty() && dest_queue->back() == buf) {
                     dest_queue->pop_back();
                 }
@@ -243,8 +241,7 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
         }
     }
 
-    // Logic for SNI/Host parsing
-    // We access buffer->buffer. It is now filled with data.
+    // Logic for SNI/Host parsing and Hooking
     if (m_state == INITIAL) {
         const uint8_t* buf_data = (const uint8_t*)buffer->buffer;
         size_t buf_size = buffer->total_bytes;
@@ -265,13 +262,12 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
                 const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
                 send(m_client_socket, response, (int)strlen(response), 0);      
                 
-                // Mark buffer as DROPPED so it doesn't get sent to remote
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
                     buffer->state = IoBuffer::IO_DROPPED; 
                 }
                 close_session();
-                return; // Buffer will be cleaned up in close_session
+                return;
             }
         }
 
@@ -349,13 +345,11 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
     }
 
     // Try to flush write queue
-    // Buffer is already in m_remote_write_queue (placed by post_reads), and we just marked it READY.
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         process_write_queue(m_remote_socket);
     }
     
-    // Post more reads (concurrency control)
     post_reads(m_client_socket);
 }
 
@@ -378,17 +372,13 @@ void ProxyTCP::handle_remote_read_complete(IoBuffer* buffer) {
                 size_t data_len_in_packet = buffer->total_bytes;
                 
                 if (data_len_in_packet > header_len) {
-                    // Adjust buffer to point after header
                     buffer->wsa_buf.buf += header_len;
                     buffer->wsa_buf.len -= (ULONG)header_len;
                     buffer->total_bytes -= header_len;
-                    // It remains valid data
                 } else {
-                    // Just header, nothing to forward to client
                     is_handshake_response = true;
                 }
                 
-                // Flush queued writes to remote (data from client that was waiting)
                 {
                     std::lock_guard<std::mutex> lock(m_mutex);
                     process_write_queue(m_remote_socket);
@@ -403,7 +393,6 @@ void ProxyTCP::handle_remote_read_complete(IoBuffer* buffer) {
                 return;
             }
         } else {
-            // Header not complete yet. Drop this buffer (content saved in m_proxy_response_buffer)
             is_handshake_response = true;
         }
     }
@@ -427,62 +416,53 @@ void ProxyTCP::handle_remote_read_complete(IoBuffer* buffer) {
 }
 
 void ProxyTCP::process_write_queue(SOCKET socket) {
-    // Expects m_mutex to be HELD
-    
     if (socket == m_remote_socket && m_state != ESTABLISHED) {
         return;
     }
 
     std::deque<IoBuffer*>* queue;
-    std::deque<IoBuffer*>* inflight;
+    std::atomic<int>* inflight_count;
     
     if (socket == m_client_socket) {
         queue = &m_client_write_queue;
-        inflight = &m_client_inflight_writes;
+        inflight_count = &m_client_inflight_write_count;
     } else {
         queue = &m_remote_write_queue;
-        inflight = &m_remote_inflight_writes;
+        inflight_count = &m_remote_inflight_write_count;
     }
 
-    while (!queue->empty() && inflight->size() < MAX_PENDING_WRITES) {
+    // MULTI-PATH WRITE: Post multiple overlapped sends up to MAX_PENDING_WRITES
+    while (!queue->empty() && inflight_count->load() < MAX_PENDING_WRITES) {
         IoBuffer* buf = queue->front();
         
-        // --- ORDERING CHECK ---
-        // If the head is still READING, we must wait. 
-        // We cannot skip it because TCP must be ordered.
         if (buf->state == IoBuffer::IO_READING) {
-            break;
+            break; // Must wait for head of queue to maintain stream order
         }
         
-        // Handle DROPPED buffers (e.g. handshake data or hooked data)
         if (buf->state == IoBuffer::IO_DROPPED) {
             queue->pop_front();
             free_buffer(buf);
             continue;
         }
         
-        // State must be READY
         if (buf->state == IoBuffer::IO_READY) {
             queue->pop_front();
             
-            // Setup for Write
             buf->state = IoBuffer::IO_WRITING;
-            buf->socket = socket; // Ensure correct socket is set for completion
+            buf->socket = socket;
             memset(&buf->overlapped, 0, sizeof(OVERLAPPED));
-            // buf->wsa_buf is already set up correctly with data pointer and length
             
+            (*inflight_count)++;
             int ret = WSASend(socket, &buf->wsa_buf, 1, NULL, 0, &buf->overlapped, NULL);
             
             if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
                 LOG_ERROR("[ProxyTCP] WSASend failed: %d", WSAGetLastError());
+                (*inflight_count)--;
                 free_buffer(buf);
-                close_session(); // Fatal error on stream
+                close_session();
                 break; 
             }
-            
-            inflight->push_back(buf);
         } else {
-            // Should not happen?
             break;
         }
     }
@@ -493,21 +473,16 @@ void ProxyTCP::handle_client_write_complete(IoBuffer* buffer) {
     
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        
-        auto it = std::find(m_client_inflight_writes.begin(), m_client_inflight_writes.end(), buffer);
-        if (it != m_client_inflight_writes.end()) {
-            m_client_inflight_writes.erase(it);
-        }
-
+        m_client_inflight_write_count--;
         m_client_write_queue_size -= buffer->total_bytes; 
         
         if (buffer->written_bytes < buffer->total_bytes) {
-             // Partial write - recycle
+             // Partial write - recycle remaining part
              buffer->wsa_buf.buf += buffer->written_bytes; 
              buffer->wsa_buf.len -= (ULONG)buffer->written_bytes;
              buffer->total_bytes -= buffer->written_bytes; 
              buffer->written_bytes = 0; 
-             buffer->state = IoBuffer::IO_READY; // Back to READY for retry
+             buffer->state = IoBuffer::IO_READY; 
 
              m_client_write_queue_size += buffer->total_bytes;
              m_client_write_queue.push_front(buffer);
@@ -534,12 +509,7 @@ void ProxyTCP::handle_remote_write_complete(IoBuffer* buffer) {
     
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        
-        auto it = std::find(m_remote_inflight_writes.begin(), m_remote_inflight_writes.end(), buffer);
-        if (it != m_remote_inflight_writes.end()) {
-            m_remote_inflight_writes.erase(it);
-        }
-
+        m_remote_inflight_write_count--;
         m_remote_write_queue_size -= buffer->total_bytes;
 
         if (buffer->written_bytes < buffer->total_bytes) {
@@ -584,38 +554,16 @@ void ProxyTCP::close_session() {
 
     std::lock_guard<std::mutex> lock(m_mutex);
 
-    auto clean_queue = [this](std::deque<IoBuffer*>& q) {
-        for (auto* buf : q) free_buffer(buf);
-        q.clear();
-    };
-
-    // Note: Pending reads in the OS will fail and call on_io_complete with error,
-    // which will free the buffer. We don't need to manually free pending reads here
-    // IF we are sure on_io_complete will be called.
-    // WorkerPool::remove_socket posts IO_REMOVE, but doesn't guarantee canceling pending IO callbacks immediately?
-    // Actually, closing the socket cancels pending IOs. IOCP will receive them with error.
-    // So cleaning write queues is enough. 
-    // BUT, the buffers in WriteQueue that are IO_READING are actually owned by the Read operation.
-    // If we free them here, and then Read completes (with error), we double free?
-    // YES.
-    // Buffers in WriteQueue with state IO_READING are currently "in the hands of WSARecv".
-    // We SHOULD NOT free them here. Let on_io_complete handle them.
-    // Buffers with IO_READY are safe to free.
-    
     auto clean_safe = [this](std::deque<IoBuffer*>& q) {
         for (auto* buf : q) {
-            if (buf->state != IoBuffer::IO_READING && buf->state != IoBuffer::IO_WRITING) {
+            if (buf->state == IoBuffer::IO_READY || buf->state == IoBuffer::IO_DROPPED) {
                 free_buffer(buf);
             }
-            // If READING or WRITING, the completion handler will free it when it fails due to socket close.
+            // READING or WRITING buffers are owned by IOCP and will be freed in on_io_complete error path
         }
         q.clear();
     };
 
     clean_safe(m_client_write_queue);
     clean_safe(m_remote_write_queue);
-    
-    // Inflight writes are IO_WRITING, so completion handler handles them.
-    m_client_inflight_writes.clear();
-    m_remote_inflight_writes.clear();
 }
