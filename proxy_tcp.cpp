@@ -628,7 +628,7 @@ void ProxyTCP::close_session_internal() {
         double duration_sec = elapsed / 1000.0;
         double tx_speed_mbps = (m_total_bytes_sent * 8.0) / duration_sec / 1000000.0;
         double rx_speed_mbps = (m_total_bytes_received * 8.0) / duration_sec / 1000000.0;
-        LOG_INFO("[TCP] 会话结束 - 时长：%.1f 秒，发送：%.2f MB, 接收：%.2f MB, 发送速度：%.2f Mbps, 接收速度：%.2f Mbps",
+        LOG_INFO("[TCP] Session ended - Duration: %.1fs, TX: %.2f MB, RX: %.2f MB, TX Speed: %.2f Mbps, RX Speed: %.2f Mbps",
             duration_sec,
             m_total_bytes_sent / 1048576.0,
             m_total_bytes_received / 1048576.0,
