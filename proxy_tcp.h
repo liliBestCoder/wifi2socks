@@ -80,9 +80,6 @@ private:
     void process_write_queue(SOCKET socket);
     void post_reads(SOCKET socket);
 
-    // Helper to move buffer from read completion to write queue
-    void queue_write(SOCKET dest_socket, IoBuffer* buffer);
-    
     // Write Queues (for Backpressure)
     std::deque<IoBuffer*> m_client_write_queue;
     std::deque<IoBuffer*> m_remote_write_queue;
@@ -113,7 +110,6 @@ private:
 
     // Handshake special handling
     std::vector<char> m_proxy_response_buffer;
-    void on_proxy_connect_response(char* buf, int len);
     
     // Cleanup
     void free_buffer(IoBuffer* buffer);
