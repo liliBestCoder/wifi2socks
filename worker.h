@@ -22,10 +22,12 @@ enum IO_TYPE {
     IO_WRITE,   
     IO_CONNECT, 
     IO_REMOVE,
-    IO_TASK     // 通过 IOCP 投递的控制任务
+    IO_TASK,     // 通过 IOCP 投递的控制任务
+    IO_PROXY_BUFFER // Custom IoBuffer for ProxyTCP
 };
 
 struct SocketContext;
+class ProxyTCP; // Forward declaration
 
 // 动态分配的 IO 上下文，对应一次异步操作
 struct IO_CONTEXT {

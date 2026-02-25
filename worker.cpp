@@ -1,6 +1,7 @@
 #include "worker.h"
 #include "logger.h"
 #include "app_config.h"
+#include "proxy_tcp.h"
 #include <iostream>
 #include <algorithm>
 
@@ -80,6 +81,15 @@ void Worker::loop() {
         }
 
         IO_CONTEXT* io = (IO_CONTEXT*)overlapped;
+
+        if (io->type == IO_PROXY_BUFFER) {
+            auto buf = reinterpret_cast<ProxyTCP::IoBuffer*>(overlapped);
+            if (buf && buf->owner) {
+                 int err = ret ? 0 : WSAGetLastError();
+                 buf->owner->on_io_complete(buf, bytesTransferred, err);
+            }
+            continue;
+        }
 
         if (io->type == IO_TASK) {
             if (io->task) {

@@ -10,23 +10,48 @@
 
 #include "worker.h"
 #include "nat_manager.h"
+#include "packet_pool.h"
 
 class ProxyTCP : public std::enable_shared_from_this<ProxyTCP> {
 public:
+    struct IoBuffer {
+        OVERLAPPED overlapped;
+        IO_TYPE type; // Must be IO_PROXY_BUFFER to match worker check
+
+        RawPacket* packet; // Underlying buffer from pool
+        WSABUF wsa_buf;    // For WSARecv/WSASend
+        
+        size_t capacity;
+        size_t total_bytes; // Bytes read (valid data)
+        size_t written_bytes; // Bytes written (progress)
+        
+        enum Op { READ, WRITE } op;
+        enum Status { IN_PROGRESS, PARTIAL, COMPLETED } status;
+        
+        ProxyTCP* owner;
+        SOCKET socket; // The socket this op is associated with
+        
+        IoBuffer() : type(IO_PROXY_BUFFER), packet(nullptr), capacity(0), 
+                     total_bytes(0), written_bytes(0), op(READ), 
+                     status(IN_PROGRESS), owner(nullptr), socket(INVALID_SOCKET) {
+            memset(&overlapped, 0, sizeof(OVERLAPPED));
+            memset(&wsa_buf, 0, sizeof(WSABUF));
+        }
+    };
+
     // Constructor takes the already-accepted client socket and its original destination.
     ProxyTCP(SOCKET client_socket, OriginalDestination dest);
     ~ProxyTCP();
 
     // Starts the proxy session.
     void start();
+    
+    // Callback for Worker to notify IO completion
+    void on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int error);
 
 private:
     void connect_remote();
-    void on_remote_connect();
-    void on_proxy_connect_response(char* buf, int len);
-
-    void on_client_read(char* buf, int len);
-    void on_remote_read(char* buf, int len);
+    void on_remote_connect(); // Keep for async connect
     
     // The core function to gracefully close the session.
     void close_session();
@@ -43,44 +68,55 @@ private:
     SOCKET m_client_socket;
     SOCKET m_remote_socket;
     OriginalDestination m_original_dest;
-
-    std::vector<char> m_proxy_response_buffer; // Buffer for proxy CONNECT response
     
-    std::vector<uint8_t> m_initial_buffer; // Buffer for data received before ESTABLISHED
-    
+    std::vector<uint8_t> m_initial_buffer; // Buffer for data received before ESTABLISHED (still needed for handshake parsing)
     std::string m_detected_domain;
     bool m_is_direct;
+    
+    // Handlers
+    void handle_client_read_complete(IoBuffer* buffer);
+    void handle_remote_read_complete(IoBuffer* buffer);
+    void handle_client_write_complete(IoBuffer* buffer);
+    void handle_remote_write_complete(IoBuffer* buffer);
+    
+    void process_write_queue(SOCKET socket);
+    void post_reads(SOCKET socket);
 
-    void try_send(SOCKET socket);
-    void on_write_complete(SOCKET socket, int len, const std::vector<std::shared_ptr<std::vector<char>>>& attempted_buffers);
+    // Helper to move buffer from read completion to write queue
+    void queue_write(SOCKET dest_socket, IoBuffer* buffer);
+    
+    // Queues
+    std::deque<IoBuffer*> m_client_pending_reads;
+    std::deque<IoBuffer*> m_remote_pending_reads;
+    
+    std::deque<IoBuffer*> m_client_write_queue;
+    std::deque<IoBuffer*> m_remote_write_queue;
+    
+    // Write In-flight tracking (buffers currently in IOCP)
+    std::deque<IoBuffer*> m_client_inflight_writes;
+    std::deque<IoBuffer*> m_remote_inflight_writes;
 
-    // Data flow to Client (from Remote)
-    std::deque<std::shared_ptr<std::vector<char>>> m_client_send_queue;
-    int m_client_writes_inflight{ 0 };
-    std::mutex m_client_queue_mutex;
+    std::mutex m_mutex; // General lock for queues
 
-    // Data flow to Remote (from Client)
-    std::deque<std::shared_ptr<std::vector<char>>> m_remote_send_queue;
-    int m_remote_writes_inflight{ 0 };
-    std::mutex m_remote_queue_mutex;
-
-    // Graceful closure flags
-    std::atomic<bool> m_remote_at_eof{ false };
-    std::atomic<bool> m_client_at_eof{ false };
-
-    std::atomic<size_t> m_client_send_queue_size{0};
-    std::atomic<size_t> m_remote_send_queue_size{0};
+    // Queue Sizing for Backpressure
+    size_t m_client_write_queue_size{0};
+    size_t m_remote_write_queue_size{0};
 
     // Flow control watermarks
     static const size_t HIGH_WATER_MARK = 4 * 1024 * 1024; // 4MB
     static const size_t LOW_WATER_MARK = 1 * 1024 * 1024;  // 1MB
-    static const int MAX_INFLIGHT_WRITES = 4;
-    static const size_t MAX_WRITE_BATCH_SIZE = 256;
+    static const int MAX_PENDING_READS = 2; // Per socket
+    static const int MAX_PENDING_WRITES = 4; // Per socket
     
     // Flow control flags
-    std::atomic<bool> m_remote_read_paused{false};
-    std::atomic<bool> m_client_read_paused{false};
+    bool m_remote_read_paused{false};
+    bool m_client_read_paused{false};
 
-    // Flag to close session after write completes (for 204 responses)
-    std::atomic<bool> m_close_after_write{false};
+    // Handshake special handling
+    std::vector<char> m_proxy_response_buffer;
+    void on_proxy_connect_response(char* buf, int len);
+    
+    // Cleanup
+    void free_buffer(IoBuffer* buffer);
+    IoBuffer* alloc_buffer(size_t size = 8192);
 };

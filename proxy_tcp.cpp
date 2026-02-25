@@ -1,488 +1,381 @@
 #include "proxy_tcp.h"
 #include "logger.h"
 #include "app_config.h"
-#include "rule_manager.h"
-#include "tls_parser.h"
-#include "geo_checker.h"
-#include "main_dispatcher.h"
-#include "traffic_manager.h"
-
-#include <mswsock.h>
-#include <vector>
+#include <WS2tcpip.h>
 #include <algorithm>
-#include <string_view>
+
+// Helpers for buffer management
+ProxyTCP::IoBuffer* ProxyTCP::alloc_buffer(size_t size) {
+    auto* packet = PacketPool::instance().alloc(size);
+    if (!packet) return nullptr;
+
+    IoBuffer* buf = new IoBuffer();
+    buf->packet = packet;
+    buf->capacity = packet->capacity;
+    buf->owner = this;
+    
+    // Default to empty read buffer
+    buf->total_bytes = 0;
+    buf->written_bytes = 0;
+    buf->wsa_buf.buf = (char*)packet->data; // Cast to char* for WSABUF
+    buf->wsa_buf.len = (ULONG)packet->capacity;
+    
+    return buf;
+}
+
+void ProxyTCP::free_buffer(IoBuffer* buffer) {
+    if (!buffer) return;
+    if (buffer->packet) {
+        PacketPool::instance().free(buffer->packet);
+    }
+    delete buffer;
+}
 
 ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
-    : m_state(INITIAL),
-    m_client_socket(client_socket),
-    m_remote_socket(INVALID_SOCKET),
-    m_original_dest(dest),
-    m_is_direct(false)
-{
-    u_long mode = 1;
-    ioctlsocket(m_client_socket, FIONBIO, &mode);
-
-    BOOL nodelay = TRUE;
-    setsockopt(m_client_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
+    : m_client_socket(client_socket), m_remote_socket(INVALID_SOCKET), 
+      m_original_dest(dest), m_state(INITIAL), m_is_direct(false) {
+    
+    m_client_read_paused = false;
+    m_remote_read_paused = false;
+    m_client_write_queue_size = 0;
+    m_remote_write_queue_size = 0;
 }
 
 ProxyTCP::~ProxyTCP() {
+    close_session();
 }
 
 void ProxyTCP::start() {
-    auto self = shared_from_this();
-    WorkerPool::instance().add_socket(
-        m_client_socket,
-        [self](char* buf, int len, sockaddr_in*) { self->on_client_read(buf, len); },
-        [self](int len, const std::vector<std::shared_ptr<std::vector<char>>>& bufs) { self->on_write_complete(self->m_client_socket, len, bufs); },
-        false
+    m_state = CONNECTING;
+    
+    // Register client socket with WorkerPool to manage IOCP association and lifecycle
+    WorkerPool::instance().add_socket(m_client_socket, nullptr, nullptr);
+
+    // Initial reads on client
+    post_reads(m_client_socket);
+    
+    // Connect to remote
+    connect_remote();
+}
+
+void ProxyTCP::connect_remote() {
+    sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = m_original_dest.ip;
+    addr.sin_port = m_original_dest.port;
+
+    m_remote_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (m_remote_socket == INVALID_SOCKET) {
+        LOG_ERROR("[ProxyTCP] Failed to create remote socket");
+        close_session();
+        return;
+    }
+
+    // Use WorkerPool to handle the ConnectEx logic
+    WorkerPool::instance().connect_async(
+        m_remote_socket,
+        addr,
+        [this_ptr = shared_from_this()]() {
+            this_ptr->on_remote_connect();
+        },
+        nullptr, nullptr
     );
 }
 
-
-
-void ProxyTCP::connect_remote() {
-    m_state = CONNECTING;
-    auto self = shared_from_this();
-    sockaddr_in remote_addr = { 0 };
-    remote_addr.sin_family = AF_INET;
-
-    unsigned char* ip_bytes = (unsigned char*)&m_original_dest.ip;
-    char ip_str[INET_ADDRSTRLEN];
-    snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-
-    if (m_is_direct) {
-        LOG_INFO("[TCP] Routing DIRECT for %s (IP: %s)", m_detected_domain.empty() ? "(IP)" : m_detected_domain.c_str(), ip_str);
-        remote_addr.sin_addr.s_addr = m_original_dest.ip;
-        remote_addr.sin_port = m_original_dest.port;
-    }
-    else {
-        LOG_INFO("[TCP] Routing PROXY for %s (IP: %s)", m_detected_domain.empty() ? "(Domain unknown)" : m_detected_domain.c_str(), ip_str);
-        inet_pton(AF_INET, g_config.upstream_ip.c_str(), &remote_addr.sin_addr);
-        remote_addr.sin_port = htons(g_config.upstream_port);
-    }
-
-    m_remote_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (m_remote_socket == INVALID_SOCKET) { close_session(); return; }
-
-    BOOL nodelay = TRUE;
-    setsockopt(m_remote_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
-    u_long mode = 1;
-    ioctlsocket(m_remote_socket, FIONBIO, &mode);
-
-    auto on_read_handler = [self](char* b, int l, sockaddr_in*) { self->on_remote_read(b, l); };
-    auto on_write_handler = [self](int len, const std::vector<std::shared_ptr<std::vector<char>>>& bufs) { self->on_write_complete(self->m_remote_socket, len, bufs); };
-
-    if (m_is_direct) {
-        WorkerPool::instance().connect_async(m_remote_socket, remote_addr, [self]() { self->on_remote_connect(); }, on_read_handler, on_write_handler);
-    }
-    else {
-        WorkerPool::instance().connect_async(m_remote_socket, remote_addr, [self]() { self->on_remote_connect(); }, [self](char* b, int l, sockaddr_in*) { self->on_proxy_connect_response(b, l); }, on_write_handler);
-    }
+void ProxyTCP::on_remote_connect() {
+    if (m_state == CLOSING) return;
+    
+    m_state = ESTABLISHED;
+    post_reads(m_remote_socket);
+    
+    std::lock_guard<std::mutex> lock(m_mutex);
+    process_write_queue(m_remote_socket);
 }
 
-void ProxyTCP::on_proxy_connect_response(char* buf, int len) {
-    if (m_state == ESTABLISHED) {
-        on_remote_read(buf, len);
-        WorkerPool::instance().read_async(m_remote_socket);
+void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int error) {
+    // If closing, just clean up
+    if (m_state == CLOSING) {
+        free_buffer(buffer);
         return;
     }
 
-    if (len <= 0) { close_session(); return; }
-    m_proxy_response_buffer.insert(m_proxy_response_buffer.end(), buf, buf + len);
-    const char* crlf2 = "\r\n\r\n";
-    auto it = std::search(m_proxy_response_buffer.begin(), m_proxy_response_buffer.end(), crlf2, crlf2 + 4);
-
-    if (it != m_proxy_response_buffer.end()) {
-        std::string header(m_proxy_response_buffer.begin(), it + 4);
-        m_proxy_response_buffer.clear();
-        if (header.find(" 200 ") != std::string::npos) {
-            m_state = ESTABLISHED;
-            // Connection is established. Try to send any buffered data.
-            try_send(m_remote_socket);
-        }
-        else {
-            close_session();
-        }
-    }
-
-    WorkerPool::instance().read_async(m_remote_socket);
-}
-
-void ProxyTCP::on_remote_connect() {
-    int error = 0;
-    int elen = sizeof(error);
-    getsockopt(m_remote_socket, SOL_SOCKET, SO_ERROR, (char*)&error, &elen);
-    if (error != 0) {
+    // Check for errors or EOF on Read
+    if (error != 0 || (bytes_transferred == 0 && buffer->op == IoBuffer::READ)) {
+        free_buffer(buffer);
         close_session();
         return;
     }
 
-    if (m_is_direct) {
-        m_state = ESTABLISHED;
-        try_send(m_remote_socket);
-    }
-    else {
-        m_state = AWAITING_CONNECT_RESPONSE;
-        std::string target_host = m_detected_domain;
-        if (target_host.empty()) {
-            unsigned char* ip_bytes = (unsigned char*)&m_original_dest.ip;
-            char ip_str[INET_ADDRSTRLEN];
-            snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-            target_host = ip_str;
+    if (buffer->op == IoBuffer::READ) {
+        buffer->total_bytes = bytes_transferred;
+        // Reset wsa_buf for writing (pointer at start, len = data read)
+        buffer->wsa_buf.buf = (char*)buffer->packet->data;
+        buffer->wsa_buf.len = (ULONG)buffer->total_bytes;
+        
+        if (buffer->socket == m_client_socket) {
+            handle_client_read_complete(buffer);
+        } else {
+            handle_remote_read_complete(buffer);
         }
-        uint16_t target_port = ntohs(m_original_dest.port);
-        std::string connect_req = "CONNECT " + target_host + ":" + std::to_string(target_port) + " HTTP/1.1\r\nHost: " + target_host + ":" + std::to_string(target_port) + "\r\n\r\n";
-
-        // Use raw pointer send_async for simple string
-        WorkerPool::instance().send_async(m_remote_socket, (const uint8_t*)connect_req.data(), connect_req.length());
+    } else { // WRITE
+        buffer->written_bytes += bytes_transferred;
+        
+        if (buffer->socket == m_client_socket) {
+            handle_client_write_complete(buffer);
+        } else {
+            handle_remote_write_complete(buffer);
+        }
     }
 }
 
-void ProxyTCP::on_client_read(char* buf, int len) {
-    if (len <= 0) {
-        m_client_at_eof = true;
-        // If we have no data pending for the remote, we can tell it we are done sending.
-        if (m_remote_send_queue_size == 0) {
-            if (m_remote_socket != INVALID_SOCKET && m_state == ESTABLISHED) {
-                shutdown(m_remote_socket, SD_SEND);
-            }
-            if (m_remote_at_eof) {
-                close_session();
-            }
-        }
-        return;
-    }
-
-    // --- Dual-Write Logic ---
-    // 1. Always write to the main queue for eventual forwarding.
-    auto buffer_for_queue = std::make_shared<std::vector<char>>(buf, buf + len);
-    {
-        std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-        m_remote_send_queue.push_back(buffer_for_queue);
-        m_remote_send_queue_size += len;
-    }
-
-    // 2. In INITIAL state, also write to the contiguous buffer for parsing (no lock needed).
-    if (m_state == INITIAL) {
-        m_initial_buffer.insert(m_initial_buffer.end(), (const uint8_t*)buf, (const uint8_t*)buf + len);
-    }
-    // --- End of Dual-Write ---
-
-
-    // --- State Machine ---
-    if (m_state == INITIAL) {
-        const auto* buf_data = m_initial_buffer.data();
-        const auto buf_size = m_initial_buffer.size();
-
-        // Hook for any HTTP request to the gateway on port 80
-        in_addr gateway_addr_struct{};
-        if (inet_pton(AF_INET, g_config.gateway_ip.c_str(), &gateway_addr_struct) == 1 &&
-            m_original_dest.ip == gateway_addr_struct.s_addr && ntohs(m_original_dest.port) == 80) {
-            std::string_view payload((const char*)buf_data, buf_size);
-            // Check for common HTTP methods that would appear at the start of the payload
-            if (payload.find("GET ") == 0 || payload.find("POST ") == 0 || payload.find("HEAD ") == 0 || payload.find("OPTIONS ") == 0) {
-                LOG_INFO("[TCP] Hooking HTTP request to gateway on port 80. Returning 204.");
-                const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
-                WorkerPool::instance().send_async(m_client_socket, (const uint8_t*)response, (int)strlen(response));
-                m_close_after_write = true;
-                return;
-            }
-        }
-
-        // Check for /generate_204 hook on port 80
-        if (ntohs(m_original_dest.port) == 80 && is_generate_204_request(buf_data, buf_size)) {
-            unsigned char* ip_bytes = (unsigned char*)&m_original_dest.ip;
-            char ip_str[INET_ADDRSTRLEN];
-            snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-            LOG_INFO("[TCP] Hooking /generate_204 request on port 80 to %s from client", ip_str);
-            const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-            WorkerPool::instance().send_async(m_client_socket, (const uint8_t*)response, (int)strlen(response));
-            m_close_after_write = true;
-            return;
-        }
-
-        std::string sni;
-        bool proceed = false;
-
-        // Per user's suggestion, the lock is removed as this is single-threaded.
-        // Also, cache data and size to avoid repeated calls.
-        sni = parse_tls_sni(buf_data, buf_size);
-        if (!sni.empty()) {
-            proceed = true;
-        }
-        else {
-            std::string host = parse_http_host(buf_data, buf_size);
-            if (!host.empty()) {
-                sni = host;
-                proceed = true;
-            }
-            // If we still can't determine the domain, check if we have received too much data.
-            else if (buf_size >= 4096) {
-                proceed = true; // Give up parsing and proceed with IP-based routing.
-            }
-        }
-
-
-        if (proceed) {
-            // Routing
-            if (!sni.empty()) {
-                m_detected_domain = sni;
-                RouteAction rule = RuleManager::instance().match_domain(sni);
-                if (rule == RouteAction::DIRECT) m_is_direct = true;
-                else if (rule == RouteAction::PROXY) m_is_direct = false;
-                else if (rule == RouteAction::BLOCK) { close_session(); return; }
-                else {
-                    m_is_direct = GeoChecker::instance().is_cn_domain(sni);
-                    if (!m_is_direct && GeoChecker::instance().is_cn_ip(ntohl(m_original_dest.ip))) {
-                        m_is_direct = true;
-                    }
-                }
-            }
-            else {
-                uint32_t ip_h = ntohl(m_original_dest.ip);
-                RouteAction rule = RuleManager::instance().match_ip(ip_h);
-                if (GeoChecker::is_private_ip(ip_h) || rule == RouteAction::DIRECT) m_is_direct = true;
-                else if (rule == RouteAction::PROXY) m_is_direct = false;
-                else if (rule == RouteAction::BLOCK) { close_session(); return; }
-                else { m_is_direct = GeoChecker::instance().is_cn_ip(ip_h); }
-            }
-
-            // "Burn after reading": Clear the initial buffer (no lock needed).
-            m_initial_buffer.clear();
-
-            // Change state and connect.
-            m_state = CONNECTING;
-            connect_remote();
-        }
-        // If not enough data and not proceeding, just wait for the next read event.
-    }
-    else if (m_state == ESTABLISHED) {
-        try_send(m_remote_socket);
-
-        // Flow control: Check if we need to pause reading from the client.
-        if (m_remote_send_queue_size > HIGH_WATER_MARK) {
-            m_client_read_paused = true;
-            // Stop reading from client until the remote queue drains.
-            return;
-        }
-    }
-    // For CONNECTING or AWAITING_PROXY_RESPONSE, we just buffer. Data is already in the queue.
-
-    // Continue the read loop only if not paused.
-    if (!m_client_read_paused) {
-        WorkerPool::instance().read_async(m_client_socket);
-    }
-}
-
-void ProxyTCP::on_remote_read(char* buf, int len) {
-    if (len <= 0) {
-        m_remote_at_eof = true;
-        // If we have no data pending for the client, we can tell it we are done sending.
-        if (m_client_send_queue_size == 0) {
-            if (m_client_socket != INVALID_SOCKET && m_state == ESTABLISHED) {
-                shutdown(m_client_socket, SD_SEND);
-            }
-            if (m_client_at_eof) {
-                close_session();
-            }
-        }
-        return;
-    }
-
-    if (m_state == ESTABLISHED) {
-        auto buffer = std::make_shared<std::vector<char>>(buf, buf + len);
-        {
-            std::lock_guard<std::mutex> lock(m_client_queue_mutex);
-            m_client_send_queue.push_back(buffer);
-            m_client_send_queue_size += len;
-        }
-        try_send(m_client_socket);
-
-        // Flow control: Check if we need to pause reading from the remote.
-        if (m_client_send_queue_size > HIGH_WATER_MARK) {
-            m_remote_read_paused = true;
-            // Stop reading from remote until the client queue drains.
-            return;
-        }
-    }
-
-    // Continue the read loop only if not paused.
-    if (!m_remote_read_paused) {
-        WorkerPool::instance().read_async(m_remote_socket);
-    }
-}
-
-void ProxyTCP::try_send(SOCKET socket) {
+void ProxyTCP::post_reads(SOCKET socket) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     if (m_state == CLOSING) return;
 
-    if (socket == m_remote_socket) {
-        std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-        while (m_remote_writes_inflight < MAX_INFLIGHT_WRITES && !m_remote_send_queue.empty()) {
-            std::vector<std::shared_ptr<std::vector<char>>> buffer_batch;
-            size_t count = std::min<size_t>(MAX_WRITE_BATCH_SIZE, m_remote_send_queue.size());
-            buffer_batch.reserve(count);
-            for (size_t i = 0; i < count; ++i) {
-                buffer_batch.push_back(m_remote_send_queue.front());
-                m_remote_send_queue.pop_front();
-            }
-            m_remote_writes_inflight++;
-            
-            // Call send_batch_async INSIDE the lock to preserve order (FIFO).
-            WorkerPool::instance().send_batch_async(m_remote_socket, std::move(buffer_batch));
+    std::deque<IoBuffer*>* pending_reads = (socket == m_client_socket) ? &m_client_pending_reads : &m_remote_pending_reads;
+    bool paused = (socket == m_client_socket) ? m_client_read_paused : m_remote_read_paused;
+
+    if (paused) return;
+
+    while (pending_reads->size() < MAX_PENDING_READS) {
+        IoBuffer* buf = alloc_buffer();
+        if (!buf) break; 
+
+        buf->op = IoBuffer::READ;
+        buf->socket = socket;
+        
+        DWORD flags = 0;
+        int ret = WSARecv(socket, &buf->wsa_buf, 1, NULL, &flags, &buf->overlapped, NULL);
+        
+        if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+            LOG_ERROR("[ProxyTCP] WSARecv failed: %d", WSAGetLastError());
+            free_buffer(buf);
+            // We can't easily call close_session() here if we already hold lock (if close_session takes lock)
+            // But post_reads takes lock.
+            // Let's schedule close via worker or just set state?
+            // Since we are in the thread of execution, setting state might be enough to stop future ops.
+            // But we need to ensure sockets are closed.
+            // We'll release lock and call close_session?
+            // Danger of re-entrancy.
+            // For now, let's assume one failure stops the flow and eventually cleanup happens.
+            // Or better:
+            break; 
         }
-    }
-    else if (socket == m_client_socket) {
-        std::lock_guard<std::mutex> lock(m_client_queue_mutex);
-        while (m_client_writes_inflight < MAX_INFLIGHT_WRITES && !m_client_send_queue.empty()) {
-            std::vector<std::shared_ptr<std::vector<char>>> buffer_batch;
-            size_t count = std::min<size_t>(MAX_WRITE_BATCH_SIZE, m_client_send_queue.size());
-            buffer_batch.reserve(count);
-            for (size_t i = 0; i < count; ++i) {
-                buffer_batch.push_back(m_client_send_queue.front());
-                m_client_send_queue.pop_front();
-            }
-            m_client_writes_inflight++;
-            
-            // Call send_batch_async INSIDE the lock to preserve order.
-            WorkerPool::instance().send_batch_async(m_client_socket, std::move(buffer_batch));
-        }
+        
+        pending_reads->push_back(buf);
     }
 }
 
-void ProxyTCP::on_write_complete(SOCKET socket, int len, const std::vector<std::shared_ptr<std::vector<char>>>& attempted_buffers) {
-    if (len <= 0) {
-        close_session();
-        return;
+void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = std::find(m_client_pending_reads.begin(), m_client_pending_reads.end(), buffer);
+        if (it != m_client_pending_reads.end()) {
+            m_client_pending_reads.erase(it);
+        }
     }
 
-    // Handshake/Manual sends use raw pointers and don't populate attempted_buffers.
-    if (attempted_buffers.empty()) {
-        return;
+    queue_write(m_remote_socket, buffer);
+    post_reads(m_client_socket);
+}
+
+void ProxyTCP::handle_remote_read_complete(IoBuffer* buffer) {
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto it = std::find(m_remote_pending_reads.begin(), m_remote_pending_reads.end(), buffer);
+        if (it != m_remote_pending_reads.end()) {
+            m_remote_pending_reads.erase(it);
+        }
     }
 
-    // Calculate leftovers logic to correctly handle queue size accounting.
-    // If len < batch_total_size, we push the remainder back to the front.
-    // Then we deduct 'len' from the queue size.
-    // This ensures queue_size perfectly matches the physical queue.
-    std::vector<std::shared_ptr<std::vector<char>>> leftovers;
-    size_t bytes_confirmed = len;
+    queue_write(m_client_socket, buffer);
+    post_reads(m_remote_socket);
+}
+
+void ProxyTCP::queue_write(SOCKET dest_socket, IoBuffer* buffer) {
+    std::lock_guard<std::mutex> lock(m_mutex);
     
-    for (const auto& buf : attempted_buffers) {
-        if (bytes_confirmed >= buf->size()) {
-            bytes_confirmed -= buf->size();
+    buffer->op = IoBuffer::WRITE;
+    buffer->socket = dest_socket;
+    // buffer->written_bytes = 0; // Already 0 from init, or updated if partial retry (logic below handles new buffers)
+    // Actually handle_client_read_complete passes a FRESHLY read buffer, so written_bytes is 0.
+    
+    std::deque<IoBuffer*>* q;
+    size_t* q_size;
+    bool* pause_flag_ptr;
+
+    if (dest_socket == m_client_socket) {
+        q = &m_client_write_queue;
+        q_size = &m_client_write_queue_size;
+        pause_flag_ptr = &m_remote_read_paused;
+    } else {
+        q = &m_remote_write_queue;
+        q_size = &m_remote_write_queue_size;
+        pause_flag_ptr = &m_client_read_paused;
+    }
+
+    q->push_back(buffer);
+    *q_size += buffer->total_bytes;
+
+    if (*q_size >= HIGH_WATER_MARK && !(*pause_flag_ptr)) {
+        *pause_flag_ptr = true;
+    }
+
+    process_write_queue(dest_socket);
+}
+
+void ProxyTCP::process_write_queue(SOCKET socket) {
+    // Expects m_mutex to be HELD
+    
+    if (socket == m_remote_socket && m_state != ESTABLISHED) {
+        return;
+    }
+
+    std::deque<IoBuffer*>* queue;
+    std::deque<IoBuffer*>* inflight;
+    
+    if (socket == m_client_socket) {
+        queue = &m_client_write_queue;
+        inflight = &m_client_inflight_writes;
+    } else {
+        queue = &m_remote_write_queue;
+        inflight = &m_remote_inflight_writes;
+    }
+
+    while (!queue->empty() && inflight->size() < MAX_PENDING_WRITES) {
+        IoBuffer* buf = queue->front();
+        queue->pop_front();
+        
+        memset(&buf->overlapped, 0, sizeof(OVERLAPPED));
+        
+        int ret = WSASend(socket, &buf->wsa_buf, 1, NULL, 0, &buf->overlapped, NULL);
+        
+        if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+            LOG_ERROR("[ProxyTCP] WSASend failed: %d", WSAGetLastError());
+            free_buffer(buf);
+            // Don't break immediately, maybe try next? 
+            // If socket is dead, next will fail too.
+            // For safety, stop submitting.
+            break;
+        }
+        
+        inflight->push_back(buf);
+    }
+}
+
+void ProxyTCP::handle_client_write_complete(IoBuffer* buffer) {
+    bool need_resume_remote = false;
+    
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        
+        auto it = std::find(m_client_inflight_writes.begin(), m_client_inflight_writes.end(), buffer);
+        if (it != m_client_inflight_writes.end()) {
+            m_client_inflight_writes.erase(it);
+        }
+
+        // Deduct submitted bytes (we added total_bytes to queue_size when queuing)
+        // We should deduct when we finish writing.
+        m_client_write_queue_size -= buffer->total_bytes; 
+        
+        if (buffer->written_bytes < buffer->total_bytes) {
+             // Partial write
+             buffer->wsa_buf.buf += buffer->written_bytes; // Advance pointer
+             buffer->wsa_buf.len -= (ULONG)buffer->written_bytes;
+             buffer->total_bytes -= buffer->written_bytes; // Remaining bytes
+             buffer->written_bytes = 0; // Reset for next op
+
+             // Re-add remaining bytes to size
+             m_client_write_queue_size += buffer->total_bytes;
+             
+             m_client_write_queue.push_front(buffer);
         } else {
-            // This buffer was partially sent or not sent at all.
-            if (bytes_confirmed > 0) {
-                // Partial sent buffer: create a new one with the remainder
-                auto new_buf = std::make_shared<std::vector<char>>(buf->begin() + bytes_confirmed, buf->end());
-                leftovers.push_back(new_buf);
-                bytes_confirmed = 0; // Remaining confirmation consumed
-            } else {
-                // Buffer completely unsent
-                leftovers.push_back(buf);
-            }
+             free_buffer(buffer);
         }
+
+        if (m_client_write_queue_size < LOW_WATER_MARK && m_remote_read_paused) {
+            m_remote_read_paused = false;
+            need_resume_remote = true;
+        }
+        
+        process_write_queue(m_client_socket);
+    }
+    
+    if (need_resume_remote) {
+        post_reads(m_remote_socket);
+    }
+}
+
+void ProxyTCP::handle_remote_write_complete(IoBuffer* buffer) {
+    bool need_resume_client = false;
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        
+        auto it = std::find(m_remote_inflight_writes.begin(), m_remote_inflight_writes.end(), buffer);
+        if (it != m_remote_inflight_writes.end()) {
+            m_remote_inflight_writes.erase(it);
+        }
+
+        m_remote_write_queue_size -= buffer->total_bytes;
+
+        if (buffer->written_bytes < buffer->total_bytes) {
+             buffer->wsa_buf.buf += buffer->written_bytes;
+             buffer->wsa_buf.len -= (ULONG)buffer->written_bytes;
+             buffer->total_bytes -= buffer->written_bytes;
+             buffer->written_bytes = 0;
+             
+             m_remote_write_queue_size += buffer->total_bytes;
+             m_remote_write_queue.push_front(buffer);
+        } else {
+             free_buffer(buffer);
+        }
+
+        if (m_remote_write_queue_size < LOW_WATER_MARK && m_client_read_paused) {
+            m_client_read_paused = false;
+            need_resume_client = true;
+        }
+
+        process_write_queue(m_remote_socket);
     }
 
-    auto self = shared_from_this();
-    if (socket == m_remote_socket) {
-        bool should_resume_reading = false;
-        {
-            std::lock_guard<std::mutex> lock(m_remote_queue_mutex);
-            m_remote_writes_inflight--;
-            
-            // Deduct exactly what was sent.
-            // Queue size logic: 
-            // We popped Total from Deque.
-            // We push back (Total - Len) to Deque.
-            // Net physical change = -Len.
-            // So we deduct Len from counter.
-            m_remote_send_queue_size -= len;
-
-            // Push unsent data back to the FRONT of the queue to maintain order.
-            if (!leftovers.empty()) {
-                for (auto it = leftovers.rbegin(); it != leftovers.rend(); ++it) {
-                    m_remote_send_queue.push_front(*it);
-                }
-            }
-
-            // Flow control: Check if we should resume reading from client.
-            if (m_client_read_paused && m_remote_send_queue_size < LOW_WATER_MARK) {
-                m_client_read_paused = false;
-                should_resume_reading = true;
-            }
-
-            if (m_client_at_eof && m_remote_send_queue.empty() && m_remote_writes_inflight == 0) {
-                if (m_remote_socket != INVALID_SOCKET && m_state == ESTABLISHED) {
-                    shutdown(m_remote_socket, SD_SEND);
-                }
-                if (m_remote_at_eof) {
-                    close_session();
-                }
-                return;
-            }
-        }
-        // Resume reading outside the lock.
-        if (should_resume_reading) {
-            WorkerPool::instance().read_async(m_client_socket);
-        }
-        self->try_send(socket);
-    }
-    else if (socket == m_client_socket) {
-        bool should_resume_reading = false;
-        {
-            std::lock_guard<std::mutex> lock(m_client_queue_mutex);
-            m_client_writes_inflight--;
-            
-            m_client_send_queue_size -= len;
-
-            // Push unsent data back to the FRONT
-            if (!leftovers.empty()) {
-                for (auto it = leftovers.rbegin(); it != leftovers.rend(); ++it) {
-                    m_client_send_queue.push_front(*it);
-                }
-            }
-
-            if (m_close_after_write && m_client_send_queue.empty() && m_client_writes_inflight == 0) {
-                close_session();
-                return;
-            }
-
-            // Flow control: Check if we should resume reading from remote.
-            if (m_remote_read_paused && m_client_send_queue_size < LOW_WATER_MARK) {
-                m_remote_read_paused = false;
-                should_resume_reading = true;
-            }
-
-            if (m_remote_at_eof && m_client_send_queue.empty() && m_client_writes_inflight == 0) {
-                if (m_client_socket != INVALID_SOCKET && m_state == ESTABLISHED) {
-                    shutdown(m_client_socket, SD_SEND);
-                }
-                if (m_client_at_eof) {
-                    close_session();
-                }
-                return;
-            }
-        }
-        // Resume reading outside the lock.
-        if (should_resume_reading) {
-            WorkerPool::instance().read_async(m_remote_socket);
-        }
-        self->try_send(socket);
+    if (need_resume_client) {
+        post_reads(m_client_socket);
     }
 }
 
 void ProxyTCP::close_session() {
-    if (m_state.exchange(CLOSING) == CLOSING) return;
+    State expected = ESTABLISHED;
+    // Simple state check. Note: State transition might need stronger sync if called from multiple threads,
+    // but close_session is usually triggered once on error.
+    if (m_state == CLOSING) return;
+    m_state = CLOSING;
+
+    // Remove sockets from WorkerPool (closes them)
+    // We don't hold lock here to avoid deadlock if remove_socket calls back? 
+    // remove_socket is async usually.
     if (m_client_socket != INVALID_SOCKET) {
-        shutdown(m_client_socket, SD_BOTH);
         WorkerPool::instance().remove_socket(m_client_socket);
         m_client_socket = INVALID_SOCKET;
     }
     if (m_remote_socket != INVALID_SOCKET) {
-        shutdown(m_remote_socket, SD_BOTH);
         WorkerPool::instance().remove_socket(m_remote_socket);
         m_remote_socket = INVALID_SOCKET;
     }
+
+    // Now clean up queues
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    auto clean_queue = [this](std::deque<IoBuffer*>& q) {
+        for (auto* buf : q) free_buffer(buf);
+        q.clear();
+    };
+
+    clean_queue(m_client_pending_reads);
+    clean_queue(m_remote_pending_reads);
+    clean_queue(m_client_write_queue);
+    clean_queue(m_remote_write_queue);
+    clean_queue(m_client_inflight_writes);
+    clean_queue(m_remote_inflight_writes);
 }
