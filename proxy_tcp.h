@@ -84,10 +84,7 @@ private:
     // Helper to move buffer from read completion to write queue
     void queue_write(SOCKET dest_socket, IoBuffer* buffer);
     
-    // Queues
-    std::deque<IoBuffer*> m_client_pending_reads;
-    std::deque<IoBuffer*> m_remote_pending_reads;
-    
+    // Write Queues (for Backpressure)
     std::deque<IoBuffer*> m_client_write_queue;
     std::deque<IoBuffer*> m_remote_write_queue;
     
@@ -97,14 +94,17 @@ private:
 
     std::mutex m_mutex; // General lock for queues
 
+    // Pending Read Counts (for Concurrency Control)
+    std::atomic<int> m_client_pending_read_count{0};
+    std::atomic<int> m_remote_pending_read_count{0};
+
     // Queue Sizing for Backpressure
-    size_t m_client_write_queue_size{0};
-    size_t m_remote_write_queue_size{0};
+    size_t m_client_write_queue_size{0};\n    size_t m_remote_write_queue_size{0};
 
     // Flow control watermarks
     static const size_t HIGH_WATER_MARK = 4 * 1024 * 1024; // 4MB
     static const size_t LOW_WATER_MARK = 1 * 1024 * 1024;  // 1MB
-    static const int MAX_PENDING_READS = 2; // Per socket
+    static const int MAX_PENDING_READS = 4; // Increased for Multi-path
     static const int MAX_PENDING_WRITES = 4; // Per socket
     
     // Flow control flags
