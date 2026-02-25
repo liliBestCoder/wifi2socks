@@ -14,7 +14,6 @@ ProxyTCP::IoBuffer* ProxyTCP::alloc_buffer(size_t size) {
     IoBuffer* buf = new IoBuffer();
     buf->buffer = new char[TCP_BUFFER_SIZE];
     buf->capacity = TCP_BUFFER_SIZE;
-    buf->owner = shared_from_this();
 
     buf->state = IoBuffer::IO_READING;
     buf->total_bytes = 0;
@@ -227,6 +226,7 @@ void ProxyTCP::post_reads(SOCKET socket) {
     if (paused || eof) return;
 
     std::deque<IoBuffer*>* dest_queue = (socket == m_client_socket) ? &m_remote_write_queue : &m_client_write_queue;
+    auto self = shared_from_this();
 
     while (pending_count->load() < MAX_PENDING_READS) {
         IoBuffer* buf = alloc_buffer();
@@ -234,6 +234,9 @@ void ProxyTCP::post_reads(SOCKET socket) {
 
         buf->state = IoBuffer::IO_READING;
         buf->socket = socket;
+        buf->on_complete = [this, self, buf](DWORD bytes, int err) {
+            this->on_io_complete(buf, bytes, err);
+        };
         (*pending_count)++;
 
         {
@@ -474,6 +477,11 @@ void ProxyTCP::process_write_queue(SOCKET socket) {
             leader->state = IoBuffer::IO_WRITING;
             leader->socket = socket;
             memset(&leader->overlapped, 0, sizeof(OVERLAPPED));
+
+            auto self = shared_from_this();
+            leader->on_complete = [this, self, leader](DWORD bytes, int err) {
+                this->on_io_complete(leader, bytes, err);
+            };
 
             DWORD bytes_sent = 0;
             (*inflight_count)++;

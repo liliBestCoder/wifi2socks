@@ -100,11 +100,11 @@ void Worker::loop() {
         if (io->type == IO_PROXY_BUFFER) {
             auto buf = reinterpret_cast<ProxyTCP::IoBuffer*>(overlapped);
             if (buf) {
-                if (auto owner = buf->owner.lock()) {
+                if (buf->on_complete) {
                     int err = ret ? 0 : WSAGetLastError();
-                    owner->on_io_complete(buf, bytesTransferred, err);
+                    auto cb = std::move(buf->on_complete);
+                    cb(bytesTransferred, err);
                 } else {
-                    // Object already destroyed, free the buffer to avoid memory leak
                     delete buf;
                 }
             }

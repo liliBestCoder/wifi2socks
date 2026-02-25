@@ -26,7 +26,7 @@ public:
 
         enum State { IO_READING, IO_READY, IO_WRITING, IO_COMPLETED, IO_DROPPED } state;
 
-        std::weak_ptr<ProxyTCP> owner;
+        std::function<void(DWORD, int)> on_complete;
         SOCKET socket; // The socket this op is associated with
 
         // Batching support (Gather Write)
