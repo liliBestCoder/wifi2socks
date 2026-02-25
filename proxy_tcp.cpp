@@ -525,7 +525,7 @@ void ProxyTCP::process_write_queue(SOCKET socket) {
             if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
                 int err = WSAGetLastError();
                 if (err == WSAECONNRESET) {
-                    LOG_DEBUG("[ProxyTCP] 连接被对端重置 (10054)，关闭会话");
+                    LOG_DEBUG("[ProxyTCP] Connection reset by peer (10054), closing session");
                 } else {
                     LOG_ERROR("[ProxyTCP] WSASend Gather failed: %d", err);
                 }
