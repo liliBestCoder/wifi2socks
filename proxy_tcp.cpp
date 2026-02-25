@@ -14,7 +14,7 @@ ProxyTCP::IoBuffer* ProxyTCP::alloc_buffer(size_t size) {
     IoBuffer* buf = new IoBuffer();
     buf->buffer = new char[TCP_BUFFER_SIZE];
     buf->capacity = TCP_BUFFER_SIZE;
-    buf->owner = this;
+    buf->owner = shared_from_this();
 
     buf->state = IoBuffer::IO_READING;
     buf->total_bytes = 0;
@@ -30,9 +30,6 @@ ProxyTCP::IoBuffer* ProxyTCP::alloc_buffer(size_t size) {
 
 void ProxyTCP::free_buffer(IoBuffer* buffer) {
     if (!buffer) return;
-    if (buffer->buffer) {
-        delete[] buffer->buffer;
-    }
     delete buffer;
 }
 

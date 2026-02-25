@@ -85,9 +85,14 @@ void Worker::loop() {
 
         if (io->type == IO_PROXY_BUFFER) {
             auto buf = reinterpret_cast<ProxyTCP::IoBuffer*>(overlapped);
-            if (buf && buf->owner) {
-                int err = ret ? 0 : WSAGetLastError();
-                buf->owner->on_io_complete(buf, bytesTransferred, err);
+            if (buf) {
+                if (auto owner = buf->owner.lock()) {
+                    int err = ret ? 0 : WSAGetLastError();
+                    owner->on_io_complete(buf, bytesTransferred, err);
+                } else {
+                    // Object already destroyed, free the buffer to avoid memory leak
+                    delete buf;
+                }
             }
             continue;
         }

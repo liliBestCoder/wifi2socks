@@ -26,7 +26,7 @@ public:
 
         enum State { IO_READING, IO_READY, IO_WRITING, IO_COMPLETED, IO_DROPPED } state;
 
-        ProxyTCP* owner;
+        std::weak_ptr<ProxyTCP> owner;
         SOCKET socket; // The socket this op is associated with
 
         // Batching support (Gather Write)
@@ -35,9 +35,16 @@ public:
 
         IoBuffer() : type(IO_PROXY_BUFFER), buffer(nullptr), capacity(0),
             total_bytes(0), written_bytes(0), state(IO_READING),
-            owner(nullptr), socket(INVALID_SOCKET), flags(0) {
+            socket(INVALID_SOCKET), flags(0) {
             memset(&overlapped, 0, sizeof(OVERLAPPED));
             memset(&wsa_buf, 0, sizeof(WSABUF));
+        }
+
+        ~IoBuffer() {
+            if (buffer) {
+                delete[] buffer;
+                buffer = nullptr;
+            }
         }
     };
 
