@@ -71,6 +71,10 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
     m_remote_eof = false;
     m_client_fin_sent = false;
     m_remote_fin_sent = false;
+    
+    m_total_bytes_sent = 0;
+    m_total_bytes_received = 0;
+    m_start_time = GetTickCount();
 }
 
 ProxyTCP::~ProxyTCP() {
@@ -115,7 +119,12 @@ void ProxyTCP::connect_remote() {
     // 优化 socket 性能
     int optval = 1;
     setsockopt(m_remote_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&optval, sizeof(optval)); // 禁用 Nagle 算法
-    // 不设置固定缓冲区大小，让 Windows 自动调整（TCP Auto-Tuning）
+    
+    // 针对家庭网络环境：设置固定缓冲区以获得更稳定的性能
+    // 如果公司网络能跑 50Mbps 但家里只有 15Mbps，可能是 Windows 自动调优过于保守
+    int buf_size = 512 * 1024; // 512KB - 更大的缓冲区以应对高延迟网络
+    setsockopt(m_remote_socket, SOL_SOCKET, SO_SNDBUF, (char*)&buf_size, sizeof(buf_size));
+    setsockopt(m_remote_socket, SOL_SOCKET, SO_RCVBUF, (char*)&buf_size, sizeof(buf_size));
 
     auto self = shared_from_this();
     WorkerPool::instance().connect_async(
@@ -556,6 +565,7 @@ void ProxyTCP::handle_client_write_complete(IoBuffer* buffer) {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_client_inflight_write_count--;
         m_client_write_queue_size -= buffer->total_bytes;
+        m_total_bytes_sent += buffer->total_bytes; // 统计发送流量
 
         if (buffer->written_bytes < buffer->total_bytes) {
             m_client_write_queue_size += (buffer->total_bytes - buffer->written_bytes);
@@ -582,6 +592,7 @@ void ProxyTCP::handle_remote_write_complete(IoBuffer* buffer) {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_remote_inflight_write_count--;
         m_remote_write_queue_size -= buffer->total_bytes;
+        m_total_bytes_received += buffer->total_bytes; // 统计接收流量
 
         if (buffer->written_bytes < buffer->total_bytes) {
             m_remote_write_queue_size += (buffer->total_bytes - buffer->written_bytes);
@@ -610,6 +621,20 @@ void ProxyTCP::close_session() {
 void ProxyTCP::close_session_internal() {
     if (m_state == CLOSING) return;
     m_state = CLOSING;
+
+    // 输出性能统计
+    DWORD elapsed = GetTickCount() - m_start_time;
+    if (elapsed > 0 && (m_total_bytes_sent > 0 || m_total_bytes_received > 0)) {
+        double duration_sec = elapsed / 1000.0;
+        double tx_speed_mbps = (m_total_bytes_sent * 8.0) / duration_sec / 1000000.0;
+        double rx_speed_mbps = (m_total_bytes_received * 8.0) / duration_sec / 1000000.0;
+        LOG_INFO("[TCP] 会话结束 - 时长：%.1f 秒，发送：%.2f MB, 接收：%.2f MB, 发送速度：%.2f Mbps, 接收速度：%.2f Mbps",
+            duration_sec,
+            m_total_bytes_sent / 1048576.0,
+            m_total_bytes_received / 1048576.0,
+            tx_speed_mbps,
+            rx_speed_mbps);
+    }
 
     if (m_client_socket != INVALID_SOCKET) {
         WorkerPool::instance().remove_socket(m_client_socket);

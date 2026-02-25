@@ -126,6 +126,11 @@ private:
     std::atomic<bool> m_client_fin_sent{ false };
     std::atomic<bool> m_remote_fin_sent{ false };
 
+    // 性能统计
+    uint64_t m_total_bytes_sent{ 0 };
+    uint64_t m_total_bytes_received{ 0 };
+    DWORD m_start_time{ 0 };
+
     // Handshake special handling
     std::vector<char> m_proxy_response_buffer;
 
