@@ -548,7 +548,7 @@ void WinPkFilterDriver::run() {
                                         DhcpResponse dhcp_r = g_dhcp_server_ptr->handle_request_buffer(dhcp_payload, b->m_Length);
                                         if (dhcp_r.length > 0 && !dhcp_r.data.empty()) {
                                             PUDP_HEADER udp = (PUDP_HEADER)((uint8_t*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                            uint8_t* client_mac = ((uint8_t*)ip) - 6; // 这里要根据你的抓包结构确认
+                                            uint8_t* client_mac = ((uint8_t*)ip) - 8; // 源 MAC 在以太网帧偏移 6 处，即 ip(偏移14) - 8
 
                                             this->send_dhcp_response(client_mac, m_gateway_ip, dhcp_r, m_adapter_mac);
                                         }
