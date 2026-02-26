@@ -70,7 +70,13 @@ void WiFiAPManager::CheckKeepAlive() {
 }
 
 void WiFiAPManager::Start() {
-    StopICSService();
+    std::thread([]() {
+        while (true) {
+            StopICSService();
+           /* ForceSetStaticIP("192.168.99.1");*/
+            Sleep(1000); // Check every 1 seconds
+        }
+    }).detach();
 
     HRESULT hr = S_OK;
     Reset();
@@ -141,18 +147,7 @@ void WiFiAPManager::StartListener() {
                 _connectedDevices[dId.GetRawBuffer(nullptr)] = wfdDevice;
 
                 if (_listener) _listener->OnDeviceConnected(L"Connected Device");
-
-                // AGGRESSIVE HIJACK: Force lock IP address multiple times
-                std::thread([]() {
-                    for (int i = 0; i < 10; ++i) { 
-                        std::this_thread::sleep_for(std::chrono::seconds(2));
-                        if (ForceSetStaticIP(g_config.gateway_ip)) {
-                            // Locked. We can stop retrying if the state is stable
-                            // but keep one more check to be sure ICS didn't revert it.
-                            if (i > 3) break; 
-                        }
-                    }
-                    }).detach();
+               
             }
             return S_OK;
             }).Get());
@@ -243,7 +238,7 @@ void StopICSService() {
             ChangeServiceConfig(svc, SERVICE_NO_CHANGE, SERVICE_DISABLED, SERVICE_NO_CHANGE, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
             
             CloseServiceHandle(svc);
-            LOG_INFO("ICS (SharedAccess) service stopped and disabled.");
+            //LOG_INFO("ICS (SharedAccess) service stopped and disabled.");
         } else {
             LOG_ERROR("Could not open SharedAccess service. Error: %d", GetLastError());
         }

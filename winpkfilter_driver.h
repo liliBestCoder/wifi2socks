@@ -24,6 +24,7 @@
 #include "Common.h"
 #include "ndisapi.h"
 #include "packet_pool.h"
+#include "dhcp_server.h"
 
 // Combined flags definitions if not present in Common.h
 #ifndef MSTCP_FLAG_TUNNEL
@@ -61,6 +62,7 @@ public:
     bool send_to_adapter(const char* packet, size_t length);
     bool send_to_mstcp(const char* packet, size_t length);
     bool get_adapter_mac(const std::string& adapter_name, uint8_t* mac);
+    void send_dhcp_response(const uint8_t* client_mac, const uint32_t src_ip, const DhcpResponse& dhcp_r, const uint8_t* m_adapter_mac);
 
     static std::vector<std::pair<std::string, std::string>> get_adapters();
 

@@ -314,3 +314,108 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
         lease_duration_.count());
 }
+
+DhcpResponse DhcpServer::handle_request_buffer(const char* buffer, int size) {
+    DhcpResponse resp;
+    if (size < 240) return resp;
+
+    auto* msg = (DHCP_Message*)buffer;
+    if (msg->op != 1) return resp;
+
+    uint8_t dhcp_message_type = 0;
+    uint8_t* options = msg->options;
+    if (memcmp(options, "\x63\x82\x53\x63", 4) != 0) return resp;
+
+    // 解析 DHCP Message Type
+    options += 4;
+    int option_len_rem = sizeof(msg->options) - 4;
+    while (option_len_rem > 0 && *options != 255) {
+        uint8_t opt_code = *options++;
+        uint8_t opt_len = *options++;
+        option_len_rem -= 2;
+        if (opt_code == 53) {
+            dhcp_message_type = *options;
+        }
+        options += opt_len;
+        option_len_rem -= opt_len;
+    }
+
+    auto mac = get_mac_address(buffer);
+    if (mac.empty()) return resp;
+
+    uint32_t yiaddr_h = 0;
+    if (dhcp_message_type == 1) { // DISCOVER
+        yiaddr_h = find_available_ip(mac);
+        if (yiaddr_h == 0) return resp;
+    }
+    else if (dhcp_message_type == 3) { // REQUEST
+        uint32_t requested_ip_n = get_requested_ip(buffer);
+        yiaddr_h = requested_ip_n != 0 ? ntohl(requested_ip_n) : ntohl(msg->ciaddr);
+
+        std::lock_guard<std::mutex> lock(mtx_);
+        auto it = leases_.find(mac);
+        if (it != leases_.end() && it->second.ip == yiaddr_h) {
+            it->second.expires = std::chrono::steady_clock::now() + lease_duration_;
+        }
+        else {
+            auto pool_it = std::find(ip_pool_.begin(), ip_pool_.end(), yiaddr_h);
+            if (pool_it != ip_pool_.end()) ip_pool_.erase(pool_it);
+            leases_[mac] = { yiaddr_h, std::chrono::steady_clock::now() + lease_duration_ };
+        }
+    }
+    else {
+        return resp;
+    }
+
+    // 构造响应包
+    DHCP_Message resp_msg = { 0 };
+    resp_msg.op = 2; // BOOTREPLY
+    resp_msg.htype = msg->htype;
+    resp_msg.hlen = msg->hlen;
+    resp_msg.xid = msg->xid;
+    resp_msg.flags = msg->flags;
+    memcpy(resp_msg.chaddr, msg->chaddr, 16);
+
+    uint32_t yiaddr_n = htonl(yiaddr_h);
+    resp_msg.yiaddr = yiaddr_n;
+
+    uint32_t server_ip_n;
+    inet_pton(AF_INET, g_config.gateway_ip.c_str(), &server_ip_n);
+    resp_msg.siaddr = server_ip_n;
+
+    uint8_t* resp_options = resp_msg.options;
+    memcpy(resp_options, "\x63\x82\x53\x63", 4);
+    resp_options += 4;
+
+    *resp_options++ = 53; *resp_options++ = 1;
+    *resp_options++ = (dhcp_message_type == 1) ? 2 : 5; // OFFER / ACK
+
+    *resp_options++ = 1; *resp_options++ = 4;
+    inet_pton(AF_INET, "255.255.255.0", resp_options); resp_options += 4;
+
+    *resp_options++ = 3; *resp_options++ = 4;
+    memcpy(resp_options, &server_ip_n, 4); resp_options += 4;
+
+    *resp_options++ = 6; *resp_options++ = 4;
+    memcpy(resp_options, &server_ip_n, 4); resp_options += 4;
+
+    *resp_options++ = 54; *resp_options++ = 4;
+    memcpy(resp_options, &server_ip_n, 4); resp_options += 4;
+
+    *resp_options++ = 51; *resp_options++ = 4;
+    uint32_t lease_time_n = htonl((uint32_t)lease_duration_.count());
+    memcpy(resp_options, &lease_time_n, 4); resp_options += 4;
+
+    *resp_options++ = 26; *resp_options++ = 2;
+    uint16_t mtu_n = htons(1300);
+    memcpy(resp_options, &mtu_n, 2); resp_options += 2;
+
+    *resp_options++ = 255;
+
+    resp.data.resize(sizeof(DHCP_Message));
+    memcpy(resp.data.data(), &resp_msg, sizeof(DHCP_Message));
+    resp.length = (int)resp.data.size();
+    resp.client_ip = yiaddr_h;
+
+    return resp;
+}

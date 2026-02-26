@@ -8,7 +8,14 @@
 #include <mutex>
 #include <WinSock2.h>
 
+struct DhcpResponse {
+    std::vector<uint8_t> data; // 响应包
+    int length = 0;             // 实际长度
+    uint32_t client_ip = 0;     // 可选：客户端 IP
+};
+
 class DhcpServer {
+
 public:
     DhcpServer(const std::string& listen_ip, int listen_port = 67);
     ~DhcpServer();
@@ -18,6 +25,7 @@ public:
 
     // Directly handle a request buffer (e.g. from WinDivert)
     void handle_request(const char* buffer, int size, const sockaddr_in& client_addr);
+    DhcpResponse handle_request_buffer(const char* buffer, int size);
 
 private:
     void run();

@@ -110,11 +110,11 @@ private:
     size_t m_remote_write_queue_size{ 0 };
 
     // Flow control watermarks (Optimized for high speed)
-    static const size_t HIGH_WATER_MARK = 32 * 1024 * 1024; // 32MB - 提高水线以支持更高速度
-    static const size_t LOW_WATER_MARK = 8 * 1024 * 1024;  // 8MB
-    static const int MAX_PENDING_READS = 8; // 增加预读数量
-    static const int MAX_PENDING_WRITES = 16; // 增加并发写入数，提高吞吐量
-    static const int MAX_GATHER_BATCH = 32;  // 增加单次 WSASend 的批处理数量
+    static const size_t HIGH_WATER_MARK = 16 * 1024 * 1024; // 32MB - 提高水线以支持更高速度
+    static const size_t LOW_WATER_MARK = 4 * 1024 * 1024;  // 8MB
+    static const int MAX_PENDING_READS = 4; // 增加预读数量
+    static const int MAX_PENDING_WRITES = 4; // 增加并发写入数，提高吞吐量
+    static const int MAX_GATHER_BATCH = 16;  // 增加单次 WSASend 的批处理数量
 
     // Flow control flags
     bool m_remote_read_paused{ false };

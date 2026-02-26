@@ -101,10 +101,6 @@ int main() {
     } catch (...) {
         LOG_ERROR("[CORE] Failed to start WiFi AP.");
     }
-    
-    static DhcpServer dhcp_server(g_config.gateway_ip);
-    g_dhcp_server_ptr = &dhcp_server;
-    dhcp_server.start();
 
     TrafficManager::instance().start();
 
@@ -122,6 +118,10 @@ int main() {
     LOG_INFO("[CORE] Worker pool initialized with %d workers sharing one IOCP.", worker_count);
 
     UdpProxy::initialize();
+
+    static DhcpServer dhcp_server(g_config.gateway_ip);
+    g_dhcp_server_ptr = &dhcp_server;
+    dhcp_server.start();
 
     if (!adapter_name.empty()) {
         LOG_INFO("[CORE] Adapter found: %s", adapter_name.c_str());

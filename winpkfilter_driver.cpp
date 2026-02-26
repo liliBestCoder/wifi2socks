@@ -87,6 +87,10 @@ const USHORT NAT_TARGET_PORT = 3080;
 #pragma comment(lib, "ndisapilib.lib")
 #pragma comment(lib, "iphlpapi.lib")
 
+#include "dhcp_server.h"
+
+extern DhcpServer* g_dhcp_server_ptr;  // 引用外部定义的全局变量
+
 static uint32_t csum_partial(const void* data, int len, uint32_t start_sum) {
     const uint16_t* ptr = (const uint16_t*)data;
     uint32_t sum = start_sum;
@@ -435,6 +439,9 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
     }
 }
 
+
+
+
 void WinPkFilterDriver::run() {
     std::list<ProcessedPacket> local_results;
     HANDLE wait_events[2] = { m_wait_event, m_results_event };
@@ -530,11 +537,23 @@ void WinPkFilterDriver::run() {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
                                     USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
                                     if (sp == 67 || dp == 67 || sp == 68 || dp == 68) { // DHCP Fast Path
-                                        PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
-                                        std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-                                        m_results_queue.packets.push_back({ b, dest });
-                                        m_read_request->EthPacket[i].Buffer = nullptr; // 所有权转移
-                                        SetEvent(m_results_event);
+
+                                        PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
+                                        int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
+                                        PUDP_HEADER udp = (PUDP_HEADER)((uint8_t*)ip + ip_hdr_len);
+                                        const char* dhcp_payload = (const char*)udp + sizeof(UDP_HEADER);
+                                        int dhcp_size = ntohs(udp->Len) - sizeof(UDP_HEADER);
+
+                                       
+                                        DhcpResponse dhcp_r = g_dhcp_server_ptr->handle_request_buffer(dhcp_payload, b->m_Length);
+                                        if (dhcp_r.length > 0 && !dhcp_r.data.empty()) {
+                                            PUDP_HEADER udp = (PUDP_HEADER)((uint8_t*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                            uint8_t* client_mac = ((uint8_t*)ip) - 6; // 这里要根据你的抓包结构确认
+
+                                            this->send_dhcp_response(client_mac, m_gateway_ip, dhcp_r, m_adapter_mac);
+                                        }
+                                        PacketPool::instance().release(b);
+                                        m_read_request->EthPacket[i].Buffer = nullptr; // 释放
                                         handled = true;
                                     }
                                     else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) { // Drop Discovery
@@ -648,7 +667,7 @@ void WinPkFilterDriver::run() {
                 backlog += q->packets.size();
             }
             uint64_t total_pkts = dl_pkts + ul_pkts;
-            LOG_INFO("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us",
+            LOG_DEBUG("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us",
                 dl_mbps, dl_pkts, ul_mbps, ul_pkts, backlog, total_pkts > 0 ? work_us / total_pkts : 0);
             m_last_stat_time = now;
         }
@@ -677,4 +696,67 @@ bool WinPkFilterDriver::send_to_mstcp(const char* packet, size_t length) {
     memcpy(m_send_buffer->m_IBuffer, packet, clen); m_send_buffer->m_Length = (ULONG)clen; m_send_buffer->m_dwDeviceFlags = PACKET_FLAG_ON_RECEIVE;
     ETH_REQUEST req = { m_adapter_handle, { m_send_buffer } };
     return m_ndis_api.SendPacketToMstcp(&req) != FALSE;
+}
+
+void  WinPkFilterDriver::send_dhcp_response(const uint8_t* client_mac, const uint32_t src_ip, const DhcpResponse& dhcp_r, const uint8_t* m_adapter_mac) {
+    if (dhcp_r.length == 0 || dhcp_r.data.empty()) return;
+
+    // 计算总长度
+    size_t frame_len = 14 + 20 + 8 + dhcp_r.length; // ETH + IP + UDP + DHCP
+    std::vector<uint8_t> frame(frame_len);
+
+    uint8_t* ptr = frame.data();
+
+    // --- 以太网头 ---
+    memcpy(ptr, client_mac, 6);           // 目标 MAC = 客户端
+    memcpy(ptr + 6, m_adapter_mac, 6);    // 源 MAC = 虚拟网卡
+    ptr[12] = 0x08; ptr[13] = 0x00;       // EtherType = IPv4
+    ptr += 14;
+
+    // --- IP 头 ---
+    uint16_t total_len = htons(20 + 8 + dhcp_r.length); // IP头20 + UDP头8 + DHCP payload
+    ptr[0] = 0x45;       // Version 4, IHL=5
+    ptr[1] = 0x00;       // TOS
+    memcpy(ptr + 2, &total_len, 2);
+    ptr[4] = ptr[5] = ptr[6] = ptr[7] = 0x00; // ID + Flags/FragOffset
+    ptr[8] = 64;         // TTL
+    ptr[9] = 17;         // Protocol = UDP
+    ptr[10] = ptr[11] = 0x00; // Checksum 先填0
+
+    // Source IP
+    uint32_t sip = htonl(src_ip);
+    memcpy(ptr + 12, &sip, 4);
+
+    // Dest IP = 广播
+    uint32_t dip = htonl(0xFFFFFFFF);
+    memcpy(ptr + 16, &dip, 4);
+
+    // 计算 IP 校验和
+    auto calc_ip_checksum = [](uint8_t* hdr) -> uint16_t {
+        uint32_t sum = 0;
+        for (int i = 0; i < 20; i += 2) {
+            sum += (hdr[i] << 8) | hdr[i + 1];
+        }
+        while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+        return (uint16_t)(~sum);
+        };
+    uint16_t ip_cksum = calc_ip_checksum(ptr);
+    memcpy(ptr + 10, &ip_cksum, 2);
+    ptr += 20;
+
+    // --- UDP 头 ---
+    uint16_t src_port = htons(67);
+    uint16_t dst_port = htons(68);
+    uint16_t udp_len = htons(8 + dhcp_r.length);
+    memcpy(ptr, &src_port, 2);
+    memcpy(ptr + 2, &dst_port, 2);
+    memcpy(ptr + 4, &udp_len, 2);
+    ptr[6] = ptr[7] = 0x00; // UDP checksum可填0
+    ptr += 8;
+
+    // --- DHCP payload ---
+    memcpy(ptr, dhcp_r.data.data(), dhcp_r.length);
+
+    // --- 发送 ---
+    this->send_to_adapter((const char*)frame.data(), frame.size());
 }
