@@ -340,13 +340,12 @@ DhcpResponse DhcpServer::handle_request_buffer(const char* buffer, int size) {
     if (mac.empty()) return resp;
 
     uint32_t yiaddr_h = 0;
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
     if (dhcp_message_type == 1) { // DISCOVER
-        std::lock_guard<std::recursive_mutex> lock(mtx_);
         yiaddr_h = find_available_ip_locked(mac);
         if (yiaddr_h == 0) return resp;
     }
     else if (dhcp_message_type == 3) { // REQUEST
-        std::lock_guard<std::recursive_mutex> lock(mtx_);
         // 使用 find_available_ip_locked 来统一处理，确保锁只获取一次
         yiaddr_h = find_available_ip_locked(mac);
     }

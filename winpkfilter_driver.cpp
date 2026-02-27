@@ -544,8 +544,9 @@ void WinPkFilterDriver::run() {
                                         const char* dhcp_payload = (const char*)udp + sizeof(UDP_HEADER);
                                         int dhcp_size = ntohs(udp->Len) - sizeof(UDP_HEADER);
 
-                                        std::lock_guard<std::mutex> lock(m_results_queue.mtx);
                                         DhcpResponse dhcp_r = g_dhcp_server_ptr->handle_request_buffer(dhcp_payload, b->m_Length);
+
+                                        std::lock_guard<std::mutex> lock(m_results_queue.mtx);
                                         if (dhcp_r.length > 0 && !dhcp_r.data.empty()) {
                                             PUDP_HEADER udp = (PUDP_HEADER)((uint8_t*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                             uint8_t* client_mac = ((uint8_t*)ip) - 8; // 源 MAC 在以太网帧偏移 6 处，即 ip(偏移14) - 8
