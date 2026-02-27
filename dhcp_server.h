@@ -32,6 +32,7 @@ private:
     void init_pool();
     std::vector<uint8_t> get_mac_address(const char* buffer);
     uint32_t find_available_ip(const std::vector<uint8_t>& mac);
+    uint32_t find_available_ip_locked(const std::vector<uint8_t>& mac); // 内部函数，调用者必须已持有锁
     uint32_t get_requested_ip(const char* buffer);
 
     struct Lease {
