@@ -103,6 +103,10 @@ int main() {
         LOG_ERROR("[CORE] Failed to start WiFi AP.");
     }
 
+    static DhcpServer dhcp_server(g_config.gateway_ip);
+    g_dhcp_server_ptr = &dhcp_server;
+    dhcp_server.start();
+
     TrafficManager::instance().start();
 
     GeoChecker::instance().init();

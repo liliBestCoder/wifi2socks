@@ -37,8 +37,9 @@ struct DHCP_Message {
 #pragma pack(pop) 
 
 DhcpServer::DhcpServer(const std::string& listen_ip, int listen_port)
-    : listen_ip_(listen_ip), listen_port_(listen_port), sock_(INVALID_SOCKET), 
-      running_(false), lease_duration_(std::chrono::hours(24)) {}
+    : listen_ip_(listen_ip), listen_port_(listen_port), sock_(INVALID_SOCKET),
+    running_(false), lease_duration_(std::chrono::hours(24)) {
+}
 
 DhcpServer::~DhcpServer() {
     stop();
@@ -48,7 +49,7 @@ void DhcpServer::init_pool() {
     uint32_t server_ip_n;
     inet_pton(AF_INET, g_config.gateway_ip.c_str(), &server_ip_n);
     uint32_t server_ip_h = ntohl(server_ip_n);
-    
+
     // Create a pool of 100 addresses, e.g., from .100 to .199
     uint32_t subnet = server_ip_h & 0xFFFFFF00;
     for (uint32_t i = 100; i < 200; ++i) {
@@ -79,7 +80,7 @@ bool DhcpServer::start() {
         WSACleanup();
         return false;
     }
-    
+
     sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
     inet_pton(AF_INET, g_config.gateway_ip.c_str(), &server_addr.sin_addr);
@@ -152,8 +153,8 @@ uint32_t DhcpServer::get_requested_ip(const char* buffer) {
     return 0;
 }
 
-// 内部实现，调用者必须已经持有 mtx_ 锁
-uint32_t DhcpServer::find_available_ip_locked(const std::vector<uint8_t>& mac) {
+uint32_t DhcpServer::find_available_ip(const std::vector<uint8_t>& mac) {
+    std::lock_guard<std::mutex> lock(mtx_);
     auto now = std::chrono::steady_clock::now();
 
     // 1. Check if this MAC already has a lease
@@ -184,11 +185,6 @@ uint32_t DhcpServer::find_available_ip_locked(const std::vector<uint8_t>& mac) {
     return 0; // No IP available
 }
 
-uint32_t DhcpServer::find_available_ip(const std::vector<uint8_t>& mac) {
-    std::lock_guard<std::recursive_mutex> lock(mtx_);
-    return find_available_ip_locked(mac);
-}
-
 
 void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in& client_addr) {
     if (size < 240) return;
@@ -198,7 +194,7 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
     uint8_t dhcp_message_type = 0;
     uint8_t* options = msg->options;
     if (memcmp(options, "\x63\x82\x53\x63", 4) != 0) return;
-    
+
     options += 4;
     int option_len_rem = sizeof(msg->options) - 4;
     while (option_len_rem > 0 && *options != 255) {
@@ -215,41 +211,55 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
     uint32_t yiaddr_h = 0;
     auto mac = get_mac_address(buffer);
     if (mac.empty()) return;
-    
+
     // --- DHCPDISCOVER ---
     if (dhcp_message_type == 1) {
-        std::lock_guard<std::recursive_mutex> lock(mtx_);
-        yiaddr_h = find_available_ip_locked(mac);
+        yiaddr_h = find_available_ip(mac);
         if (yiaddr_h == 0) {
             LOG_ERROR("No available IP addresses to offer.");
             return;
         }
-    // --- DHCPREQUEST ---
-    } else if (dhcp_message_type == 3) {
+        // --- DHCPREQUEST ---
+    }
+    else if (dhcp_message_type == 3) {
         uint32_t requested_ip_n = get_requested_ip(buffer);
         if (requested_ip_n != 0) { // Client requests a specific IP
-             yiaddr_h = ntohl(requested_ip_n);
-        } else { // Client is renewing, ciaddr should be used
-             yiaddr_h = ntohl(msg->ciaddr);
+            yiaddr_h = ntohl(requested_ip_n);
+        }
+        else { // Client is renewing, ciaddr should be used
+            yiaddr_h = ntohl(msg->ciaddr);
         }
 
-        std::lock_guard<std::recursive_mutex> lock(mtx_);
-        // 使用 find_available_ip_locked 来统一处理，确保锁只获取一次
-        yiaddr_h = find_available_ip_locked(mac);
-    } else {
+        std::lock_guard<std::mutex> lock(mtx_);
+        auto it = leases_.find(mac);
+        if (it != leases_.end() && it->second.ip == yiaddr_h) {
+            // This is our client, renew the lease
+            it->second.expires = std::chrono::steady_clock::now() + lease_duration_;
+        }
+        else {
+            // Potentially a new client requesting an IP that might be in our pool
+            // Or a client with a very old lease. We re-assign it.
+            auto pool_it = std::find(ip_pool_.begin(), ip_pool_.end(), yiaddr_h);
+            if (pool_it != ip_pool_.end()) {
+                ip_pool_.erase(pool_it);
+            }
+            leases_[mac] = { yiaddr_h, std::chrono::steady_clock::now() + lease_duration_ };
+        }
+    }
+    else {
         return; // We don't handle other types for now
     }
-    
+
     if (yiaddr_h == 0) return;
 
-    DHCP_Message resp_msg = {0};
+    DHCP_Message resp_msg = { 0 };
     resp_msg.op = 2; // BOOTREPLY
     resp_msg.htype = msg->htype;
     resp_msg.hlen = msg->hlen;
     resp_msg.xid = msg->xid;
     resp_msg.flags = msg->flags;
     memcpy(resp_msg.chaddr, msg->chaddr, 16);
-    
+
     uint32_t yiaddr_n = htonl(yiaddr_h);
     resp_msg.yiaddr = yiaddr_n;
 
@@ -258,12 +268,12 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
     resp_msg.siaddr = server_ip_n;
 
     uint8_t* resp_options = resp_msg.options;
-    memcpy(resp_options, "\x63\x82\x53\x63", 4); 
+    memcpy(resp_options, "\x63\x82\x53\x63", 4);
     resp_options += 4;
 
     // Option 53: DHCP Message Type
-    *resp_options++ = 53; *resp_options++ = 1; 
-    *resp_options++ = (dhcp_message_type == 1) ? 2 /*OFFER*/ : 5 /*ACK*/; 
+    *resp_options++ = 53; *resp_options++ = 1;
+    *resp_options++ = (dhcp_message_type == 1) ? 2 /*OFFER*/ : 5 /*ACK*/;
 
     // Option 1: Subnet Mask
     *resp_options++ = 1; *resp_options++ = 4;
@@ -290,22 +300,22 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
     *resp_options++ = 26; *resp_options++ = 2;
     uint16_t mtu_n = htons(1300);
     memcpy(resp_options, &mtu_n, 2); resp_options += 2;
-    
+
     // Option 255: End
-    *resp_options++ = 255; 
+    *resp_options++ = 255;
 
     sockaddr_in broadcast_addr;
     broadcast_addr.sin_family = AF_INET;
     broadcast_addr.sin_port = htons(68);
     broadcast_addr.sin_addr.s_addr = INADDR_BROADCAST;
-    
+
     sendto(sock_, (char*)&resp_msg, sizeof(resp_msg), 0, (sockaddr*)&broadcast_addr, sizeof(broadcast_addr));
-    
+
     char cip_str[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &yiaddr_n, cip_str, INET_ADDRSTRLEN);
-    
-    LOG_INFO("DHCP %s: Assigned %s to %02x:%02x:%02x:%02x:%02x:%02x for %lld seconds", 
-        (dhcp_message_type == 1) ? "OFFER" : "ACK", 
+
+    LOG_INFO("DHCP %s: Assigned %s to %02x:%02x:%02x:%02x:%02x:%02x for %lld seconds",
+        (dhcp_message_type == 1) ? "OFFER" : "ACK",
         cip_str,
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
         lease_duration_.count());
@@ -340,14 +350,24 @@ DhcpResponse DhcpServer::handle_request_buffer(const char* buffer, int size) {
     if (mac.empty()) return resp;
 
     uint32_t yiaddr_h = 0;
-    std::lock_guard<std::recursive_mutex> lock(mtx_);
     if (dhcp_message_type == 1) { // DISCOVER
-        yiaddr_h = find_available_ip_locked(mac);
+        yiaddr_h = find_available_ip(mac);
         if (yiaddr_h == 0) return resp;
     }
     else if (dhcp_message_type == 3) { // REQUEST
-        // 使用 find_available_ip_locked 来统一处理，确保锁只获取一次
-        yiaddr_h = find_available_ip_locked(mac);
+        uint32_t requested_ip_n = get_requested_ip(buffer);
+        yiaddr_h = requested_ip_n != 0 ? ntohl(requested_ip_n) : ntohl(msg->ciaddr);
+
+        std::lock_guard<std::mutex> lock(mtx_);
+        auto it = leases_.find(mac);
+        if (it != leases_.end() && it->second.ip == yiaddr_h) {
+            it->second.expires = std::chrono::steady_clock::now() + lease_duration_;
+        }
+        else {
+            auto pool_it = std::find(ip_pool_.begin(), ip_pool_.end(), yiaddr_h);
+            if (pool_it != ip_pool_.end()) ip_pool_.erase(pool_it);
+            leases_[mac] = { yiaddr_h, std::chrono::steady_clock::now() + lease_duration_ };
+        }
     }
     else {
         return resp;

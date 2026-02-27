@@ -24,16 +24,16 @@ public:
     void stop();
 
     // Directly handle a request buffer (e.g. from WinDivert)
-    void handle_request(const char* buffer, int size, const sockaddr_in& client_addr);
     DhcpResponse handle_request_buffer(const char* buffer, int size);
+    void handle_request(const char* buffer, int size, const sockaddr_in& client_addr);
+    uint32_t find_available_ip(const std::vector<uint8_t>& mac);
+    uint32_t get_requested_ip(const char* buffer);
 
 private:
     void run();
     void init_pool();
     std::vector<uint8_t> get_mac_address(const char* buffer);
-    uint32_t find_available_ip(const std::vector<uint8_t>& mac);
-    uint32_t find_available_ip_locked(const std::vector<uint8_t>& mac); // 内部函数，调用者必须已持有锁
-    uint32_t get_requested_ip(const char* buffer);
+    uint32_t allocate_ip_locked(const std::vector<uint8_t>& mac);
 
     struct Lease {
         uint32_t ip;
@@ -46,7 +46,7 @@ private:
     bool running_;
     std::thread worker_thread_;
 
-    std::recursive_mutex mtx_;
+    std::mutex mtx_;
     std::vector<uint32_t> ip_pool_;
     std::map<std::vector<uint8_t>, Lease> leases_;
     std::chrono::seconds lease_duration_;
