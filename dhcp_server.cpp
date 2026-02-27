@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <vector>
 #include <algorithm>
+#include <mutex>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -326,7 +327,7 @@ DhcpResponse DhcpServer::handle_request_buffer(const char* buffer, int size) {
     uint8_t* options = msg->options;
     if (memcmp(options, "\x63\x82\x53\x63", 4) != 0) return resp;
 
-    // ½âÎö DHCP Message Type
+    // ï¿½ï¿½ï¿½ï¿½ DHCP Message Type
     options += 4;
     int option_len_rem = sizeof(msg->options) - 4;
     while (option_len_rem > 0 && *options != 255) {
@@ -367,7 +368,7 @@ DhcpResponse DhcpServer::handle_request_buffer(const char* buffer, int size) {
         return resp;
     }
 
-    // ¹¹ÔìÏìÓ¦°ü
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¦ï¿½ï¿½
     DHCP_Message resp_msg = { 0 };
     resp_msg.op = 2; // BOOTREPLY
     resp_msg.htype = msg->htype;

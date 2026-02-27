@@ -9,9 +9,9 @@
 #include <WinSock2.h>
 
 struct DhcpResponse {
-    std::vector<uint8_t> data; // ��Ӧ��
-    int length = 0;             // ʵ�ʳ���
-    uint32_t client_ip = 0;     // ��ѡ���ͻ��� IP
+    std::vector<uint8_t> data; // ��Ӧ��
+    int length = 0;             // ʵ�ʳ���
+    uint32_t client_ip = 0;     // ��ѡ���ͻ��� IP
 };
 
 class DhcpServer {
@@ -44,8 +44,8 @@ private:
     SOCKET sock_;
     bool running_;
     std::thread worker_thread_;
-    
-    std::mutex mtx_;
+
+    std::recursive_mutex mtx_;  // 使用可重入锁，避免同一线程内重复加锁导致死锁
     std::vector<uint32_t> ip_pool_;
     std::map<std::vector<uint8_t>, Lease> leases_;
     std::chrono::seconds lease_duration_;
