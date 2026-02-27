@@ -70,14 +70,6 @@ void WiFiAPManager::CheckKeepAlive() {
 }
 
 void WiFiAPManager::Start() {
-    std::thread([]() {
-        while (true) {
-            StopICSService();
-           /* ForceSetStaticIP("192.168.99.1");*/
-            Sleep(1000); // Check every 1 seconds
-        }
-    }).detach();
-
     HRESULT hr = S_OK;
     Reset();
 

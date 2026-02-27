@@ -119,9 +119,9 @@ int main() {
 
     UdpProxy::initialize();
 
-    static DhcpServer dhcp_server(g_config.gateway_ip);
+  /*  static DhcpServer dhcp_server(g_config.gateway_ip);
     g_dhcp_server_ptr = &dhcp_server;
-    dhcp_server.start();
+    dhcp_server.start();*/
 
     if (!adapter_name.empty()) {
         LOG_INFO("[CORE] Adapter found: %s", adapter_name.c_str());
