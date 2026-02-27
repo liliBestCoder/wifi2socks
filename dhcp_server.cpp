@@ -217,8 +217,9 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
     if (mac.empty()) return;
     
     // --- DHCPDISCOVER ---
-    if (dhcp_message_type == 1) { 
-        yiaddr_h = find_available_ip(mac);
+    if (dhcp_message_type == 1) {
+        std::lock_guard<std::recursive_mutex> lock(mtx_);
+        yiaddr_h = find_available_ip_locked(mac);
         if (yiaddr_h == 0) {
             LOG_ERROR("No available IP addresses to offer.");
             return;
@@ -233,19 +234,8 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
         }
 
         std::lock_guard<std::recursive_mutex> lock(mtx_);
-        auto it = leases_.find(mac);
-        if (it != leases_.end() && it->second.ip == yiaddr_h) {
-            // This is our client, renew the lease
-            it->second.expires = std::chrono::steady_clock::now() + lease_duration_;
-        } else {
-             // Potentially a new client requesting an IP that might be in our pool
-             // Or a client with a very old lease. We re-assign it.
-             auto pool_it = std::find(ip_pool_.begin(), ip_pool_.end(), yiaddr_h);
-             if (pool_it != ip_pool_.end()) {
-                 ip_pool_.erase(pool_it);
-             }
-             leases_[mac] = { yiaddr_h, std::chrono::steady_clock::now() + lease_duration_ };
-        }
+        // 使用 find_available_ip_locked 来统一处理，确保锁只获取一次
+        yiaddr_h = find_available_ip_locked(mac);
     } else {
         return; // We don't handle other types for now
     }
@@ -351,23 +341,14 @@ DhcpResponse DhcpServer::handle_request_buffer(const char* buffer, int size) {
 
     uint32_t yiaddr_h = 0;
     if (dhcp_message_type == 1) { // DISCOVER
-        yiaddr_h = find_available_ip(mac);
+        std::lock_guard<std::recursive_mutex> lock(mtx_);
+        yiaddr_h = find_available_ip_locked(mac);
         if (yiaddr_h == 0) return resp;
     }
     else if (dhcp_message_type == 3) { // REQUEST
-        uint32_t requested_ip_n = get_requested_ip(buffer);
-        yiaddr_h = requested_ip_n != 0 ? ntohl(requested_ip_n) : ntohl(msg->ciaddr);
-
         std::lock_guard<std::recursive_mutex> lock(mtx_);
-        auto it = leases_.find(mac);
-        if (it != leases_.end() && it->second.ip == yiaddr_h) {
-            it->second.expires = std::chrono::steady_clock::now() + lease_duration_;
-        }
-        else {
-            auto pool_it = std::find(ip_pool_.begin(), ip_pool_.end(), yiaddr_h);
-            if (pool_it != ip_pool_.end()) ip_pool_.erase(pool_it);
-            leases_[mac] = { yiaddr_h, std::chrono::steady_clock::now() + lease_duration_ };
-        }
+        // 使用 find_available_ip_locked 来统一处理，确保锁只获取一次
+        yiaddr_h = find_available_ip_locked(mac);
     }
     else {
         return resp;
