@@ -152,8 +152,8 @@ uint32_t DhcpServer::get_requested_ip(const char* buffer) {
     return 0;
 }
 
-uint32_t DhcpServer::find_available_ip(const std::vector<uint8_t>& mac) {
-    std::lock_guard<std::recursive_mutex> lock(mtx_);
+// 内部实现，调用者必须已经持有 mtx_ 锁
+uint32_t DhcpServer::find_available_ip_locked(const std::vector<uint8_t>& mac) {
     auto now = std::chrono::steady_clock::now();
 
     // 1. Check if this MAC already has a lease
@@ -182,6 +182,11 @@ uint32_t DhcpServer::find_available_ip(const std::vector<uint8_t>& mac) {
     }
 
     return 0; // No IP available
+}
+
+uint32_t DhcpServer::find_available_ip(const std::vector<uint8_t>& mac) {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    return find_available_ip_locked(mac);
 }
 
 
