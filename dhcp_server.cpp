@@ -153,6 +153,7 @@ uint32_t DhcpServer::get_requested_ip(const char* buffer) {
 }
 
 uint32_t DhcpServer::find_available_ip(const std::vector<uint8_t>& mac) {
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
     auto now = std::chrono::steady_clock::now();
 
     // 1. Check if this MAC already has a lease
@@ -226,6 +227,7 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
              yiaddr_h = ntohl(msg->ciaddr);
         }
 
+        std::lock_guard<std::recursive_mutex> lock(mtx_);
         auto it = leases_.find(mac);
         if (it != leases_.end() && it->second.ip == yiaddr_h) {
             // This is our client, renew the lease
@@ -351,6 +353,7 @@ DhcpResponse DhcpServer::handle_request_buffer(const char* buffer, int size) {
         uint32_t requested_ip_n = get_requested_ip(buffer);
         yiaddr_h = requested_ip_n != 0 ? ntohl(requested_ip_n) : ntohl(msg->ciaddr);
 
+        std::lock_guard<std::recursive_mutex> lock(mtx_);
         auto it = leases_.find(mac);
         if (it != leases_.end() && it->second.ip == yiaddr_h) {
             it->second.expires = std::chrono::steady_clock::now() + lease_duration_;

@@ -45,6 +45,7 @@ private:
     bool running_;
     std::thread worker_thread_;
 
+    std::recursive_mutex mtx_;
     std::vector<uint32_t> ip_pool_;
     std::map<std::vector<uint8_t>, Lease> leases_;
     std::chrono::seconds lease_duration_;
