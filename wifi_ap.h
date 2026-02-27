@@ -58,10 +58,12 @@ public:
     void SetPassphrase(const std::wstring& passphrase);
     std::wstring GetPassphrase() const { return _passphrase; }
 
+
+    void SetIP(const std::string& targetIp);
+
     void RegisterListener(IWiFiAPListener* listener) { _listener = listener; }
 
     void Start();
-    void Stop();
     void CheckKeepAlive();
 
 private:

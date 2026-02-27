@@ -69,6 +69,10 @@ void WiFiAPManager::CheckKeepAlive() {
     }
 }
 
+void WiFiAPManager::SetIP(const std::string& targetIp) {
+    ForceSetStaticIP(targetIp);
+}
+
 void WiFiAPManager::Start() {
     HRESULT hr = S_OK;
     Reset();
