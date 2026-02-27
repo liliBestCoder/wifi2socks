@@ -45,7 +45,6 @@ private:
     bool running_;
     std::thread worker_thread_;
 
-    std::recursive_mutex mtx_;  // 使用可重入锁，避免同一线程内重复加锁导致死锁
     std::vector<uint32_t> ip_pool_;
     std::map<std::vector<uint8_t>, Lease> leases_;
     std::chrono::seconds lease_duration_;
