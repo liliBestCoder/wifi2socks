@@ -340,8 +340,8 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
                 LOG_INFO("[TCP] Hooking HTTP request to gateway. Returning 204.");
                 const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
                 send(m_client_socket, response, (int)strlen(response), 0);
+                shutdown(m_client_socket, SD_SEND);
                 buffer->state = IoBuffer::IO_DROPPED;
-                close_session_internal();
                 return;
             }
 
@@ -350,8 +350,8 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
                 LOG_INFO("[TCP] Hooking /generate_204 request.");
                 const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
                 send(m_client_socket, response, (int)strlen(response), 0);
+                shutdown(m_client_socket, SD_SEND);
                 buffer->state = IoBuffer::IO_DROPPED;
-                close_session_internal();
                 return;
             }
 

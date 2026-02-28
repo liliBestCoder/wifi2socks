@@ -559,48 +559,26 @@ void WinPkFilterDriver::run() {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
                                     USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
                                     if (sp == 67 || dp == 67 || sp == 68 || dp == 68) { // DHCP Fast Path
-
-                                        PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
-                                        int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
-                                        PUDP_HEADER udp = (PUDP_HEADER)((uint8_t*)ip + ip_hdr_len);
                                         const char* dhcp_payload = (const char*)udp + sizeof(UDP_HEADER);
-                                        int dhcp_size = ntohs(udp->Len) - sizeof(UDP_HEADER);
-
                                         DhcpResponse dhcp_r = g_dhcp_server_ptr->handle_request_buffer(dhcp_payload, b->m_Length);
 
-                                        std::lock_guard<std::mutex> lock(m_results_queue.mtx);
                                         if (dhcp_r.length > 0 && !dhcp_r.data.empty()) {
-                                            PUDP_HEADER udp = (PUDP_HEADER)((uint8_t*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                            uint8_t* client_mac = ((uint8_t*)ip) - 8; // 源 MAC 在以太网帧偏移 6 处，即 ip(偏移14) - 8
-
+                                            uint8_t* client_mac = ((uint8_t*)ip) - 8;
                                             this->send_dhcp_response(client_mac, m_gateway_ip, dhcp_r, m_adapter_mac);
                                         }
                                         PacketPool::instance().release(b);
-                                        m_read_request->EthPacket[i].Buffer = nullptr; // 释放
+                                        m_read_request->EthPacket[i].Buffer = nullptr;
                                         handled = true;
                                     }
                                     else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) { // Drop Discovery
                                         PacketPool::instance().release(b);
-                                        m_read_request->EthPacket[i].Buffer = nullptr; // 释放
-                                        handled = true;
-                                    }
-                                }
-                                else if (!handled && ip->Proto == IPPROTO_TCP && b->m_Length >= 14 + ip_hdr_len + sizeof(TCP_HEADER)) {
-                                    PTCP_HEADER udp = (PTCP_HEADER)((char*)ip + ip_hdr_len);
-                                    USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
-                                    if (sp == 80 || dp == 80) {
-                                        PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
-                                        std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-                                        m_results_queue.packets.push_back({ b, dest });
-                                        m_read_request->EthPacket[i].Buffer = nullptr; // Transfer ownership
-                                        SetEvent(m_results_event);
+                                        m_read_request->EthPacket[i].Buffer = nullptr;
                                         handled = true;
                                     }
                                 }
                             }
                         }
-
-                    // --- Slow Path (if not handled by fast path) ---
+                                                    // --- Slow Path (if not handled by fast path) ---
                     if (!handled) {
                         groups[get_target_worker((char*)b->m_IBuffer, b->m_Length, b->m_dwDeviceFlags, m_num_workers)].push_back({ b });
                         m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred to worker

@@ -71,8 +71,8 @@ std::optional<OriginalDestination> NatManager::get_mapping(uint64_t key) {
         if (now - it_tcp->second.last_access > 1000) {
             lock.unlock();
             std::unique_lock<std::shared_mutex> ulock(shard.mtx);
-            auto it_retry = shard.udp_map.find(key);
-            if (it_retry != shard.udp_map.end()) {
+            auto it_retry = shard.tcp_map.find(key);
+            if (it_retry != shard.tcp_map.end()) {
                 it_retry->second.last_access = now;
                 return it_retry->second.dest;
             }

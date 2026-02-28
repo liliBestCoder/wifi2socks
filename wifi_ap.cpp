@@ -51,21 +51,28 @@ void WiFiAPManager::SetPassphrase(const std::wstring& passphrase) { _passphrase 
 
 void WiFiAPManager::CheckKeepAlive() {
     std::vector<std::wstring> to_remove;
-    for (auto& pair : _connectedDevices) {
-        ComPtr<EndpointPairCollection> endpointPairs;
-        HRESULT hr = pair.second->GetConnectionEndpointPairs(endpointPairs.GetAddressOf());
-        if (FAILED(hr)) {
-            if (hr == HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED) || hr == RPC_E_DISCONNECTED) {
-                to_remove.push_back(pair.first);
+    {
+        std::lock_guard<std::mutex> lock(_devicesMutex);
+        for (auto& pair : _connectedDevices) {
+            ComPtr<EndpointPairCollection> endpointPairs;
+            HRESULT hr = pair.second->GetConnectionEndpointPairs(endpointPairs.GetAddressOf());
+            if (FAILED(hr)) {
+                if (hr == HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED) || hr == RPC_E_DISCONNECTED) {
+                    to_remove.push_back(pair.first);
+                }
             }
         }
     }
+    
     for (const auto& id : to_remove) {
-        auto it = _connectedDevices.find(id);
-        if (it != _connectedDevices.end()) {
-            _connectedDevices.erase(it);
-            if (_listener) _listener->OnDeviceDisconnected(id);
+        {
+            std::lock_guard<std::mutex> lock(_devicesMutex);
+            auto it = _connectedDevices.find(id);
+            if (it != _connectedDevices.end()) {
+                _connectedDevices.erase(it);
+            }
         }
+        if (_listener) _listener->OnDeviceDisconnected(id);
     }
 }
 
@@ -140,7 +147,11 @@ void WiFiAPManager::StartListener() {
                 pHandler->GetResults(wfdDevice.GetAddressOf());
                 HString dId;
                 wfdDevice->get_DeviceId(dId.GetAddressOf());
-                _connectedDevices[dId.GetRawBuffer(nullptr)] = wfdDevice;
+                
+                {
+                    std::lock_guard<std::mutex> lock(_devicesMutex);
+                    _connectedDevices[dId.GetRawBuffer(nullptr)] = wfdDevice;
+                }
 
                 if (_listener) _listener->OnDeviceConnected(L"Connected Device");
                
@@ -154,7 +165,11 @@ void WiFiAPManager::StartListener() {
 void WiFiAPManager::Reset() {
     if (_connectionListener) _connectionListener->remove_ConnectionRequested(_connectionRequestedToken);
     if (_publisher) _publisher->remove_StatusChanged(_statusChangedToken);
-    _connectedDevices.clear();
+    
+    {
+        std::lock_guard<std::mutex> lock(_devicesMutex);
+        _connectedDevices.clear();
+    }
     _publisher.Reset();
     _connectionListener.Reset();
 }

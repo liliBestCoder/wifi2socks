@@ -14,6 +14,7 @@
 #include <map>
 #include <exception>
 #include <sstream>
+#include <mutex>
 
 #pragma comment(lib, "runtimeobject.lib")
 
@@ -77,6 +78,7 @@ private:
     Microsoft::WRL::ComPtr<ABI::Windows::Devices::WiFiDirect::IWiFiDirectLegacySettings> _legacySettings;
     Microsoft::WRL::ComPtr<ABI::Windows::Devices::WiFiDirect::IWiFiDirectConnectionListener> _connectionListener;
 
+    std::mutex _devicesMutex;
     std::map<std::wstring, Microsoft::WRL::ComPtr<ABI::Windows::Devices::WiFiDirect::IWiFiDirectDevice>> _connectedDevices;
     std::map<std::wstring, EventRegistrationToken> _connectedDeviceStatusChangedTokens;
 
