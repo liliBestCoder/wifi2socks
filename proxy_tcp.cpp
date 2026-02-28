@@ -332,29 +332,6 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
             const auto* combined_data = m_initial_buffer.data();
             const auto combined_size = m_initial_buffer.size();
 
-            // Hook Gateway 80
-            in_addr gateway_addr_struct{};
-            if (inet_pton(AF_INET, g_config.gateway_ip.c_str(), &gateway_addr_struct) == 1 &&
-                m_original_dest.ip == gateway_addr_struct.s_addr && ntohs(m_original_dest.port) == 80) {
-
-                LOG_INFO("[TCP] Hooking HTTP request to gateway. Returning 204.");
-                const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
-                send(m_client_socket, response, (int)strlen(response), 0);
-                shutdown(m_client_socket, SD_SEND);
-                buffer->state = IoBuffer::IO_DROPPED;
-                return;
-            }
-
-            // Hook /generate_204
-            if (ntohs(m_original_dest.port) == 80 && is_generate_204_request(combined_data, combined_size)) {
-                LOG_INFO("[TCP] Hooking /generate_204 request.");
-                const char* response = "HTTP/1.1 204 No Content\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
-                send(m_client_socket, response, (int)strlen(response), 0);
-                shutdown(m_client_socket, SD_SEND);
-                buffer->state = IoBuffer::IO_DROPPED;
-                return;
-            }
-
             std::string sni = parse_tls_sni(combined_data, combined_size);
             bool proceed = false;
             if (!sni.empty()) {
@@ -639,6 +616,13 @@ void ProxyTCP::close_session() {
 
 void ProxyTCP::close_session_internal() {
     if (m_state == CLOSING) return;
+    
+    unsigned char* ip_bytes = (unsigned char*)&m_original_dest.ip;
+    LOG_DEBUG("[TCP] Closing session for %s (IP: %d.%d.%d.%d:%d), state: %d", 
+        m_detected_domain.empty() ? "(unknown)" : m_detected_domain.c_str(),
+        ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3], ntohs(m_original_dest.port),
+        (int)m_state.load());
+
     m_state = CLOSING;
 
     if (m_client_socket != INVALID_SOCKET) {

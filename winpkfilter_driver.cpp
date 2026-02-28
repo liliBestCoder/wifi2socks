@@ -319,6 +319,8 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
     std::list<QueuedPacket> local_queue;
     std::vector<Packet> packets_to_send; packets_to_send.reserve(BATCH_SIZE);
     std::vector<Packet> packets_to_mstcp; packets_to_mstcp.reserve(BATCH_SIZE);
+    uint64_t processed_count = 0;
+
     while (m_running) {
         {
             std::unique_lock<std::mutex> lock(m_worker_queues[worker_id]->mtx);
@@ -331,6 +333,10 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
         packets_to_send.clear(); packets_to_mstcp.clear();
 
         for (auto& p_in : local_queue) {
+            processed_count++;
+            if (processed_count % 10000 == 0) {
+                LOG_INFO("[Worker %u] Heartbeat - Processed %llu packets", worker_id, processed_count);
+            }
             Packet p{ RawPacketPtr(p_in.buffer), (p_in.buffer->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) };
             unsigned char* buffer = p.data->m_IBuffer;
             size_t length = p.data->m_Length;
@@ -495,7 +501,10 @@ void WinPkFilterDriver::run() {
                                     PARP_HEADER arp = (PARP_HEADER)(buffer + 14);
                                     // If it's an ARP request for our gateway IP, reply directly
                                     if (ntohs(arp->OpCode) == 1 && arp->DstIp == m_gateway_ip) {
-                                        LOG_INFO("[FastPath] Replying directly to ARP request for gateway");
+                                        char client_ip_str[INET_ADDRSTRLEN];
+                                        inet_ntop(AF_INET, &arp->SrcIp, client_ip_str, INET_ADDRSTRLEN);
+                                        LOG_INFO("[FastPath] Replying directly to ARP request for gateway from %s (%02x:%02x:%02x:%02x:%02x:%02x)",
+                                            client_ip_str, arp->SrcMac[0], arp->SrcMac[1], arp->SrcMac[2], arp->SrcMac[3], arp->SrcMac[4], arp->SrcMac[5]);
 
                                         // Swap Ethernet MACs
                                         memcpy(buffer, buffer + 6, 6);
@@ -514,7 +523,7 @@ void WinPkFilterDriver::run() {
                                         } else {
                                             this->send_to_adapter((const char*)buffer, b->m_Length);
                                         }
-                                        LOG_DEBUG("[FastPath] ARP reply injected successfully");
+                                        LOG_DEBUG("[FastPath] ARP reply injected successfully to %s", client_ip_str);
                                         
                                         PacketPool::instance().release(b);
                                         m_read_request->EthPacket[i].Buffer = nullptr;
@@ -730,7 +739,11 @@ bool WinPkFilterDriver::send_to_adapter(const char* packet, size_t length) {
     size_t clen = (length > MAX_ETHER_FRAME) ? MAX_ETHER_FRAME : length;
     memcpy(m_send_buffer->m_IBuffer, packet, clen); m_send_buffer->m_Length = (ULONG)clen; m_send_buffer->m_dwDeviceFlags = PACKET_FLAG_ON_SEND;
     ETH_REQUEST req = { m_adapter_handle, { m_send_buffer } };
-    return m_ndis_api.SendPacketToAdapter(&req) != FALSE;
+    if (m_ndis_api.SendPacketToAdapter(&req) == FALSE) {
+        LOG_WARN("[Driver] SendPacketToAdapter failed. Error: %d", WSAGetLastError());
+        return false;
+    }
+    return true;
 }
 
 bool WinPkFilterDriver::send_to_mstcp(const char* packet, size_t length) {
@@ -738,7 +751,11 @@ bool WinPkFilterDriver::send_to_mstcp(const char* packet, size_t length) {
     size_t clen = (length > MAX_ETHER_FRAME) ? MAX_ETHER_FRAME : length;
     memcpy(m_send_buffer->m_IBuffer, packet, clen); m_send_buffer->m_Length = (ULONG)clen; m_send_buffer->m_dwDeviceFlags = PACKET_FLAG_ON_RECEIVE;
     ETH_REQUEST req = { m_adapter_handle, { m_send_buffer } };
-    return m_ndis_api.SendPacketToMstcp(&req) != FALSE;
+    if (m_ndis_api.SendPacketToMstcp(&req) == FALSE) {
+        LOG_WARN("[Driver] SendPacketToMstcp failed. Error: %d", WSAGetLastError());
+        return false;
+    }
+    return true;
 }
 
 void  WinPkFilterDriver::send_dhcp_response(const uint8_t* client_mac, const uint32_t src_ip, const DhcpResponse& dhcp_r, const uint8_t* m_adapter_mac) {
