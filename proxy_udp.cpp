@@ -229,6 +229,8 @@ public:
 
                 RouteAction rule = RuleManager::instance().match_domain(domain);
                 bool is_cn = GeoChecker::instance().is_cn_domain(domain);
+                
+                // If it's a foreign domain, use DNS-over-TCP (DoT)
                 if ((rule == RouteAction::PROXY) || (rule == RouteAction::PASS && !is_cn)) {
                     auto on_dns_response = [listener_socket, caddr = *client_addr, domain](const char* dns_resp, int resp_len) {
                         if (resp_len > 0) {
@@ -248,15 +250,28 @@ public:
             }
         }
 
-        // --- 2. Flow Matching & Forwarding ---
+        // --- 2. QUIC Blocking (Port 443) ---
+        // For foreign QUIC traffic, we DROP the packets to force apps to fallback to TCP (HTTPS).
+        // Domestic QUIC is allowed to go DIRECT for speed.
+        if (dport == 443) {
+            uint32_t ip_h = ntohl(dest->ip);
+            if (!GeoChecker::instance().is_cn_ip(ip_h)) {
+                // Foreign QUIC -> DROP
+                return; 
+            }
+        }
+
+        // --- 3. Flow Matching & Forwarding (Direct Relay) ---
         FlowKey flow = { client_addr->sin_addr.s_addr, client_addr->sin_port, dest->ip, dest->port };
         
         sockaddr_in target_addr = {};
         target_addr.sin_family = AF_INET;
         if (is_dns) {
+            // Domestic DNS query -> Relay to 223.5.5.5
             inet_pton(AF_INET, g_config.direct_dns_server.c_str(), &target_addr.sin_addr);
             target_addr.sin_port = htons(53);
         } else {
+            // General UDP or Domestic QUIC -> Relay to actual destination
             target_addr.sin_addr.s_addr = dest->ip;
             target_addr.sin_port = dest->port;
         }
