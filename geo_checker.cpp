@@ -114,6 +114,7 @@ uint16_t GeoChecker::get_or_create_geoip_code(const std::string& code) {
     geoip_codes_.push_back(upper_code);
     geoip_code_cache_[upper_code] = idx;
     if (upper_code == "CN") cn_ip_idx_ = idx;
+    if (upper_code == "TENCENT") tencent_ip_idx_ = idx;
     return idx;
 }
 
@@ -206,7 +207,7 @@ bool is_common_cn_range(uint32_t ip) {
     uint8_t first = (uint8_t)(ip >> 24);
     uint8_t second = (uint8_t)(ip >> 16);
     // 扩展国内常用 IP 段，确保测速和常用服务不被误代理
-    // 包含联通、移动、电信、教育网及腾讯/阿里等云服务商段
+    // 包含联通、移动、电信、教育网及云服务商通用段
     if (first == 1  || first == 14  || first == 27  || first == 36  || first == 39  || 
         first == 42  || first == 43  || first == 45  || first == 47  || first == 49  || 
         first == 58  || first == 59  || first == 60  || first == 61  || first == 101 || 
@@ -216,13 +217,39 @@ bool is_common_cn_range(uint32_t ip) {
         first == 210 || first == 211 || (first >= 218 && first <= 223) || first == 223) {
         return true;
     }
-
-    // 腾讯专项 IP 段 (部分常用)
-    if (first == 113 && (second >= 96 && second <= 103)) return true; // 113.96.0.0/13
-    if (first == 183 && (second >= 0 && second <= 63)) return true;   // 183.0.0.0/10
-    if (first == 125 && (second >= 32 && second <= 63)) return true;  // 125.32.0.0/11
-    if (first == 157 && second == 255) return true;
     
+    return false;
+}
+
+bool GeoChecker::is_tencent_ip(uint32_t ip) {
+    uint8_t first = (uint8_t)(ip >> 24);
+    uint8_t second = (uint8_t)(ip >> 16);
+
+    // 1. 先走硬编码快查（极致性能）
+    // 腾讯核心网段 (QQ/微信/图片/视频加速)
+    if (first == 113 && (second >= 96 && second <= 111)) return true;
+    if (first == 183 && (second >= 0 && second <= 63)) return true;
+    if (first == 125 && (second >= 32 && second <= 63)) return true;
+    if (first == 14 && (second == 17 || second == 116 || second == 215)) return true;
+    if (first == 119 && (second == 147 || second == 28 || second == 29)) return true;
+    if (first == 58 && (second == 250 || second == 251 || second == 60 || second == 61)) return true;
+    if (first == 111 && second == 30) return true;
+    if (first == 157 && second == 255) return true;
+    if (first == 162 && second == 62) return true;
+
+    // 2. 如果硬编码没命中，再查数据库（如果数据库里有 TENCENT 标签）
+    if (m_ready && tencent_ip_idx_ != 0xFFFF) {
+        std::shared_lock<std::shared_mutex> lock(m_mtx);
+        auto it = std::lower_bound(ip_ranges_.begin(), ip_ranges_.end(), ip,
+            [](const GeoIPRange& r, uint32_t val) {
+                return r.end_ip < val;
+            });
+
+        if (it != ip_ranges_.end() && ip >= it->start_ip && ip <= it->end_ip) {
+            return it->code_index == tencent_ip_idx_;
+        }
+    }
+
     return false;
 }
 
@@ -240,6 +267,9 @@ bool GeoChecker::is_private_ip(const uint32_t ip_h) {
 bool GeoChecker::is_cn_ip(uint32_t ip_host) {
     if (is_private_ip(ip_host)) return true;
     
+    // 快速判断：如果是腾讯 IP，直接认为是 CN (直连)
+    if (is_tencent_ip(ip_host)) return true;
+
     // 如果数据库准备好了且有 CN 索引，先查数据库
     if (m_ready && cn_ip_idx_ != 0xFFFF) {
         std::shared_lock<std::shared_mutex> lock(m_mtx);

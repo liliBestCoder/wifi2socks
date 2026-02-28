@@ -55,6 +55,8 @@ public:
     bool is_google_domain(const std::string& domain);
     bool is_tencent_domain(const std::string& domain);
 
+    bool is_tencent_ip(const uint32_t ip_host);
+
     static bool is_private_ip(const uint32_t ip_host);
 
 private:
@@ -99,6 +101,7 @@ private:
     std::set<uint16_t> tencent_site_idxs_;
     
     uint16_t cn_ip_idx_ = 0xFFFF;
+    uint16_t tencent_ip_idx_ = 0xFFFF;
 
     static const uint32_t FLAG_CN = 0x10000;
     static const uint32_t FLAG_GOOGLE = 0x20000;
