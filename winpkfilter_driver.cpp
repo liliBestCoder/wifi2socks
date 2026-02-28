@@ -375,7 +375,9 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                             else {
                                 PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                 uint16_t old_dst_port = udp->DstPort;
-                                od.port = udp->DstPort; NatManager::instance().create_or_update_udp_mapping(key, od, worker_id);
+                                od.port = udp->DstPort; 
+                                UdpKey4 key4 { ip->SrcAddr, udp->SrcPort, ip->DstAddr, udp->DstPort };
+                                NatManager::instance().create_or_update_udp_mapping(key4, od, worker_id);
                                 ip->DstAddr = m_gateway_ip;
                                 udp->DstPort = htons(NAT_TARGET_PORT);
                                 incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
@@ -387,7 +389,16 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                         else if (p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP)) {
                             USHORT sport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort) : ntohs(((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
                             if (sport == NAT_TARGET_PORT) {
-                                auto od = NatManager::instance().get_mapping(NatManager::make_key(ip->DstAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort : ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort));
+                                std::optional<OriginalDestination> od;
+                                if (ip->Proto == IPPROTO_TCP) {
+                                    PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                    od = NatManager::instance().get_mapping(NatManager::make_key(ip->DstAddr, tcp->DstPort));
+                                } else {
+                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
+                                    UdpKey4 key4 { ip->DstAddr, udp->DstPort, ip->SrcAddr, udp->SrcPort };
+                                    od = NatManager::instance().get_udp_mapping(key4);
+                                }
+
                                 if (od) {
                                     // Mapping found, packet is modified. Use incremental checksum update.
                                     uint32_t old_src_ip = ip->SrcAddr;

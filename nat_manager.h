@@ -29,6 +29,28 @@ struct OriginalDestination {
         : ip(i), port(p), original_client_ip(oc), worker_id(w) {}
 };
 
+struct UdpKey4 {
+    uint32_t src_ip;
+    uint16_t src_port;
+    uint32_t dst_ip;
+    uint16_t dst_port;
+
+    bool operator==(const UdpKey4& other) const {
+        return src_ip == other.src_ip && src_port == other.src_port &&
+               dst_ip == other.dst_ip && dst_port == other.dst_port;
+    }
+};
+
+struct UdpKey4Hash {
+    std::size_t operator()(const UdpKey4& k) const {
+        std::size_t h1 = std::hash<uint32_t>{}(k.src_ip);
+        std::size_t h2 = std::hash<uint16_t>{}(k.src_port);
+        std::size_t h3 = std::hash<uint32_t>{}(k.dst_ip);
+        std::size_t h4 = std::hash<uint16_t>{}(k.dst_port);
+        return h1 ^ (h2 << 1) ^ (h3 << 2) ^ (h4 << 3);
+    }
+};
+
 class NatManager {
 public:
     static NatManager& instance();
@@ -39,9 +61,10 @@ public:
     }
 
     void create_tcp_mapping(uint64_t key, const OriginalDestination& dest, uint32_t worker_id);
-    void create_or_update_udp_mapping(uint64_t key, const OriginalDestination& dest, uint32_t worker_id);
+    void create_or_update_udp_mapping(const UdpKey4& key, const OriginalDestination& dest, uint32_t worker_id);
     
     std::optional<OriginalDestination> get_mapping(uint64_t key);
+    std::optional<OriginalDestination> get_udp_mapping(const UdpKey4& key);
     void remove_tcp_mapping(uint64_t key);
 
 private:
@@ -57,7 +80,7 @@ private:
     struct Shard {
         std::shared_mutex mtx;
         std::unordered_map<uint64_t, MappingEntry> tcp_map;
-        std::unordered_map<uint64_t, MappingEntry> udp_map;
+        std::unordered_map<UdpKey4, MappingEntry, UdpKey4Hash> udp_map;
         uint64_t last_cleanup_time = 0;
     };
 
