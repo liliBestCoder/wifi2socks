@@ -121,8 +121,11 @@ std::optional<UdpKey4> NatManager::get_udp_key_by_virtual_port(uint16_t vport) {
             lock.unlock();
             std::unique_lock<std::shared_mutex> ulock(shard_v.mtx);
             auto it_retry = shard_v.vport_to_udp.find(vport);
-            if (it_retry != shard_v.vport_to_udp.end()) it_retry->second.last_access = now;
-            return it_retry->second.key;
+            if (it_retry != shard_v.vport_to_udp.end()) {
+                it_retry->second.last_access = now;
+                return it_retry->second.key;
+            }
+            return std::nullopt;
         }
         return it->second.key;
     }
@@ -180,7 +183,7 @@ std::optional<OriginalDestination> NatManager::get_mapping(uint64_t key) {
             }
             return std::nullopt;
         }
-        return it->second.dest;
+        return it_tcp->second.dest;
     }
 
     std::optional<OriginalDestination> latest_udp;
