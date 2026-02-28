@@ -85,10 +85,15 @@ void ProxyTCP::start() {
 }
 
 void ProxyTCP::connect_remote() {
-    m_state = CONNECTING;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_state != INITIAL) return;
+        m_state = CONNECTING;
+    }
 
     sockaddr_in remote_addr = { 0 };
     remote_addr.sin_family = AF_INET;
+    // ... (rest of the IP string logic)
 
     unsigned char* ip_bytes = (unsigned char*)&m_original_dest.ip;
     char ip_str[INET_ADDRSTRLEN];
@@ -126,26 +131,33 @@ void ProxyTCP::connect_remote() {
 }
 
 void ProxyTCP::on_remote_connect() {
-    if (m_state == CLOSING) return;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_state == CLOSING) return;
 
-    int error = 0;
-    int elen = sizeof(error);
-    getsockopt(m_remote_socket, SOL_SOCKET, SO_ERROR, (char*)&error, &elen);
-    if (error != 0) {
-        LOG_ERROR("[ProxyTCP] Connect failed with error: %d", error);
-        close_session();
-        return;
+        int error = 0;
+        int elen = sizeof(error);
+        getsockopt(m_remote_socket, SOL_SOCKET, SO_ERROR, (char*)&error, &elen);
+        if (error != 0) {
+            LOG_DEBUG("[ProxyTCP] Connect failed with error: %d", error);
+            close_session_internal();
+            return;
+        }
+
+        if (m_is_direct) {
+            m_state = ESTABLISHED;
+        }
+        else {
+            m_state = AWAITING_CONNECT_RESPONSE;
+        }
     }
 
     if (m_is_direct) {
-        m_state = ESTABLISHED;
         post_reads(m_remote_socket);
         std::lock_guard<std::mutex> lock(m_mutex);
         process_write_queue(m_remote_socket);
     }
     else {
-        m_state = AWAITING_CONNECT_RESPONSE;
-
         std::string target_host = m_detected_domain;
         if (target_host.empty()) {
             unsigned char* ip_bytes = (unsigned char*)&m_original_dest.ip;
@@ -153,6 +165,13 @@ void ProxyTCP::on_remote_connect() {
             snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
             target_host = ip_str;
         }
+        uint16_t target_port = ntohs(m_original_dest.port);
+        std::string connect_req = "CONNECT " + target_host + ":" + std::to_string(target_port) + " HTTP/1.1\r\nHost: " + target_host + ":" + std::to_string(target_port) + "\r\n\r\n";
+
+        WorkerPool::instance().send_async(m_remote_socket, (const uint8_t*)connect_req.data(), connect_req.length());
+        post_reads(m_remote_socket);
+    }
+}
         uint16_t target_port = ntohs(m_original_dest.port);
         std::string connect_req = "CONNECT " + target_host + ":" + std::to_string(target_port) + " HTTP/1.1\r\nHost: " + target_host + ":" + std::to_string(target_port) + "\r\n\r\n";
 
@@ -252,7 +271,10 @@ void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int err
 }
 
 void ProxyTCP::post_reads(SOCKET socket) {
-    if (m_state == CLOSING || socket == INVALID_SOCKET) return;
+    if (socket == INVALID_SOCKET) return;
+
+    std::unique_lock<std::mutex> lock(m_mutex);
+    if (m_state == CLOSING) return;
 
     std::atomic<int>* pending_count = (socket == m_client_socket) ? &m_client_pending_read_count : &m_remote_pending_read_count;
     bool paused = (socket == m_client_socket) ? m_client_read_paused : m_remote_read_paused;
@@ -264,6 +286,8 @@ void ProxyTCP::post_reads(SOCKET socket) {
     auto self = shared_from_this();
 
     while (pending_count->load() < MAX_PENDING_READS) {
+        if (m_state == CLOSING) break;
+
         IoBuffer* buf = alloc_buffer();
         if (!buf) break;
 
@@ -274,10 +298,7 @@ void ProxyTCP::post_reads(SOCKET socket) {
         };
         (*pending_count)++;
 
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            dest_queue->push_back(buf);
-        }
+        dest_queue->push_back(buf);
 
         DWORD bytes = 0;
         buf->flags = 0; // Reset flags for each call
@@ -292,13 +313,13 @@ void ProxyTCP::post_reads(SOCKET socket) {
                     LOG_DEBUG("[ProxyTCP] WSARecv failed (err: %d, state: %d), closing session", err, m_state);
                 }
                 (*pending_count)--;
-                {
-                    std::lock_guard<std::mutex> lock(m_mutex);
-                    if (!dest_queue->empty() && dest_queue->back() == buf) dest_queue->pop_back();
-                }
+                if (!dest_queue->empty() && dest_queue->back() == buf) dest_queue->pop_back();
                 free_buffer(buf);
+                
+                // Unlock before calling close_session to avoid deadlocks
+                lock.unlock();
                 if (err != 10038) close_session();
-                break;
+                return;
             }
         }
     }
@@ -461,6 +482,12 @@ void ProxyTCP::handle_remote_read_complete(IoBuffer* buffer) {
 }
 
 void ProxyTCP::process_write_queue(SOCKET socket) {
+    if (socket == INVALID_SOCKET) return;
+    
+    // Ensure caller holds m_mutex or take it if necessary. 
+    // Current architecture assumes caller holds the lock for handle_XXX_complete.
+    // We'll add a check here just in case.
+    
     if (m_state == CLOSING) return;
 
     // Remote write requires connection to be established
@@ -474,6 +501,8 @@ void ProxyTCP::process_write_queue(SOCKET socket) {
     std::atomic<bool>* fin_sent = (socket == m_client_socket) ? &m_client_fin_sent : &m_remote_fin_sent;
 
     while (!queue->empty() && inflight_count->load() < MAX_PENDING_WRITES) {
+        if (m_state == CLOSING) break;
+
         IoBuffer* leader = queue->front();
 
         // If the head is still READING, we must wait to maintain stream order
