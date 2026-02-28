@@ -19,9 +19,10 @@ void NatManager::create_tcp_mapping(uint64_t key, const OriginalDestination& des
     OriginalDestination d = dest;
     d.worker_id = worker_id;
     
+    std::unique_lock<std::shared_mutex> lock(shard.mtx);
+    
     // Lazy cleanup logic
     if (now - shard.last_cleanup_time > 10000) { 
-        std::unique_lock<std::shared_mutex> lock(shard.mtx);
         // Cleanup TCP
         for (auto it = shard.tcp_map.begin(); it != shard.tcp_map.end();) {
             if (now - it->second.last_access > TCP_TIMEOUT_MS) {
@@ -38,12 +39,18 @@ void NatManager::create_tcp_mapping(uint64_t key, const OriginalDestination& des
                 ++it;
             }
         }
+        // Cleanup VPort
+        for (auto it = shard.vport_to_udp.begin(); it != shard.vport_to_udp.end();) {
+            if (now - it->second.last_access > UDP_TIMEOUT_MS) {
+                it = shard.vport_to_udp.erase(it);
+            } else {
+                ++it;
+            }
+        }
         shard.last_cleanup_time = now;
-        shard.tcp_map[key] = { d, now };
-    } else {
-        std::unique_lock<std::shared_mutex> lock(shard.mtx);
-        shard.tcp_map[key] = { d, now };
     }
+    
+    shard.tcp_map[key] = { d, now };
 }
 
 void NatManager::remove_tcp_mapping(uint64_t key) {
@@ -53,14 +60,73 @@ void NatManager::remove_tcp_mapping(uint64_t key) {
 }
 
 void NatManager::create_or_update_udp_mapping(const UdpKey4& key, const OriginalDestination& dest, uint32_t worker_id) {
-    // Distribute shards based on source IP and port for consistency with TCP if needed, 
-    // but here we use src_ip and src_port to pick shard.
     uint64_t shard_key = make_key(key.src_ip, key.src_port);
     auto& shard = m_shards[shard_key % NUM_SHARDS];
     std::unique_lock<std::shared_mutex> lock(shard.mtx);
+    
+    uint16_t vport = 0;
+    auto it = shard.udp_map.find(key);
+    if (it != shard.udp_map.end()) vport = it->second.vport;
+
     OriginalDestination d = dest;
     d.worker_id = worker_id;
-    shard.udp_map[key] = { d, GetTickCount64() };
+    shard.udp_map[key] = { d, GetTickCount64(), key, vport };
+}
+
+uint16_t NatManager::allocate_udp_virtual_port(const UdpKey4& key, const OriginalDestination& dest) {
+    uint64_t key64 = make_key(key.src_ip, key.src_port);
+    auto& shard_k = m_shards[key64 % NUM_SHARDS];
+    
+    {
+        std::shared_lock<std::shared_mutex> lock(shard_k.mtx);
+        auto it = shard_k.udp_map.find(key);
+        if (it != shard_k.udp_map.end() && it->second.vport != 0) {
+            uint16_t v = it->second.vport;
+            // Best-effort update of last_access on the vport shard
+            auto& shard_v = m_shards[v % NUM_SHARDS];
+            std::unique_lock<std::shared_mutex> lock_v(shard_v.mtx);
+            if (shard_v.vport_to_udp.count(v)) {
+                shard_v.vport_to_udp[v].last_access = GetTickCount64();
+                return v;
+            }
+        }
+    }
+
+    uint16_t vport = m_next_vport++;
+    if (m_next_vport > VPORT_END) m_next_vport = VPORT_START;
+
+    uint64_t now = GetTickCount64();
+
+    {
+        std::unique_lock<std::shared_mutex> lock_k(shard_k.mtx);
+        shard_k.udp_map[key] = { dest, now, key, vport };
+    }
+    
+    auto& shard_v = m_shards[vport % NUM_SHARDS];
+    {
+        std::unique_lock<std::shared_mutex> lock_v(shard_v.mtx);
+        shard_v.vport_to_udp[vport] = { key, now };
+    }
+    
+    return vport;
+}
+
+std::optional<UdpKey4> NatManager::get_udp_key_by_virtual_port(uint16_t vport) {
+    auto& shard_v = m_shards[vport % NUM_SHARDS]; 
+    std::shared_lock<std::shared_mutex> lock(shard_v.mtx);
+    auto it = shard_v.vport_to_udp.find(vport);
+    if (it != shard_v.vport_to_udp.end()) {
+        uint64_t now = GetTickCount64();
+        if (now - it->second.last_access > 1000) {
+            lock.unlock();
+            std::unique_lock<std::shared_mutex> ulock(shard_v.mtx);
+            auto it_retry = shard_v.vport_to_udp.find(vport);
+            if (it_retry != shard_v.vport_to_udp.end()) it_retry->second.last_access = now;
+            return it_retry->second.key;
+        }
+        return it->second.key;
+    }
+    return std::nullopt;
 }
 
 std::optional<OriginalDestination> NatManager::get_udp_mapping(const UdpKey4& key) {
@@ -87,6 +153,16 @@ std::optional<OriginalDestination> NatManager::get_udp_mapping(const UdpKey4& ke
 }
 
 std::optional<OriginalDestination> NatManager::get_mapping(uint64_t key) {
+    uint16_t port_nbo = (uint16_t)(key & 0xFFFF);
+    uint16_t port_hbo = ntohs(port_nbo);
+    
+    if (port_hbo >= VPORT_START && port_hbo <= VPORT_END) {
+        auto key4 = get_udp_key_by_virtual_port(port_hbo);
+        if (key4) {
+            return get_udp_mapping(*key4);
+        }
+    }
+
     auto& shard = m_shards[key % NUM_SHARDS];
     std::shared_lock<std::shared_mutex> lock(shard.mtx); 
     
@@ -104,11 +180,9 @@ std::optional<OriginalDestination> NatManager::get_mapping(uint64_t key) {
             }
             return std::nullopt;
         }
-        return it_tcp->second.dest;
+        return it->second.dest;
     }
 
-    // Fallback for UDP: if only 2-tuple key is provided, find the most recent mapping
-    // for this source IP/Port. This helps the App layer (proxy) which only has 2-tuple info.
     std::optional<OriginalDestination> latest_udp;
     uint64_t max_access = 0;
     

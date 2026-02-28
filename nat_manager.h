@@ -63,6 +63,10 @@ public:
     void create_tcp_mapping(uint64_t key, const OriginalDestination& dest, uint32_t worker_id);
     void create_or_update_udp_mapping(const UdpKey4& key, const OriginalDestination& dest, uint32_t worker_id);
     
+    // New: Virtual port management for UDP
+    uint16_t allocate_udp_virtual_port(const UdpKey4& key, const OriginalDestination& dest);
+    std::optional<UdpKey4> get_udp_key_by_virtual_port(uint16_t vport);
+
     std::optional<OriginalDestination> get_mapping(uint64_t key);
     std::optional<OriginalDestination> get_udp_mapping(const UdpKey4& key);
     void remove_tcp_mapping(uint64_t key);
@@ -74,6 +78,8 @@ private:
     struct MappingEntry {
         OriginalDestination dest;
         uint64_t last_access;
+        UdpKey4 udp_key;
+        uint16_t vport = 0; // Add virtual port reference
     };
 
     static const int NUM_SHARDS = 16;
@@ -81,10 +87,21 @@ private:
         std::shared_mutex mtx;
         std::unordered_map<uint64_t, MappingEntry> tcp_map;
         std::unordered_map<UdpKey4, MappingEntry, UdpKey4Hash> udp_map;
+        
+        struct VPortEntry {
+            UdpKey4 key;
+            uint64_t last_access;
+        };
+        std::unordered_map<uint16_t, VPortEntry> vport_to_udp;
         uint64_t last_cleanup_time = 0;
     };
 
     Shard m_shards[NUM_SHARDS];
+    
+    // Virtual port range: 40000 - 60000
+    std::atomic<uint16_t> m_next_vport{ 40000 };
+    const uint16_t VPORT_START = 40000;
+    const uint16_t VPORT_END = 60000;
     
     // Timeouts
     const uint64_t TCP_TIMEOUT_MS = 300000;

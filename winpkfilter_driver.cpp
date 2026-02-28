@@ -381,31 +381,65 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                                 else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
                                     uint16_t old_dst_port = udp->DstPort;
-                                    od.port = udp->DstPort; 
+                                    uint16_t old_src_port = udp->SrcPort;
+
+                                    OriginalDestination od(ip->DstAddr, udp->DstPort, ip->SrcAddr);
                                     UdpKey4 key4 { ip->SrcAddr, udp->SrcPort, ip->DstAddr, udp->DstPort };
-                                    NatManager::instance().create_or_update_udp_mapping(key4, od, worker_id);
+                                    
+                                    // Allocate virtual source port for this 4-tuple to uniquely identify it
+                                    uint16_t virtual_port = NatManager::instance().allocate_udp_virtual_port(key4, od);
+
                                     ip->DstAddr = m_gateway_ip;
                                     udp->DstPort = htons(NAT_TARGET_PORT);
+                                    udp->SrcPort = htons(virtual_port); // Rewrite source port to virtual port
+
                                     incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
                                     incremental_checksum_update(&udp->Csum, old_dst_ip, ip->DstAddr);
                                     incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
+                                    incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
                                 }
                                 packets_to_mstcp.push_back(std::move(p)); handled = true;
                             }
-                        else if (p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP)) {
-                            USHORT sport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort) : ntohs(((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
-                            if (sport == NAT_TARGET_PORT) {
-                                std::optional<OriginalDestination> od;
+                                                    else if (p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP)) {
+                                                        USHORT sport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort) : ntohs(((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
+                                                        if (sport == NAT_TARGET_PORT) {
+                                                            std::optional<OriginalDestination> od;
+                                                            bool handled_udp_nat = false;
+                        
                                 if (ip->Proto == IPPROTO_TCP) {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                     od = NatManager::instance().get_mapping(NatManager::make_key(ip->DstAddr, tcp->DstPort));
                                 } else {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                    UdpKey4 key4 { ip->DstAddr, udp->DstPort, ip->SrcAddr, udp->SrcPort };
-                                    od = NatManager::instance().get_udp_mapping(key4);
+                                    
+                                    // Use virtual port in DstPort to find the original 4-tuple mapping
+                                    auto key4 = NatManager::instance().get_udp_key_by_virtual_port(ntohs(udp->DstPort));
+                                    if (key4) {
+                                        // Complete UDP Restoration (Source and Destination)
+                                        uint32_t old_src_ip = ip->SrcAddr;
+                                        uint32_t old_dst_ip = ip->DstAddr;
+                                        uint16_t old_src_port = udp->SrcPort;
+                                        uint16_t old_dst_port = udp->DstPort;
+
+                                        ip->SrcAddr = key4->dst_ip;    // Original Target IP
+                                        udp->SrcPort = key4->dst_port;  // Original Target Port
+                                        udp->DstPort = key4->src_port;  // Original Client Port
+                                        
+                                        // Checksum updates for all modified fields
+                                        incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
+                                        incremental_checksum_update(&udp->Csum, old_src_ip, ip->SrcAddr);
+                                        incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
+                                        incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
+                                        
+                                        handled_udp_nat = true; 
+                                    }
                                 }
 
-                                if (od) {
+                                if (handled_udp_nat) {
+                                    // Already handled by virtual port logic
+                                }
+                                else if (od) {
+                                    // This block now mainly handles TCP or fallback UDP
                                     // Mapping found, packet is modified. Use incremental checksum update.
                                     uint32_t old_src_ip = ip->SrcAddr;
                                     ip->SrcAddr = od->ip;
@@ -420,7 +454,7 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                                         // Update TCP checksum for the change in source port
                                         incremental_checksum_update(&tcp->Csum, old_src_port, tcp->SrcPort);
                                     }
-                                    else { // UDP
+                                    else { // UDP Fallback
                                         PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
                                         uint16_t old_src_port = udp->SrcPort;
                                         udp->SrcPort = od->port;
