@@ -285,9 +285,13 @@ public:
                 if (first == 113 || first == 183 || first == 125 || first == 157) {
                     // Tencent Bypass
                 } else {
+                    char src_ip[INET_ADDRSTRLEN];
+                    char dst_ip[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &client_addr->sin_addr, src_ip, INET_ADDRSTRLEN);
+                    inet_ntop(AF_INET, &dest->ip, dst_ip, INET_ADDRSTRLEN);
                     LOG_INFO("[ProxyUDP] Blocking foreign QUIC from %s:%d to %s:%d", 
-                        inet_ntoa(client_addr->sin_addr), ntohs(client_addr->sin_port),
-                        inet_ntoa(*(in_addr*)&dest->ip), dport);
+                        src_ip, ntohs(client_addr->sin_port),
+                        dst_ip, dport);
                     return; 
                 }
             }
