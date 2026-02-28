@@ -472,13 +472,13 @@ void WinPkFilterDriver::run() {
                             USHORT ether_type = ntohs(*(USHORT*)(buffer + 12));
 
                             // Non-IP Fast Path (ARP, EAPOL, IPv6, etc.)
-                            // Directly inject to results queue to avoid worker latency/reordering
+                            // Directly send to bypass worker latency and results queue
                             if (ether_type != ETHERTYPE_IP) {
                                 if (ether_type == ETHERTYPE_ARP && b->m_Length >= 14 + sizeof(ARP_HEADER)) {
                                     PARP_HEADER arp = (PARP_HEADER)(buffer + 14);
-                                    // If it's an ARP request for our gateway IP
+                                    // If it's an ARP request for our gateway IP, reply directly
                                     if (ntohs(arp->OpCode) == 1 && arp->DstIp == m_gateway_ip) {
-                                        LOG_INFO("[FastPath] Replying to ARP request for gateway");
+                                        LOG_INFO("[FastPath] Replying directly to ARP request for gateway");
 
                                         // Swap Ethernet MACs
                                         memcpy(buffer, buffer + 6, 6);
@@ -491,27 +491,33 @@ void WinPkFilterDriver::run() {
                                         memcpy(arp->SrcMac, m_adapter_mac, 6);
                                         arp->SrcIp = m_gateway_ip;
 
-                                        // Send back to where it came from
-                                        PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_MSTCP : PacketDestination::TO_ADAPTER;
-                                        std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-                                        m_results_queue.packets.push_back({ b, dest });
-                                        m_read_request->EthPacket[i].Buffer = nullptr; // Transfer ownership
-                                        SetEvent(m_results_event);
+                                        // Send back directly to requester
+                                        if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) {
+                                            this->send_to_mstcp((const char*)buffer, b->m_Length);
+                                        } else {
+                                            this->send_to_adapter((const char*)buffer, b->m_Length);
+                                        }
+                                        
+                                        PacketPool::instance().release(b);
+                                        m_read_request->EthPacket[i].Buffer = nullptr;
                                         handled = true;
                                     }
                                 } else if (ether_type == htons(0x888E)) { // EAPOL
-                                    LOG_INFO("[FastPath] Injecting EAPOL packet");
+                                    LOG_INFO("[FastPath] Forwarding EAPOL packet directly");
                                 }
 
                                 if (!handled) {
                                     if (ether_type == ETHERTYPE_ARP) {
-                                        LOG_INFO("[FastPath] Injecting ARP packet");
+                                        LOG_INFO("[FastPath] Forwarding ARP packet directly");
                                     }
-                                    PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
-                                    std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-                                    m_results_queue.packets.push_back({ b, dest });
-                                    m_read_request->EthPacket[i].Buffer = nullptr; // Transfer ownership
-                                    SetEvent(m_results_event);
+                                    // General pass-through: send directly
+                                    if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) {
+                                        this->send_to_adapter((const char*)buffer, b->m_Length);
+                                    } else {
+                                        this->send_to_mstcp((const char*)buffer, b->m_Length);
+                                    }
+                                    PacketPool::instance().release(b);
+                                    m_read_request->EthPacket[i].Buffer = nullptr;
                                     handled = true;
                                 }
                             }
