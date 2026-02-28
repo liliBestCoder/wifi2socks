@@ -186,7 +186,7 @@ public:
         }
         m_sessions.clear();
         m_socket_to_flow.clear();
-        LOG_INFO("[UdpProxy] Shutdown complete.");
+        LOG_INFO("[UDP] Shutdown complete.");
     }
 
     // Flow key representing a unique 4-tuple UDP session
@@ -277,7 +277,6 @@ public:
         if (dport == 443) {
             uint32_t ip_h = ntohl(dest->ip);
             bool is_cn = GeoChecker::instance().is_cn_ip(ip_h);
-            bool is_tencent = GeoChecker::instance().is_tencent_domain(""); // We don't have domain here, but maybe check IP later
             
             if (!is_cn) {
                 // Check if it's a known Tencent IP range even if geoip fails
@@ -289,7 +288,7 @@ public:
                     char dst_ip[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &client_addr->sin_addr, src_ip, INET_ADDRSTRLEN);
                     inet_ntop(AF_INET, &dest->ip, dst_ip, INET_ADDRSTRLEN);
-                    LOG_INFO("[ProxyUDP] Blocking foreign QUIC from %s:%d to %s:%d", 
+                    LOG_INFO("[UDP] Blocking foreign QUIC from %s:%d to %s:%d", 
                         src_ip, ntohs(client_addr->sin_port),
                         dst_ip, dport);
                     return; 
@@ -316,11 +315,11 @@ public:
         if (remote_socket != INVALID_SOCKET) {
             int sent = sendto(remote_socket, data, len, 0, (const sockaddr*)&target_addr, sizeof(target_addr));
             if (sent == SOCKET_ERROR) {
-                LOG_ERROR("[ProxyUDP] sendto failed: %d", WSAGetLastError());
+                LOG_ERROR("[UDP] sendto failed: %d", WSAGetLastError());
             }
             TrafficManager::instance().report_proxy_tx(len, true);
         } else {
-            LOG_WARN("[ProxyUDP] Failed to create session for flow");
+            LOG_WARN("[UDP] Failed to create session for flow");
         }
     }
 
