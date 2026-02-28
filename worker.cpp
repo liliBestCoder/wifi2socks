@@ -176,7 +176,12 @@ void Worker::loop() {
                     ctx->on_write(-1, io->write_buffers);
                 }
                 else if (io->type == IO_CONNECT) {
-                    LOG_ERROR("[Worker] ConnectEx async failure: %d", WSAGetLastError());
+                    int err = WSAGetLastError();
+                    if (err == ERROR_SEM_TIMEOUT || err == WSAECONNRESET || err == WSAECONNABORTED || err == WSAETIMEDOUT || err == 10038) {
+                        LOG_DEBUG("[Worker] ConnectEx async failure: %d (Normal closure)", err);
+                    } else {
+                        LOG_ERROR("[Worker] ConnectEx async failure: %d", err);
+                    }
                     if (io->task) io->task();
                 }
             }

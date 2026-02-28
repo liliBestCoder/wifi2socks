@@ -193,8 +193,15 @@ void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int err
                 process_write_queue(m_remote_socket);
             }
 
-            if (error != 0 && error != ERROR_NETNAME_DELETED && error != ERROR_CONNECTION_ABORTED && error != 10038) {
-                LOG_ERROR("[TCP] IO Error on socket: %d", error);
+            if (error != 0) {
+                // Common network errors during connection closure
+                if (error == ERROR_NETNAME_DELETED || error == ERROR_CONNECTION_ABORTED || error == 10038 ||
+                    error == 10054 || error == 10053 || error == 10060 || error == 10057 || error == 121 || 
+                    error == 1236 || error == 64) {
+                    LOG_DEBUG("[TCP] IO closure on socket: %d", error);
+                } else {
+                    LOG_ERROR("[TCP] IO Error on socket: %d", error);
+                }
                 close_session();
             }
             return;
@@ -279,8 +286,10 @@ void ProxyTCP::post_reads(SOCKET socket) {
         if (ret == SOCKET_ERROR) {
             int err = WSAGetLastError();
             if (err != WSA_IO_PENDING) {
-                if (err != 10038 || m_state != CLOSING) {
+                if (err != 10038 && err != 10054 && err != 10053 && err != 10060 && err != 10057) {
                     LOG_ERROR("[ProxyTCP] WSARecv failed: %d", err);
+                } else {
+                    LOG_DEBUG("[ProxyTCP] WSARecv failed (err: %d, state: %d), closing session", err, m_state);
                 }
                 (*pending_count)--;
                 {
@@ -514,8 +523,8 @@ void ProxyTCP::process_write_queue(SOCKET socket) {
             int ret = WSASend(socket, batch_bufs, count, &bytes_sent, 0, &leader->overlapped, NULL);
             if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
                 int err = WSAGetLastError();
-                if (err == WSAECONNRESET) {
-                    LOG_DEBUG("[ProxyTCP] Connection reset by peer (10054), closing session");
+                if (err == 10054 || err == 10053 || err == 10060 || err == 10057 || err == 10038) {
+                    LOG_DEBUG("[ProxyTCP] Send failed (err: %d), closing session", err);
                 } else {
                     LOG_ERROR("[ProxyTCP] WSASend Gather failed: %d", err);
                 }
