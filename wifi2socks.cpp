@@ -38,34 +38,36 @@
 
 DhcpServer* g_dhcp_server_ptr = nullptr;
 
-std::string find_adapter_by_ip(const std::string& target_ip) {
-    PIP_ADAPTER_ADDRESSES pAddresses = nullptr;
+std::string find_adapter_by_desc() {
     ULONG outBufLen = 15000;
-    pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(outBufLen);
-    
-    LOG_INFO("[CORE] Searching for NDIS adapter with IP: %s", target_ip.c_str());
+    PIP_ADAPTER_ADDRESSES pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(outBufLen);
+    if (!pAddresses) return "";
+
+    std::string prefix = "Microsoft Wi-Fi Direct Virtual Adapter";
 
     if (GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, pAddresses, &outBufLen) == ERROR_SUCCESS) {
         for (PIP_ADAPTER_ADDRESSES pCurr = pAddresses; pCurr != nullptr; pCurr = pCurr->Next) {
-            for (PIP_ADAPTER_UNICAST_ADDRESS pUnicast = pCurr->FirstUnicastAddress; pUnicast != nullptr; pUnicast = pUnicast->Next) {
-                if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
-                    sockaddr_in* sa_in = (sockaddr_in*)pUnicast->Address.lpSockaddr;
-                    char ip_str[INET_ADDRSTRLEN];
-                    inet_ntop(AF_INET, &(sa_in->sin_addr), ip_str, INET_ADDRSTRLEN);
-                    if (target_ip == ip_str) {
-                        std::string name = pCurr->AdapterName;
-                        LOG_INFO("MATCH FOUND BY IP: %s", name.c_str());
-                        free(pAddresses);
-                        return "\\DEVICE\\" + name;
-                    }
-                }
+            if (!pCurr->Description) continue;
+
+            // Convert wchar_t* to std::wstring
+            std::wstring desc_w(pCurr->Description);
+            if (desc_w.find(L"Microsoft Wi-Fi Direct Virtual Adapter #") != std::wstring::npos) {
+
+                // AdapterName 是 char*，直接用
+                std::string adapterName = pCurr->AdapterName ? pCurr->AdapterName : "";
+
+                std::cout << "[INFO] MATCH FOUND BY DESC: " << adapterName << std::endl;
+
+                free(pAddresses);
+                return "\\DEVICE\\" + adapterName;
             }
         }
     }
-    
-    if (pAddresses) free(pAddresses);
+
+    free(pAddresses);
     return "";
 }
+
 
 int main() {
     WSADATA wsa;
@@ -114,7 +116,7 @@ int main() {
 
     PacketPool::instance().init(1024 * 64);
 
-    std::string adapter_name = find_adapter_by_ip(g_config.gateway_ip);
+    std::string adapter_name = find_adapter_by_desc();
     static WinPkFilterDriver pk_driver;
     
     int worker_count = std::thread::hardware_concurrency();

@@ -170,7 +170,7 @@ bool ForceSetStaticIP(const std::string& targetIp) {
 
     for (auto pCurr = pAddresses; pCurr; pCurr = pCurr->Next) {
         std::wstring desc = pCurr->Description;
-        if (desc.find(L"Wi-Fi Direct Virtual Adapter") != std::wstring::npos) {
+        if (desc.find(L"Microsoft Wi-Fi Direct Virtual Adapter #") != std::wstring::npos) {
             bool alreadyHasTarget = false;
             std::vector<IN_ADDR> existingIps;
 
