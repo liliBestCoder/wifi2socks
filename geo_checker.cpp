@@ -204,15 +204,26 @@ std::string GeoChecker::query_ip(const std::string& ip_bytes) {
 
 bool is_common_cn_range(uint32_t ip) {
     uint8_t first = (uint8_t)(ip >> 24);
+    uint8_t second = (uint8_t)(ip >> 16);
     // 扩展国内常用 IP 段，确保测速和常用服务不被误代理
     // 包含联通、移动、电信、教育网及腾讯/阿里等云服务商段
-    // 参考常用国内 IP 段列表进行补充
-    return (first == 14  || first == 27  || first == 36  || first == 39  || first == 42  || 
-            first == 43  || first == 45  || first == 47  || first == 49  || first == 58  || 
-            first == 59  || first == 60  || first == 61  || first == 101 || first == 103 || 
-            first == 106 || (first >= 110 && first <= 126) || first == 139 || first == 171 || 
-            first == 175 || first == 180 || first == 182 || first == 183 || first == 210 || 
-            first == 211 || (first >= 218 && first <= 223));
+    if (first == 1  || first == 14  || first == 27  || first == 36  || first == 39  || 
+        first == 42  || first == 43  || first == 45  || first == 47  || first == 49  || 
+        first == 58  || first == 59  || first == 60  || first == 61  || first == 101 || 
+        first == 103 || first == 106 || (first >= 110 && first <= 126) || first == 139 || 
+        first == 140 || first == 150 || first == 153 || first == 157 || first == 163 || 
+        first == 171 || first == 175 || first == 180 || first == 182 || first == 183 || 
+        first == 210 || first == 211 || (first >= 218 && first <= 223) || first == 223) {
+        return true;
+    }
+
+    // 腾讯专项 IP 段 (部分常用)
+    if (first == 113 && (second >= 96 && second <= 103)) return true; // 113.96.0.0/13
+    if (first == 183 && (second >= 0 && second <= 63)) return true;   // 183.0.0.0/10
+    if (first == 125 && (second >= 32 && second <= 63)) return true;  // 125.32.0.0/11
+    if (first == 157 && second == 255) return true;
+    
+    return false;
 }
 
 bool GeoChecker::is_private_ip(const uint32_t ip_h) {

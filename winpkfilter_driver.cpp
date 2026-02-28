@@ -341,51 +341,57 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                 if (ether_type == ETHERTYPE_IP && length >= 34) {
                     PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
 
-                    if (!handled) {
-                        bool should_intercept = false;
-                        if (!p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) && ip->SrcAddr != m_gateway_ip) {
-                            should_intercept = true;
-                            // Check if packet is destined to the Proxy Port on the Gateway (Explicit Proxy or RST)
-                            // We should NOT intercept these, to avoid Poisoning/Looping, and to let them hit the socket directly.
-                            if (ip->DstAddr == m_gateway_ip) {
-                                int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
-                                USHORT dport = (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + ip_hdr_len))->DstPort : ((PUDP_HEADER)((char*)ip + ip_hdr_len))->DstPort;
-                                if (dport == htons(NAT_TARGET_PORT)) {
-                                    should_intercept = false;
-                                    recalculate_ip_checksum(ip);
-                                    recalculate_tcp_udp_checksum(ip);
+                        if (!handled) {
+                            bool should_intercept = false;
+                            int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
+                            bool is_fragment = (ntohs(ip->Flags_Frag) & 0x1FFF) != 0;
+
+                            if (!p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) && ip->SrcAddr != m_gateway_ip) {
+                                // Only intercept if it's not a fragment, or it's the first fragment (offset 0)
+                                // Subsequent fragments don't have TCP/UDP headers.
+                                if (!is_fragment) {
+                                    should_intercept = true;
+                                    // Check if packet is destined to the Proxy Port on the Gateway (Explicit Proxy or RST)
+                                    // We should NOT intercept these, to avoid Poisoning/Looping, and to let them hit the socket directly.
+                                    if (ip->DstAddr == m_gateway_ip) {
+                                        USHORT dport = (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + ip_hdr_len))->DstPort : ((PUDP_HEADER)((char*)ip + ip_hdr_len))->DstPort;
+                                        if (dport == htons(NAT_TARGET_PORT)) {
+                                            should_intercept = false;
+                                            recalculate_ip_checksum(ip);
+                                            recalculate_tcp_udp_checksum(ip);
+                                        }
+                                    }
                                 }
                             }
-                        }
 
-                        if (should_intercept) {
-                            OriginalDestination od(ip->DstAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort : ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->DstPort, ip->SrcAddr);
-                            uint64_t key = NatManager::make_key(ip->SrcAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort : ((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
-                            uint32_t old_dst_ip = ip->DstAddr;
-                            if (ip->Proto == IPPROTO_TCP) {
-                                PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                uint16_t old_dst_port = tcp->DstPort;
-                                od.port = tcp->DstPort; NatManager::instance().create_tcp_mapping(key, od, worker_id);
-                                ip->DstAddr = m_gateway_ip;
-                                tcp->DstPort = htons(NAT_TARGET_PORT);
-                                incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
-                                incremental_checksum_update(&tcp->Csum, old_dst_ip, ip->DstAddr);
-                                incremental_checksum_update(&tcp->Csum, old_dst_port, tcp->DstPort);
+                            if (should_intercept) {
+                                OriginalDestination od(ip->DstAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + ip_hdr_len))->DstPort : ((PUDP_HEADER)((char*)ip + ip_hdr_len))->DstPort, ip->SrcAddr);
+                                uint64_t key = NatManager::make_key(ip->SrcAddr, (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + ip_hdr_len))->SrcPort : ((PUDP_HEADER)((char*)ip + ip_hdr_len))->SrcPort);
+                                uint32_t old_dst_ip = ip->DstAddr;
+                                if (ip->Proto == IPPROTO_TCP) {
+                                    PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + ip_hdr_len);
+                                    uint16_t old_dst_port = tcp->DstPort;
+                                    od.port = tcp->DstPort; NatManager::instance().create_tcp_mapping(key, od, worker_id);
+                                    ip->DstAddr = m_gateway_ip;
+                                    tcp->DstPort = htons(NAT_TARGET_PORT);
+                                    incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
+                                    incremental_checksum_update(&tcp->Csum, old_dst_ip, ip->DstAddr);
+                                    incremental_checksum_update(&tcp->Csum, old_dst_port, tcp->DstPort);
+                                }
+                                else {
+                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
+                                    uint16_t old_dst_port = udp->DstPort;
+                                    od.port = udp->DstPort; 
+                                    UdpKey4 key4 { ip->SrcAddr, udp->SrcPort, ip->DstAddr, udp->DstPort };
+                                    NatManager::instance().create_or_update_udp_mapping(key4, od, worker_id);
+                                    ip->DstAddr = m_gateway_ip;
+                                    udp->DstPort = htons(NAT_TARGET_PORT);
+                                    incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
+                                    incremental_checksum_update(&udp->Csum, old_dst_ip, ip->DstAddr);
+                                    incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
+                                }
+                                packets_to_mstcp.push_back(std::move(p)); handled = true;
                             }
-                            else {
-                                PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);
-                                uint16_t old_dst_port = udp->DstPort;
-                                od.port = udp->DstPort; 
-                                UdpKey4 key4 { ip->SrcAddr, udp->SrcPort, ip->DstAddr, udp->DstPort };
-                                NatManager::instance().create_or_update_udp_mapping(key4, od, worker_id);
-                                ip->DstAddr = m_gateway_ip;
-                                udp->DstPort = htons(NAT_TARGET_PORT);
-                                incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
-                                incremental_checksum_update(&udp->Csum, old_dst_ip, ip->DstAddr);
-                                incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
-                            }
-                            packets_to_mstcp.push_back(std::move(p)); handled = true;
-                        }
                         else if (p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP)) {
                             USHORT sport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort) : ntohs(((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
                             if (sport == NAT_TARGET_PORT) {

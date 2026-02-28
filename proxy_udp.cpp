@@ -255,9 +255,20 @@ public:
         // Domestic QUIC is allowed to go DIRECT for speed.
         if (dport == 443) {
             uint32_t ip_h = ntohl(dest->ip);
-            if (!GeoChecker::instance().is_cn_ip(ip_h)) {
-                // Foreign QUIC -> DROP
-                return; 
+            bool is_cn = GeoChecker::instance().is_cn_ip(ip_h);
+            bool is_tencent = GeoChecker::instance().is_tencent_domain(""); // We don't have domain here, but maybe check IP later
+            
+            if (!is_cn) {
+                // Check if it's a known Tencent IP range even if geoip fails
+                uint8_t first = (uint8_t)(ip_h >> 24);
+                if (first == 113 || first == 183 || first == 125 || first == 157) {
+                    // Tencent Bypass
+                } else {
+                    LOG_DEBUG("[ProxyUDP] Blocking foreign QUIC from %s:%d to %s:%d", 
+                        inet_ntoa(client_addr->sin_addr), ntohs(client_addr->sin_port),
+                        inet_ntoa(*(in_addr*)&dest->ip), dport);
+                    return; 
+                }
             }
         }
 
@@ -278,8 +289,13 @@ public:
 
         SOCKET remote_socket = get_or_create_session(flow, client_addr);
         if (remote_socket != INVALID_SOCKET) {
-            sendto(remote_socket, data, len, 0, (const sockaddr*)&target_addr, sizeof(target_addr));
+            int sent = sendto(remote_socket, data, len, 0, (const sockaddr*)&target_addr, sizeof(target_addr));
+            if (sent == SOCKET_ERROR) {
+                LOG_ERROR("[ProxyUDP] sendto failed: %d", WSAGetLastError());
+            }
             TrafficManager::instance().report_proxy_tx(len, true);
+        } else {
+            LOG_WARN("[ProxyUDP] Failed to create session for flow");
         }
     }
 
