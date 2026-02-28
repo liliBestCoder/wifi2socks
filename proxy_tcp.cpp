@@ -172,13 +172,6 @@ void ProxyTCP::on_remote_connect() {
         post_reads(m_remote_socket);
     }
 }
-        uint16_t target_port = ntohs(m_original_dest.port);
-        std::string connect_req = "CONNECT " + target_host + ":" + std::to_string(target_port) + " HTTP/1.1\r\nHost: " + target_host + ":" + std::to_string(target_port) + "\r\n\r\n";
-
-        WorkerPool::instance().send_async(m_remote_socket, (const uint8_t*)connect_req.data(), connect_req.length());
-        post_reads(m_remote_socket);
-    }
-}
 
 void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int error) {
     if (m_state == CLOSING) {
@@ -310,7 +303,7 @@ void ProxyTCP::post_reads(SOCKET socket) {
                 if (err != 10038 && err != 10054 && err != 10053 && err != 10060 && err != 10057) {
                     LOG_ERROR("[ProxyTCP] WSARecv failed: %d", err);
                 } else {
-                    LOG_DEBUG("[ProxyTCP] WSARecv failed (err: %d, state: %d), closing session", err, m_state);
+                    LOG_DEBUG("[ProxyTCP] WSARecv failed (err: %d, state: %d), closing session", err, (int)m_state.load());
                 }
                 (*pending_count)--;
                 if (!dest_queue->empty() && dest_queue->back() == buf) dest_queue->pop_back();
