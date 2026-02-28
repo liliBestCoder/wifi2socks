@@ -240,7 +240,7 @@ public:
                         if (resp_len > 0) {
                             DnsResponse res = parse_dns_response(dns_resp, resp_len);
                             if (res.parse_error) {
-                                LOG_WARN("[DNS] Failed to parse DoT DNS response for '%s'.", domain.c_str());
+                                LOG_DEBUG("[DNS] Failed to parse DoT DNS response for '%s'.", domain.c_str());
                             } else {
                                 if (res.rcode == 0 && !res.addresses.empty()) {
                                     std::string ips;
@@ -248,20 +248,20 @@ public:
                                         ips += res.addresses[i];
                                         if (i < res.addresses.size() - 1) ips += ", ";
                                     }
-                                    LOG_INFO("[DNS] Resolved '%s' to [%s] via DoT.", res.qname.c_str(), ips.c_str());
+                                    LOG_DEBUG("[DNS] Resolved '%s' to [%s] via DoT.", res.qname.c_str(), ips.c_str());
                                     
                                     uint32_t first_ip = 0;
                                     inet_pton(AF_INET, res.addresses[0].c_str(), &first_ip);
                                     DnsCache::instance().put(domain, first_ip, 300);
                                 } else if (res.rcode != 0) {
-                                    LOG_INFO("[DNS] Failed to resolve '%s' via DoT. RCODE: %d", res.qname.c_str(), res.rcode);
+                                    LOG_DEBUG("[DNS] Failed to resolve '%s' via DoT. RCODE: %d", res.qname.c_str(), res.rcode);
                                 } else {
-                                    LOG_INFO("[DNS] Received response for '%s' via DoT (RCODE: 0, no A records).", res.qname.c_str());
+                                    LOG_DEBUG("[DNS] Received response for '%s' via DoT (RCODE: 0, no A records).", res.qname.c_str());
                                 }
                             }
                             sendto(listener_socket, dns_resp, resp_len, 0, (const sockaddr*)&caddr, sizeof(caddr));
                         } else {
-                            LOG_ERROR("[DNS] Received empty or invalid response for '%s' from DoT proxy.", domain.c_str());
+                            LOG_DEBUG("[DNS] Received empty or invalid response for '%s' from DoT proxy.", domain.c_str());
                         }
                     };
                     std::vector<uint8_t> query_vec((uint8_t*)data, (uint8_t*)data + len);
@@ -285,7 +285,7 @@ public:
                 if (first == 113 || first == 183 || first == 125 || first == 157) {
                     // Tencent Bypass
                 } else {
-                    LOG_DEBUG("[ProxyUDP] Blocking foreign QUIC from %s:%d to %s:%d", 
+                    LOG_INFO("[ProxyUDP] Blocking foreign QUIC from %s:%d to %s:%d", 
                         inet_ntoa(client_addr->sin_addr), ntohs(client_addr->sin_port),
                         inet_ntoa(*(in_addr*)&dest->ip), dport);
                     return; 
@@ -369,7 +369,7 @@ private:
         if (from->sin_addr.s_addr == direct_dns_addr.sin_addr.s_addr) {
             DnsResponse res = parse_dns_response(buf, len);
             if (res.parse_error) {
-                LOG_WARN("[DNS] Failed to parse direct DNS response.");
+                LOG_DEBUG("[DNS] Failed to parse direct DNS response.");
             }
             else {
                 if (res.rcode == 0 && !res.addresses.empty()) {
@@ -378,13 +378,13 @@ private:
                         ips += res.addresses[i];
                         if (i < res.addresses.size() - 1) ips += ", ";
                     }
-                    LOG_INFO("[DNS] Resolved '%s' to [%s] via DIRECT.", res.qname.c_str(), ips.c_str());
+                    LOG_DEBUG("[DNS] Resolved '%s' to [%s] via DIRECT.", res.qname.c_str(), ips.c_str());
                 }
                 else if (res.rcode != 0) {
-                    LOG_INFO("[DNS] Failed to resolve '%s' via DIRECT. RCODE: %d", res.qname.c_str(), res.rcode);
+                    LOG_DEBUG("[DNS] Failed to resolve '%s' via DIRECT. RCODE: %d", res.qname.c_str(), res.rcode);
                 }
                 else {
-                    LOG_INFO("[DNS] Received response for '%s' via DIRECT (RCODE: 0, no A records).", res.qname.c_str());
+                    LOG_DEBUG("[DNS] Received response for '%s' via DIRECT (RCODE: 0, no A records).", res.qname.c_str());
                 }
             }
         }
