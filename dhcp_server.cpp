@@ -83,11 +83,11 @@ bool DhcpServer::start() {
 
     sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
-    server_addr.sin_addr.s_addr = INADDR_ANY;
+    inet_pton(AF_INET, g_config.gateway_ip.c_str(), &server_addr.sin_addr);
     server_addr.sin_port = htons(listen_port_);
 
     if (bind(sock_, (sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {
-        LOG_ERROR("Failed to bind DHCP socket to INADDR_ANY:%d. Error: %d", listen_port_, WSAGetLastError());
+        LOG_ERROR("Failed to bind DHCP socket to %s:%d. Error: %d", g_config.gateway_ip.c_str(), listen_port_, WSAGetLastError());
         closesocket(sock_);
         WSACleanup();
         return false;
