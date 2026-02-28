@@ -220,6 +220,10 @@ public:
             if (!domain.empty()) {
                 uint32_t cached_ip = DnsCache::instance().get(domain);
                 if (cached_ip != 0) {
+                    char ip_str[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &cached_ip, ip_str, INET_ADDRSTRLEN);
+                    LOG_DEBUG("[DNS] Cache Hit for '%s' -> %s", domain.c_str(), ip_str);
+
                     std::vector<char> resp = build_dns_a_response(data, len, cached_ip);
                     if (!resp.empty()) {
                         sendto(listener_socket, resp.data(), (int)resp.size(), 0, (const sockaddr*)client_addr, sizeof(*client_addr));
