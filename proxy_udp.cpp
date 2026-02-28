@@ -12,6 +12,7 @@
 #include "dns_cache.h"
 
 #include <unordered_map>
+#include <map>
 #include <mutex>
 #include <memory>
 #include <vector>
@@ -168,117 +169,76 @@ std::vector<char> build_dns_a_response(const char* request_data, int request_len
     return response;
 }
 
-// A manager to handle all UDP proxy operations.
+// A manager to handle all UDP proxy operations with proper flow isolation.
 class UdpProxyManager {
 public:
-    UdpProxyManager() {}
+    UdpProxyManager() : m_last_cleanup(GetTickCount64()) {}
 
-    void initialize() {
-    }
+    void initialize() {}
 
     void shutdown() {
         std::lock_guard<std::mutex> lock(m_mutex);
-        for (auto const& [key, val] : m_remote_sockets) {
-            if (val != INVALID_SOCKET) {
-                WorkerPool::instance().remove_socket(val);
+        for (auto const& [key, session] : m_sessions) {
+            if (session.sock != INVALID_SOCKET) {
+                WorkerPool::instance().remove_socket(session.sock);
+                closesocket(session.sock);
             }
         }
-        m_remote_sockets.clear();
-        m_reverse_routes.clear();
+        m_sessions.clear();
+        m_socket_to_flow.clear();
         LOG_INFO("[UdpProxy] Shutdown complete.");
     }
 
-    // Helper to parse domain name from DNS query
-    std::string parse_dns_query_domain(const char* data, int len) {
-        if (len < 13) return ""; // Basic check for header + qname
-        
-        std::string domain = "";
-        const unsigned char* qname = (const unsigned char*)(data + 12);
-        int pos = 0;
+    // Flow key representing a unique 4-tuple UDP session
+    struct FlowKey {
+        uint32_t src_ip;
+        uint16_t src_port;
+        uint32_t dst_ip;
+        uint16_t dst_port;
 
-        while (pos < (len - 12)) {
-            uint8_t label_len = qname[pos];
-            if (label_len == 0) {
-                break;
-            }
-            if ((label_len & 0xC0) == 0xC0) { // Pointer
-                break; 
-            }
-            if (pos + 1 + label_len > (len - 12)) {
-                return ""; // Malformed packet
-            }
-            if (!domain.empty()) {
-                domain += ".";
-            }
-            domain.append((const char*)(qname + pos + 1), label_len);
-            pos += 1 + label_len;
+        bool operator<(const FlowKey& o) const {
+            if (src_ip != o.src_ip) return src_ip < o.src_ip;
+            if (src_port != o.src_port) return src_port < o.src_port;
+            if (dst_ip != o.dst_ip) return dst_ip < o.dst_ip;
+            return dst_port < o.dst_port;
         }
-        return domain;
-    }
+    };
 
+    struct Session {
+        SOCKET sock;
+        sockaddr_in client_addr;
+        uint64_t last_access;
+    };
 
     void handle_data(SOCKET listener_socket, const char* data, int len, const sockaddr_in* client_addr, const OriginalDestination* dest) {
-        bool is_direct = true;
         uint16_t dport = ntohs(dest->port);
+        bool is_dns = (dport == 53);
 
-        // --- 1. DNS Handling (Port 53) ---
-        if (dport == 53) {
+        // --- 1. DNS Interception ---
+        if (is_dns) {
             std::string domain = parse_dns_query_domain(data, len);
             if (!domain.empty()) {
-                // *** DNS Cache Lookup ***
                 uint32_t cached_ip = DnsCache::instance().get(domain);
                 if (cached_ip != 0) {
-                    char ip_str[INET_ADDRSTRLEN];
-                    inet_ntop(AF_INET, &cached_ip, ip_str, INET_ADDRSTRLEN);
-                    LOG_DEBUG("[DNS] Cache Hit for '%s' -> %s", domain.c_str(), ip_str); // LOG_INFO -> LOG_DEBUG
-                    
                     std::vector<char> resp = build_dns_a_response(data, len, cached_ip);
                     if (!resp.empty()) {
                         sendto(listener_socket, resp.data(), (int)resp.size(), 0, (const sockaddr*)client_addr, sizeof(*client_addr));
                     }
-                    return; // Intercepted
+                    return;
                 }
-                // ************************
 
                 RouteAction rule = RuleManager::instance().match_domain(domain);
                 bool is_cn = GeoChecker::instance().is_cn_domain(domain);
-                bool should_proxy_dns = (rule == RouteAction::PROXY) || (rule == RouteAction::PASS && !is_cn);
-
-                LOG_DEBUG("[DNS] Query for '%s'. Rule: %d, IsCN: %d, ShouldProxy: %d", 
-                          domain.c_str(), (int)rule, is_cn, should_proxy_dns);
-
-                if (should_proxy_dns) {
-                    auto on_dns_response = [listener_socket, client_addr = *client_addr, domain](const char* dns_resp, int resp_len) {
+                if ((rule == RouteAction::PROXY) || (rule == RouteAction::PASS && !is_cn)) {
+                    auto on_dns_response = [listener_socket, caddr = *client_addr, domain](const char* dns_resp, int resp_len) {
                         if (resp_len > 0) {
                             DnsResponse res = parse_dns_response(dns_resp, resp_len);
-                            if (res.parse_error) {
-                                LOG_DEBUG("[DNS] Failed to parse DoT DNS response for '%s'.", domain.c_str()); // LOG_ERROR -> LOG_DEBUG
-                            } else {
-                                if (res.rcode == 0 && !res.addresses.empty()) {
-                                    std::string ips;
-                                    uint32_t first_ip_nbo = 0;
-                                    for (size_t i = 0; i < res.addresses.size(); ++i) {
-                                        ips += res.addresses[i];
-                                        if (i < res.addresses.size() - 1) ips += ", ";
-                                        if (i == 0) inet_pton(AF_INET, res.addresses[i].c_str(), &first_ip_nbo);
-                                    }
-                                    LOG_DEBUG("[DNS] Resolved '%s' to [%s] via DoT.", res.qname.c_str(), ips.c_str()); // LOG_INFO -> LOG_DEBUG
-                                    
-                                    // *** Write to Cache ***
-                                    if (first_ip_nbo != 0) {
-                                        DnsCache::instance().put(domain, first_ip_nbo, 300); // TTL 300s
-                                    }
-                                    // **********************
-
-                                } else if (res.rcode != 0) {
-                                    LOG_DEBUG("[DNS] Failed to resolve '%s' via DoT. RCODE: %d", res.qname.c_str(), res.rcode); // LOG_INFO -> LOG_DEBUG
-                                } else {
-                                    LOG_DEBUG("[DNS] Received response for '%s' via DoT (RCODE: 0, no A records).", res.qname.c_str()); // LOG_INFO -> LOG_DEBUG
-                                }
+                            if (!res.parse_error && res.rcode == 0 && !res.addresses.empty()) {
+                                uint32_t first_ip = 0;
+                                inet_pton(AF_INET, res.addresses[0].c_str(), &first_ip);
+                                DnsCache::instance().put(domain, first_ip, 300);
                             }
-                            sendto(listener_socket, dns_resp, resp_len, 0, (const sockaddr*)&client_addr, sizeof(client_addr));
-                        } else {
-                            LOG_DEBUG("[DNS] Received empty or invalid response for '%s' from DoT proxy.", domain.c_str()); // LOG_ERROR -> LOG_DEBUG
+                            sendto(listener_socket, dns_resp, resp_len, 0, (const sockaddr*)&caddr, sizeof(caddr));
                         }
                     };
                     std::vector<uint8_t> query_vec((uint8_t*)data, (uint8_t*)data + len);
@@ -286,165 +246,131 @@ public:
                     return;
                 }
             }
-            is_direct = true;
-        } 
-        // --- 2. QUIC Handling (Port 443) ---
-        else if (dport == 443) {
-            uint32_t ip_h = ntohl(dest->ip);
-            RouteAction rule = RuleManager::instance().match_ip(ip_h);
-            
-            bool is_cn = (rule == RouteAction::DIRECT) || (rule == RouteAction::PASS && GeoChecker::instance().is_cn_ip(ip_h));
-            
-            if (!is_cn) {
-                unsigned char* ip_bytes = (unsigned char*)&(dest->ip);
-                char ip_str[INET_ADDRSTRLEN];
-                snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-                LOG_DEBUG("[UdpProxy] Dropping international QUIC packet to %s", ip_str);
-                return; // DROP
-            }
-            is_direct = true;
         }
-        // --- 3. General UDP Handling ---
-        else {
-            is_direct = true; // Always direct for general UDP
-        }
+
+        // --- 2. Flow Matching & Forwarding ---
+        FlowKey flow = { client_addr->sin_addr.s_addr, client_addr->sin_port, dest->ip, dest->port };
         
-        // --- 4. Forwarding (Direct Relay) ---
-        sockaddr_in dest_addr_sock = {};
-        dest_addr_sock.sin_family = AF_INET;
-
-        if (is_direct && dport == 53) {
-            LOG_DEBUG("[DNS] Relaying DNS query for direct route to: %s", g_config.direct_dns_server.c_str());
-            inet_pton(AF_INET, g_config.direct_dns_server.c_str(), &dest_addr_sock.sin_addr);
-            dest_addr_sock.sin_port = htons(53);
-        }
-        else {
-            dest_addr_sock.sin_addr.s_addr = dest->ip;
-            dest_addr_sock.sin_port = dest->port;
+        sockaddr_in target_addr = {};
+        target_addr.sin_family = AF_INET;
+        if (is_dns) {
+            inet_pton(AF_INET, g_config.direct_dns_server.c_str(), &target_addr.sin_addr);
+            target_addr.sin_port = htons(53);
+        } else {
+            target_addr.sin_addr.s_addr = dest->ip;
+            target_addr.sin_port = dest->port;
         }
 
-        uint64_t dest_key = ((uint64_t)dest->ip << 16) | dport;
-        SOCKET remote_socket = get_or_create_remote_socket(dest_key, client_addr);
-
+        SOCKET remote_socket = get_or_create_session(flow, client_addr);
         if (remote_socket != INVALID_SOCKET) {
-            int bytes_sent = sendto(remote_socket, data, len, 0, (const sockaddr*)&dest_addr_sock, sizeof(dest_addr_sock));
-            if (bytes_sent != SOCKET_ERROR) {
-                 TrafficManager::instance().report_proxy_tx(bytes_sent, is_direct);
-            }
+            sendto(remote_socket, data, len, 0, (const sockaddr*)&target_addr, sizeof(target_addr));
+            TrafficManager::instance().report_proxy_tx(len, true);
         }
     }
 
 private:
-    void on_remote_read(SOCKET remote_socket, char* buf, int len, const sockaddr_in* from_addr) {
+    SOCKET get_or_create_session(const FlowKey& flow, const sockaddr_in* client_addr) {
+        uint64_t now = GetTickCount64();
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        // Periodic cleanup (every 30 seconds)
+        if (now - m_last_cleanup > 30000) {
+            cleanup_sessions(now);
+            m_last_cleanup = now;
+        }
+
+        auto it = m_sessions.find(flow);
+        if (it != m_sessions.end()) {
+            it->second.last_access = now;
+            return it->second.sock;
+        }
+
+        // Create new socket for this flow
+        SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (s == INVALID_SOCKET) return INVALID_SOCKET;
+
+        u_long mode = 1;
+        ioctlsocket(s, FIONBIO, &mode);
+
+        m_sessions[flow] = { s, *client_addr, now };
+        m_socket_to_flow[s] = flow;
+
+        WorkerPool::instance().add_socket(s, [this, s](char* b, int l, const sockaddr_in* f) {
+            this->on_remote_data(s, b, l, f);
+        }, nullptr, true);
+        
+        WorkerPool::instance().read_async(s);
+        return s;
+    }
+
+    void on_remote_data(SOCKET s, char* buf, int len, const sockaddr_in* from) {
         if (len <= 0) {
-            // Re-post a read even on error to keep the loop alive for UDP
-            WorkerPool::instance().read_async(remote_socket);
+            WorkerPool::instance().read_async(s);
             return;
         }
 
-        TrafficManager::instance().report_proxy_rx(len, true); // Assuming direct
-
-        // --- DNS Logging for Direct Queries ---
-        sockaddr_in direct_dns_addr = {};
-        inet_pton(AF_INET, g_config.direct_dns_server.c_str(), &direct_dns_addr.sin_addr);
-
-        // Heuristic: If packet comes from direct DNS server's IP, it's a DNS response.
-        if (from_addr->sin_addr.s_addr == direct_dns_addr.sin_addr.s_addr) {
-            DnsResponse res = parse_dns_response(buf, len);
-            if (res.parse_error) {
-                LOG_DEBUG("[DNS] Failed to parse direct DNS response."); // LOG_ERROR -> LOG_DEBUG
-            }
-            else {
-                if (res.rcode == 0 && !res.addresses.empty()) {
-                    std::string ips;
-                    uint32_t first_ip_nbo = 0;
-                    for (size_t i = 0; i < res.addresses.size(); ++i) {
-                        ips += res.addresses[i];
-                        if (i < res.addresses.size() - 1) ips += ", ";
-                        if (i == 0) inet_pton(AF_INET, res.addresses[i].c_str(), &first_ip_nbo);
-                    }
-                    LOG_DEBUG("[DNS] Resolved '%s' to [%s] via DIRECT.", res.qname.c_str(), ips.c_str()); // LOG_INFO -> LOG_DEBUG
-
-                    // *** Write to Cache ***
-                    if (first_ip_nbo != 0) {
-                        DnsCache::instance().put(res.qname, first_ip_nbo, 300);
-                    }
-                    // **********************
-
-                }
-                else if (res.rcode != 0) {
-                    LOG_DEBUG("[DNS] Failed to resolve '%s' via DIRECT. RCODE: %d", res.qname.c_str(), res.rcode); // LOG_INFO -> LOG_DEBUG
-                }
-                else {
-                    LOG_DEBUG("[DNS] Received response for '%s' via DIRECT (RCODE: 0, no A records).", res.qname.c_str()); // LOG_INFO -> LOG_DEBUG
-                }
-            }
-        }
-        // --- End of DNS Logging ---
-
-        sockaddr_in client_addr_to_send;
+        FlowKey flow;
+        sockaddr_in client_addr;
         bool found = false;
+
         {
             std::lock_guard<std::mutex> lock(m_mutex);
-            auto it = m_reverse_routes.find(remote_socket);
-            if (it != m_reverse_routes.end()) {
-                client_addr_to_send = it->second;
+            auto it = m_socket_to_flow.find(s);
+            if (it != m_socket_to_flow.end()) {
+                flow = it->second;
+                client_addr = m_sessions[flow].client_addr;
+                m_sessions[flow].last_access = GetTickCount64();
                 found = true;
             }
         }
 
         if (found) {
-            SOCKET listener_socket = (SOCKET)AppListener::instance().get_udp_socket();
-            if (listener_socket != INVALID_SOCKET) {
-                sendto(listener_socket, buf, len, 0, (const sockaddr*)&client_addr_to_send, sizeof(client_addr_to_send));
+            SOCKET listener = (SOCKET)AppListener::instance().get_udp_socket();
+            if (listener != INVALID_SOCKET) {
+                sendto(listener, buf, len, 0, (const sockaddr*)&client_addr, sizeof(client_addr));
+                TrafficManager::instance().report_proxy_rx(len, true);
             }
         }
-        else {
-            LOG_ERROR("[UdpProxy] Received a UDP packet on a remote socket but could not find a reverse route.");
-        }
         
-        // Post another read to continue receiving packets on this remote socket
-        WorkerPool::instance().read_async(remote_socket);
+        WorkerPool::instance().read_async(s);
     }
-    
-    SOCKET get_or_create_remote_socket(uint64_t dest_key, const sockaddr_in* client_addr) {
-        std::lock_guard<std::mutex> lock(m_mutex);
 
-        auto it = m_remote_sockets.find(dest_key);
-        if (it != m_remote_sockets.end()) {
-            m_reverse_routes[it->second] = *client_addr;
-            return it->second;
+    void cleanup_sessions(uint64_t now) {
+        const uint64_t timeout = 60000; // 60 seconds
+        for (auto it = m_sessions.begin(); it != m_sessions.end(); ) {
+            if (now - it->second.last_access > timeout) {
+                SOCKET s = it->second.sock;
+                m_socket_to_flow.erase(s);
+                WorkerPool::instance().remove_socket(s);
+                closesocket(s);
+                it = m_sessions.erase(it);
+            } else {
+                ++it;
+            }
         }
+    }
 
-        SOCKET new_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (new_socket == INVALID_SOCKET) {
-            LOG_ERROR("[UdpProxy] Failed to create remote UDP socket.");
-            return INVALID_SOCKET;
+    // Helper to parse domain name from DNS query
+    std::string parse_dns_query_domain(const char* data, int len) {
+        if (len < 13) return "";
+        std::string domain = "";
+        const unsigned char* qname = (const unsigned char*)(data + 12);
+        int pos = 0;
+        while (pos < (len - 12)) {
+            uint8_t label_len = qname[pos];
+            if (label_len == 0 || (label_len & 0xC0) == 0xC0) break;
+            if (pos + 1 + label_len > (len - 12)) return "";
+            if (!domain.empty()) domain += ".";
+            domain.append((const char*)(qname + pos + 1), label_len);
+            pos += 1 + label_len;
         }
-        
-        u_long mode = 1;
-        ioctlsocket(new_socket, FIONBIO, &mode);
-        
-        WorkerPool::instance().add_socket(
-            new_socket,
-            [this, new_socket](char* buf, int len, const sockaddr_in* from) { this->on_remote_read(new_socket, buf, len, from); },
-            nullptr,
-            true
-        );
-
-        m_remote_sockets[dest_key] = new_socket;
-        m_reverse_routes[new_socket] = *client_addr;
-        
-        WorkerPool::instance().read_async(new_socket);
-
-        LOG_DEBUG("[UdpProxy] Created new remote UDP socket for dest key %llu", dest_key);
-
-        return new_socket;
+        return domain;
     }
 
     std::mutex m_mutex;
-    std::unordered_map<uint64_t, SOCKET> m_remote_sockets;
-    std::unordered_map<SOCKET, sockaddr_in> m_reverse_routes;
+    std::map<FlowKey, Session> m_sessions;
+    std::unordered_map<SOCKET, FlowKey> m_socket_to_flow;
+    uint64_t m_last_cleanup;
 };
 
 static UdpProxyManager g_udp_manager;
