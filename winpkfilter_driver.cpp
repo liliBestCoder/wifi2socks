@@ -319,8 +319,6 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
     std::list<QueuedPacket> local_queue;
     std::vector<Packet> packets_to_send; packets_to_send.reserve(BATCH_SIZE);
     std::vector<Packet> packets_to_mstcp; packets_to_mstcp.reserve(BATCH_SIZE);
-    uint64_t processed_count = 0;
-
     while (m_running) {
         {
             std::unique_lock<std::mutex> lock(m_worker_queues[worker_id]->mtx);
@@ -333,10 +331,6 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
         packets_to_send.clear(); packets_to_mstcp.clear();
 
         for (auto& p_in : local_queue) {
-            processed_count++;
-            if (processed_count % 10000 == 0) {
-                LOG_INFO("[Worker %u] Heartbeat - Processed %llu packets", worker_id, processed_count);
-            }
             Packet p{ RawPacketPtr(p_in.buffer), (p_in.buffer->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) };
             unsigned char* buffer = p.data->m_IBuffer;
             size_t length = p.data->m_Length;
@@ -451,32 +445,15 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
 void WinPkFilterDriver::run() {
     std::list<ProcessedPacket> local_results;
     HANDLE wait_events[2] = { m_wait_event, m_results_event };
-    uint32_t idle_counter = 0;
-
     while (m_running) {
-        DWORD wait_res = WaitForMultipleObjects(2, wait_events, FALSE, 100); // Increase to 100ms for lower CPU when idle
+        WaitForMultipleObjects(2, wait_events, FALSE, 10);
         if (!m_running) break;
-
-        if (wait_res == WAIT_TIMEOUT) {
-            if (++idle_counter % 50 == 0) { // Log every 5 seconds when completely idle
-                LOG_INFO("[Driver] Loop heartbeat (idle)");
-            }
-        } else {
-            idle_counter = 0;
-        }
 
         // 1. Read & Dispatch
         bool data_available = true;
         for (int r = 0; r < 20 && m_running && data_available; ++r) {
             m_read_request->dwPacketsNumber = BATCH_SIZE;
-            
-            auto read_start = std::chrono::steady_clock::now();
-            BOOL read_ok = m_ndis_api.ReadPackets(m_read_request);
-            auto read_end = std::chrono::steady_clock::now();
-            auto read_ms = std::chrono::duration_cast<std::chrono::milliseconds>(read_end - read_start).count();
-            if (read_ms > 500) LOG_WARN("[Driver] ReadPackets took %lld ms", read_ms);
-
-            if (read_ok) {
+            if (m_ndis_api.ReadPackets(m_read_request)) {
                 if (m_read_request->dwPacketsSuccess > 0) {
                     std::vector<std::list<QueuedPacket>> groups(m_num_workers);
                     for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
@@ -499,12 +476,10 @@ void WinPkFilterDriver::run() {
                             if (ether_type != ETHERTYPE_IP) {
                                 if (ether_type == ETHERTYPE_ARP && b->m_Length >= 14 + sizeof(ARP_HEADER)) {
                                     PARP_HEADER arp = (PARP_HEADER)(buffer + 14);
-                                    // If it's an ARP request for our gateway IP, reply directly
-                                    if (ntohs(arp->OpCode) == 1 && arp->DstIp == m_gateway_ip) {
-                                        char client_ip_str[INET_ADDRSTRLEN];
-                                        inet_ntop(AF_INET, &arp->SrcIp, client_ip_str, INET_ADDRSTRLEN);
-                                        LOG_INFO("[FastPath] Replying directly to ARP request for gateway from %s (%02x:%02x:%02x:%02x:%02x:%02x)",
-                                            client_ip_str, arp->SrcMac[0], arp->SrcMac[1], arp->SrcMac[2], arp->SrcMac[3], arp->SrcMac[4], arp->SrcMac[5]);
+                                    // CRITICAL: Only reply if it's an ARP Request from the ADAPTER (phone)
+                                    // If Windows (ON_SEND) asks for the gateway, DO NOT reply, otherwise Windows thinks there's an IP CONFLICT.
+                                    if (ntohs(arp->OpCode) == 1 && arp->DstIp == m_gateway_ip && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND) {
+                                        LOG_INFO("[FastPath] Replying directly to ARP request for gateway");
 
                                         // Swap Ethernet MACs
                                         memcpy(buffer, buffer + 6, 6);
@@ -517,26 +492,18 @@ void WinPkFilterDriver::run() {
                                         memcpy(arp->SrcMac, m_adapter_mac, 6);
                                         arp->SrcIp = m_gateway_ip;
 
-                                        // Send back directly to requester
-                                        if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) {
-                                            this->send_to_mstcp((const char*)buffer, b->m_Length);
-                                        } else {
-                                            this->send_to_adapter((const char*)buffer, b->m_Length);
-                                        }
-                                        LOG_DEBUG("[FastPath] ARP reply injected successfully to %s", client_ip_str);
+                                        // Send back directly to requester (phone)
+                                        this->send_to_adapter((const char*)buffer, b->m_Length);
                                         
                                         PacketPool::instance().release(b);
                                         m_read_request->EthPacket[i].Buffer = nullptr;
                                         handled = true;
                                     }
                                 } else if (ether_type == htons(0x888E)) { // EAPOL
-                                    LOG_INFO("[FastPath] Forwarding EAPOL packet directly");
+                                    LOG_DEBUG("[FastPath] Forwarding EAPOL packet directly");
                                 }
 
                                 if (!handled) {
-                                    if (ether_type == ETHERTYPE_ARP) {
-                                        LOG_INFO("[FastPath] Forwarding ARP packet directly");
-                                    }
                                     // General pass-through: send directly
                                     if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) {
                                         this->send_to_adapter((const char*)buffer, b->m_Length);
@@ -594,18 +561,19 @@ void WinPkFilterDriver::run() {
                                             this->send_dhcp_response(client_mac, m_gateway_ip, dhcp_r, m_adapter_mac);
                                         }
                                         PacketPool::instance().release(b);
-                                        m_read_request->EthPacket[i].Buffer = nullptr;
+                                        m_read_request->EthPacket[i].Buffer = nullptr; // 释放
                                         handled = true;
                                     }
                                     else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) { // Drop Discovery
                                         PacketPool::instance().release(b);
-                                        m_read_request->EthPacket[i].Buffer = nullptr;
+                                        m_read_request->EthPacket[i].Buffer = nullptr; // 释放
                                         handled = true;
                                     }
                                 }
                             }
                         }
-                                                    // --- Slow Path (if not handled by fast path) ---
+
+                    // --- Slow Path (if not handled by fast path) ---
                     if (!handled) {
                         groups[get_target_worker((char*)b->m_IBuffer, b->m_Length, b->m_dwDeviceFlags, m_num_workers)].push_back({ b });
                         m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred to worker
@@ -661,13 +629,7 @@ void WinPkFilterDriver::run() {
                     to_adapter.pop_front();
                 }
                 m_write_request->hAdapterHandle = m_adapter_handle;
-                auto write_start = std::chrono::steady_clock::now();
-                BOOL write_ok = m_ndis_api.SendPacketsToAdapter(m_write_request);
-                auto write_end = std::chrono::steady_clock::now();
-                auto write_ms = std::chrono::duration_cast<std::chrono::milliseconds>(write_end - write_start).count();
-                if (write_ms > 500) LOG_WARN("[Driver] SendPacketsToAdapter took %lld ms", write_ms);
-
-                if (write_ok) {
+                if (m_ndis_api.SendPacketsToAdapter(m_write_request)) {
                     std::vector<RawPacket*> ptrs;
                     for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) ptrs.push_back(m_write_request->EthPacket[i].Buffer);
                     PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
@@ -686,13 +648,7 @@ void WinPkFilterDriver::run() {
                     to_mstcp.pop_front();
                 }
                 m_mstcp_request->hAdapterHandle = m_adapter_handle;
-                auto write_start = std::chrono::steady_clock::now();
-                BOOL write_ok = m_ndis_api.SendPacketsToMstcp(m_mstcp_request);
-                auto write_end = std::chrono::steady_clock::now();
-                auto write_ms = std::chrono::duration_cast<std::chrono::milliseconds>(write_end - write_start).count();
-                if (write_ms > 500) LOG_WARN("[Driver] SendPacketsToMstcp took %lld ms", write_ms);
-
-                if (write_ok) {
+                if (m_ndis_api.SendPacketsToMstcp(m_mstcp_request)) {
                     std::vector<RawPacket*> ptrs;
                     for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) ptrs.push_back(m_mstcp_request->EthPacket[i].Buffer);
                     PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
@@ -719,7 +675,7 @@ void WinPkFilterDriver::run() {
                 backlog += q->packets.size();
             }
             uint64_t total_pkts = dl_pkts + ul_pkts;
-            LOG_INFO("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us",
+            LOG_DEBUG("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us",
                 dl_mbps, dl_pkts, ul_mbps, ul_pkts, backlog, total_pkts > 0 ? work_us / total_pkts : 0);
             m_last_stat_time = now;
         }
@@ -739,11 +695,7 @@ bool WinPkFilterDriver::send_to_adapter(const char* packet, size_t length) {
     size_t clen = (length > MAX_ETHER_FRAME) ? MAX_ETHER_FRAME : length;
     memcpy(m_send_buffer->m_IBuffer, packet, clen); m_send_buffer->m_Length = (ULONG)clen; m_send_buffer->m_dwDeviceFlags = PACKET_FLAG_ON_SEND;
     ETH_REQUEST req = { m_adapter_handle, { m_send_buffer } };
-    if (m_ndis_api.SendPacketToAdapter(&req) == FALSE) {
-        LOG_WARN("[Driver] SendPacketToAdapter failed. Error: %d", WSAGetLastError());
-        return false;
-    }
-    return true;
+    return m_ndis_api.SendPacketToAdapter(&req) != FALSE;
 }
 
 bool WinPkFilterDriver::send_to_mstcp(const char* packet, size_t length) {
@@ -751,11 +703,7 @@ bool WinPkFilterDriver::send_to_mstcp(const char* packet, size_t length) {
     size_t clen = (length > MAX_ETHER_FRAME) ? MAX_ETHER_FRAME : length;
     memcpy(m_send_buffer->m_IBuffer, packet, clen); m_send_buffer->m_Length = (ULONG)clen; m_send_buffer->m_dwDeviceFlags = PACKET_FLAG_ON_RECEIVE;
     ETH_REQUEST req = { m_adapter_handle, { m_send_buffer } };
-    if (m_ndis_api.SendPacketToMstcp(&req) == FALSE) {
-        LOG_WARN("[Driver] SendPacketToMstcp failed. Error: %d", WSAGetLastError());
-        return false;
-    }
-    return true;
+    return m_ndis_api.SendPacketToMstcp(&req) != FALSE;
 }
 
 void  WinPkFilterDriver::send_dhcp_response(const uint8_t* client_mac, const uint32_t src_ip, const DhcpResponse& dhcp_r, const uint8_t* m_adapter_mac) {
