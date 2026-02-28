@@ -474,18 +474,46 @@ void WinPkFilterDriver::run() {
                             // Non-IP Fast Path (ARP, EAPOL, IPv6, etc.)
                             // Directly inject to results queue to avoid worker latency/reordering
                             if (ether_type != ETHERTYPE_IP) {
-                                if (ether_type == ETHERTYPE_ARP) {
-                                    LOG_INFO("[FastPath] Injecting ARP packet");
+                                if (ether_type == ETHERTYPE_ARP && b->m_Length >= 14 + sizeof(ARP_HEADER)) {
+                                    PARP_HEADER arp = (PARP_HEADER)(buffer + 14);
+                                    // If it's an ARP request for our gateway IP
+                                    if (ntohs(arp->OpCode) == 1 && arp->DstIp == m_gateway_ip) {
+                                        LOG_INFO("[FastPath] Replying to ARP request for gateway");
+
+                                        // Swap Ethernet MACs
+                                        memcpy(buffer, buffer + 6, 6);
+                                        memcpy(buffer + 6, m_adapter_mac, 6);
+
+                                        // Update ARP Header
+                                        arp->OpCode = htons(2); // Reply
+                                        memcpy(arp->DstMac, arp->SrcMac, 6);
+                                        arp->DstIp = arp->SrcIp;
+                                        memcpy(arp->SrcMac, m_adapter_mac, 6);
+                                        arp->SrcIp = m_gateway_ip;
+
+                                        // Send back to where it came from
+                                        PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_MSTCP : PacketDestination::TO_ADAPTER;
+                                        std::lock_guard<std::mutex> lock(m_results_queue.mtx);
+                                        m_results_queue.packets.push_back({ b, dest });
+                                        m_read_request->EthPacket[i].Buffer = nullptr; // Transfer ownership
+                                        SetEvent(m_results_event);
+                                        handled = true;
+                                    }
                                 } else if (ether_type == htons(0x888E)) { // EAPOL
                                     LOG_INFO("[FastPath] Injecting EAPOL packet");
                                 }
 
-                                PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
-                                std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-                                m_results_queue.packets.push_back({ b, dest });
-                                m_read_request->EthPacket[i].Buffer = nullptr; // Transfer ownership
-                                SetEvent(m_results_event);
-                                handled = true;
+                                if (!handled) {
+                                    if (ether_type == ETHERTYPE_ARP) {
+                                        LOG_INFO("[FastPath] Injecting ARP packet");
+                                    }
+                                    PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
+                                    std::lock_guard<std::mutex> lock(m_results_queue.mtx);
+                                    m_results_queue.packets.push_back({ b, dest });
+                                    m_read_request->EthPacket[i].Buffer = nullptr; // Transfer ownership
+                                    SetEvent(m_results_event);
+                                    handled = true;
+                                }
                             }
 
                             if (!handled && ether_type == ETHERTYPE_IP && b->m_Length >= 34) {
