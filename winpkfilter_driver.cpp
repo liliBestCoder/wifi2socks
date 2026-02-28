@@ -534,18 +534,6 @@ void WinPkFilterDriver::run() {
 
                                 int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
 
-                                // Suppress Outbound ICMP Port Unreachable from Gateway
-                                // This prevents Windows from confusing the client when it receives a packet 
-                                // that the driver handled but the OS thinks is unhandled.
-                                if (!handled && ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
-                                    PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ip_hdr_len);
-                                    if (icmp->Type == 3 && ip->SrcAddr == m_gateway_ip) {
-                                        PacketPool::instance().release(b);
-                                        m_read_request->EthPacket[i].Buffer = nullptr;
-                                        handled = true;
-                                    }
-                                }
-
                                 if (!handled && ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ip_hdr_len + sizeof(ICMP_HEADER)) {
                                     PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ip_hdr_len);
                                     if (icmp->Type == 8) {
@@ -594,6 +582,18 @@ void WinPkFilterDriver::run() {
                                     else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) { // Drop Discovery
                                         PacketPool::instance().release(b);
                                         m_read_request->EthPacket[i].Buffer = nullptr; // 释放
+                                        handled = true;
+                                    }
+                                }
+                                else if (!handled && ip->Proto == IPPROTO_TCP && b->m_Length >= 14 + ip_hdr_len + sizeof(TCP_HEADER)) {
+                                    PTCP_HEADER udp = (PTCP_HEADER)((char*)ip + ip_hdr_len);
+                                    USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
+                                    if (sp == 80 || dp == 80) {
+                                        PacketDestination dest = (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) ? PacketDestination::TO_ADAPTER : PacketDestination::TO_MSTCP;
+                                        std::lock_guard<std::mutex> lock(m_results_queue.mtx);
+                                        m_results_queue.packets.push_back({ b, dest });
+                                        m_read_request->EthPacket[i].Buffer = nullptr; // Transfer ownership
+                                        SetEvent(m_results_event);
                                         handled = true;
                                     }
                                 }
