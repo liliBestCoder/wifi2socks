@@ -281,7 +281,7 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
     m_batch_handler = handler;
     m_wait_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     m_ndis_api.SetPacketEvent(m_adapter_handle, m_wait_event);
-    ADAPTER_MODE mode = { m_adapter_handle, MSTCP_FLAG_SENT_RECEIVE | MSTCP_FLAG_SENT_TUNNEL | MSTCP_FLAG_RECV_TUNNEL };
+    ADAPTER_MODE mode = { m_adapter_handle,  MSTCP_FLAG_SENT_TUNNEL | MSTCP_FLAG_RECV_TUNNEL };
     m_ndis_api.SetAdapterMode(&mode);
     m_running = true;
     m_read_request->hAdapterHandle = m_adapter_handle;
@@ -400,11 +400,11 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                                 }
                                 packets_to_mstcp.push_back(std::move(p)); handled = true;
                             }
-                                                    else if (p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP)) {
-                                                        USHORT sport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort) : ntohs(((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
-                                                        if (sport == NAT_TARGET_PORT) {
-                                                            std::optional<OriginalDestination> od;
-                                                            bool handled_udp_nat = false;
+                            else if (p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP)) {
+                                USHORT sport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort) : ntohs(((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
+                                if (sport == NAT_TARGET_PORT) {
+                                    std::optional<OriginalDestination> od;
+                                    bool handled_udp_nat = false;
                         
                                 if (ip->Proto == IPPROTO_TCP) {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4);

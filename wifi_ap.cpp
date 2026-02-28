@@ -130,7 +130,7 @@ void WiFiAPManager::StartListener() {
     }
 
     Windows::Foundation::ActivateInstance(HStringReference(RuntimeClass_Windows_Devices_WiFiDirect_WiFiDirectConnectionListener).Get(), &_connectionListener);
-    _connectionListener->add_ConnectionRequested(Callback<ConnectionRequestedHandler>([this](IWiFiDirectConnectionListener* sender, IWiFiDirectConnectionRequestedEventArgs* args) -> HRESULT {
+    /*_connectionListener->add_ConnectionRequested(Callback<ConnectionRequestedHandler>([this](IWiFiDirectConnectionListener* sender, IWiFiDirectConnectionRequestedEventArgs* args) -> HRESULT {
         ComPtr<IWiFiDirectConnectionRequest> request;
         ComPtr<IDeviceInformation> deviceInfo;
         HString deviceId;
@@ -161,7 +161,7 @@ void WiFiAPManager::StartListener() {
             return S_OK;
             }).Get());
         return S_OK;
-        }).Get(), &_connectionRequestedToken);
+        }).Get(), &_connectionRequestedToken);*/
 }
 
 void WiFiAPManager::Reset() {

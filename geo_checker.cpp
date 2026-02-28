@@ -317,6 +317,7 @@ std::string GeoChecker::query_domain(const std::string& domain) {
 
 bool GeoChecker::is_cn_domain(const std::string& domain) {
     if (!m_ready) return false;
+    if (is_tencent_domain(domain)) return true;
     std::string d = to_lower(domain);
     if (!d.empty() && d.back() == '.') d.pop_back();
     
