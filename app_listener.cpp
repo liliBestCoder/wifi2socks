@@ -139,7 +139,14 @@ void AppListener::udp_listener_thread() {
         auto dest = NatManager::instance().get_mapping(key);
 
         if (dest) {
-            UdpProxy::handle_client_data(listen_socket, buffer, bytes_read, &client_addr, &(*dest));
+            // Offload to worker pool to avoid blocking the listener thread
+            std::vector<char> packet_data(buffer, buffer + bytes_read);
+            sockaddr_in client_copy = client_addr;
+            OriginalDestination dest_copy = *dest;
+
+            WorkerPool::instance().queue_task([listen_socket, packet_data = std::move(packet_data), client_copy, dest_copy]() {
+                UdpProxy::handle_client_data(listen_socket, packet_data.data(), (int)packet_data.size(), &client_copy, &dest_copy);
+            });
         }
     }
     closesocket(listen_socket);

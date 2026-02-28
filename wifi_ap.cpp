@@ -53,6 +53,9 @@ void WiFiAPManager::CheckKeepAlive() {
     std::vector<std::wstring> to_remove;
     {
         std::lock_guard<std::mutex> lock(_devicesMutex);
+        if (_connectedDevices.empty()) return;
+
+        auto start_check = GetTickCount64();
         for (auto& pair : _connectedDevices) {
             ComPtr<EndpointPairCollection> endpointPairs;
             HRESULT hr = pair.second->GetConnectionEndpointPairs(endpointPairs.GetAddressOf());
@@ -61,6 +64,10 @@ void WiFiAPManager::CheckKeepAlive() {
                     to_remove.push_back(pair.first);
                 }
             }
+        }
+        auto end_check = GetTickCount64();
+        if (end_check - start_check > 100) {
+            LOG_DEBUG("[WIFI] CheckKeepAlive WinRT calls took %llu ms", end_check - start_check);
         }
     }
     

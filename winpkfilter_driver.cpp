@@ -445,15 +445,32 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
 void WinPkFilterDriver::run() {
     std::list<ProcessedPacket> local_results;
     HANDLE wait_events[2] = { m_wait_event, m_results_event };
+    uint32_t idle_counter = 0;
+
     while (m_running) {
-        WaitForMultipleObjects(2, wait_events, FALSE, 10);
+        DWORD wait_res = WaitForMultipleObjects(2, wait_events, FALSE, 100); // Increase to 100ms for lower CPU when idle
         if (!m_running) break;
+
+        if (wait_res == WAIT_TIMEOUT) {
+            if (++idle_counter % 50 == 0) { // Log every 5 seconds when completely idle
+                LOG_DEBUG("[Driver] Loop heartbeat (idle)");
+            }
+        } else {
+            idle_counter = 0;
+        }
 
         // 1. Read & Dispatch
         bool data_available = true;
         for (int r = 0; r < 20 && m_running && data_available; ++r) {
             m_read_request->dwPacketsNumber = BATCH_SIZE;
-            if (m_ndis_api.ReadPackets(m_read_request)) {
+            
+            auto read_start = std::chrono::steady_clock::now();
+            BOOL read_ok = m_ndis_api.ReadPackets(m_read_request);
+            auto read_end = std::chrono::steady_clock::now();
+            auto read_ms = std::chrono::duration_cast<std::chrono::milliseconds>(read_end - read_start).count();
+            if (read_ms > 500) LOG_WARN("[Driver] ReadPackets took %lld ms", read_ms);
+
+            if (read_ok) {
                 if (m_read_request->dwPacketsSuccess > 0) {
                     std::vector<std::list<QueuedPacket>> groups(m_num_workers);
                     for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
@@ -497,6 +514,7 @@ void WinPkFilterDriver::run() {
                                         } else {
                                             this->send_to_adapter((const char*)buffer, b->m_Length);
                                         }
+                                        LOG_DEBUG("[FastPath] ARP reply injected successfully");
                                         
                                         PacketPool::instance().release(b);
                                         m_read_request->EthPacket[i].Buffer = nullptr;
@@ -634,7 +652,13 @@ void WinPkFilterDriver::run() {
                     to_adapter.pop_front();
                 }
                 m_write_request->hAdapterHandle = m_adapter_handle;
-                if (m_ndis_api.SendPacketsToAdapter(m_write_request)) {
+                auto write_start = std::chrono::steady_clock::now();
+                BOOL write_ok = m_ndis_api.SendPacketsToAdapter(m_write_request);
+                auto write_end = std::chrono::steady_clock::now();
+                auto write_ms = std::chrono::duration_cast<std::chrono::milliseconds>(write_end - write_start).count();
+                if (write_ms > 500) LOG_WARN("[Driver] SendPacketsToAdapter took %lld ms", write_ms);
+
+                if (write_ok) {
                     std::vector<RawPacket*> ptrs;
                     for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) ptrs.push_back(m_write_request->EthPacket[i].Buffer);
                     PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
@@ -653,7 +677,13 @@ void WinPkFilterDriver::run() {
                     to_mstcp.pop_front();
                 }
                 m_mstcp_request->hAdapterHandle = m_adapter_handle;
-                if (m_ndis_api.SendPacketsToMstcp(m_mstcp_request)) {
+                auto write_start = std::chrono::steady_clock::now();
+                BOOL write_ok = m_ndis_api.SendPacketsToMstcp(m_mstcp_request);
+                auto write_end = std::chrono::steady_clock::now();
+                auto write_ms = std::chrono::duration_cast<std::chrono::milliseconds>(write_end - write_start).count();
+                if (write_ms > 500) LOG_WARN("[Driver] SendPacketsToMstcp took %lld ms", write_ms);
+
+                if (write_ok) {
                     std::vector<RawPacket*> ptrs;
                     for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) ptrs.push_back(m_mstcp_request->EthPacket[i].Buffer);
                     PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
