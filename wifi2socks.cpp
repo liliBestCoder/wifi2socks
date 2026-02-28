@@ -145,7 +145,7 @@ int main() {
     uint32_t main_beat_count = 0;
     while (true) {
         if (++main_beat_count % 100 == 0) { // Every ~10 seconds
-            LOG_DEBUG("[Main] Heartbeat - Main loop is running");
+            LOG_INFO("[Main] Heartbeat - Main loop is running");
         }
         size_t current_q_size = MainDispatcher::instance().get_queue_size();
         if (current_q_size > peak_q_size) {

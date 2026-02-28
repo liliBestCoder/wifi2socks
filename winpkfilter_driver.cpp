@@ -453,7 +453,7 @@ void WinPkFilterDriver::run() {
 
         if (wait_res == WAIT_TIMEOUT) {
             if (++idle_counter % 50 == 0) { // Log every 5 seconds when completely idle
-                LOG_DEBUG("[Driver] Loop heartbeat (idle)");
+                LOG_INFO("[Driver] Loop heartbeat (idle)");
             }
         } else {
             idle_counter = 0;
@@ -710,7 +710,7 @@ void WinPkFilterDriver::run() {
                 backlog += q->packets.size();
             }
             uint64_t total_pkts = dl_pkts + ul_pkts;
-            LOG_DEBUG("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us",
+            LOG_INFO("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us",
                 dl_mbps, dl_pkts, ul_mbps, ul_pkts, backlog, total_pkts > 0 ? work_us / total_pkts : 0);
             m_last_stat_time = now;
         }
