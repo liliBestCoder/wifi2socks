@@ -229,18 +229,39 @@ public:
 
                 RouteAction rule = RuleManager::instance().match_domain(domain);
                 bool is_cn = GeoChecker::instance().is_cn_domain(domain);
+                bool should_proxy_dns = (rule == RouteAction::PROXY) || (rule == RouteAction::PASS && !is_cn);
                 
+                LOG_DEBUG("[DNS] Query for '%s'. Rule: %d, IsCN: %d, ShouldProxy: %d", 
+                          domain.c_str(), (int)rule, is_cn, should_proxy_dns);
+
                 // If it's a foreign domain, use DNS-over-TCP (DoT)
-                if ((rule == RouteAction::PROXY) || (rule == RouteAction::PASS && !is_cn)) {
+                if (should_proxy_dns) {
                     auto on_dns_response = [listener_socket, caddr = *client_addr, domain](const char* dns_resp, int resp_len) {
                         if (resp_len > 0) {
                             DnsResponse res = parse_dns_response(dns_resp, resp_len);
-                            if (!res.parse_error && res.rcode == 0 && !res.addresses.empty()) {
-                                uint32_t first_ip = 0;
-                                inet_pton(AF_INET, res.addresses[0].c_str(), &first_ip);
-                                DnsCache::instance().put(domain, first_ip, 300);
+                            if (res.parse_error) {
+                                LOG_WARN("[DNS] Failed to parse DoT DNS response for '%s'.", domain.c_str());
+                            } else {
+                                if (res.rcode == 0 && !res.addresses.empty()) {
+                                    std::string ips;
+                                    for (size_t i = 0; i < res.addresses.size(); ++i) {
+                                        ips += res.addresses[i];
+                                        if (i < res.addresses.size() - 1) ips += ", ";
+                                    }
+                                    LOG_INFO("[DNS] Resolved '%s' to [%s] via DoT.", res.qname.c_str(), ips.c_str());
+                                    
+                                    uint32_t first_ip = 0;
+                                    inet_pton(AF_INET, res.addresses[0].c_str(), &first_ip);
+                                    DnsCache::instance().put(domain, first_ip, 300);
+                                } else if (res.rcode != 0) {
+                                    LOG_INFO("[DNS] Failed to resolve '%s' via DoT. RCODE: %d", res.qname.c_str(), res.rcode);
+                                } else {
+                                    LOG_INFO("[DNS] Received response for '%s' via DoT (RCODE: 0, no A records).", res.qname.c_str());
+                                }
                             }
                             sendto(listener_socket, dns_resp, resp_len, 0, (const sockaddr*)&caddr, sizeof(caddr));
+                        } else {
+                            LOG_ERROR("[DNS] Received empty or invalid response for '%s' from DoT proxy.", domain.c_str());
                         }
                     };
                     std::vector<uint8_t> query_vec((uint8_t*)data, (uint8_t*)data + len);
@@ -339,6 +360,35 @@ private:
             WorkerPool::instance().read_async(s);
             return;
         }
+
+        // --- DNS Logging for Direct Queries ---
+        sockaddr_in direct_dns_addr = {};
+        inet_pton(AF_INET, g_config.direct_dns_server.c_str(), &direct_dns_addr.sin_addr);
+
+        // Heuristic: If packet comes from direct DNS server's IP, it's a DNS response.
+        if (from->sin_addr.s_addr == direct_dns_addr.sin_addr.s_addr) {
+            DnsResponse res = parse_dns_response(buf, len);
+            if (res.parse_error) {
+                LOG_WARN("[DNS] Failed to parse direct DNS response.");
+            }
+            else {
+                if (res.rcode == 0 && !res.addresses.empty()) {
+                    std::string ips;
+                    for (size_t i = 0; i < res.addresses.size(); ++i) {
+                        ips += res.addresses[i];
+                        if (i < res.addresses.size() - 1) ips += ", ";
+                    }
+                    LOG_INFO("[DNS] Resolved '%s' to [%s] via DIRECT.", res.qname.c_str(), ips.c_str());
+                }
+                else if (res.rcode != 0) {
+                    LOG_INFO("[DNS] Failed to resolve '%s' via DIRECT. RCODE: %d", res.qname.c_str(), res.rcode);
+                }
+                else {
+                    LOG_INFO("[DNS] Received response for '%s' via DIRECT (RCODE: 0, no A records).", res.qname.c_str());
+                }
+            }
+        }
+        // --- End of DNS Logging ---
 
         FlowKey flow;
         sockaddr_in client_addr;
