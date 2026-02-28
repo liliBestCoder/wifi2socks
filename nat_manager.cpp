@@ -77,25 +77,51 @@ uint16_t NatManager::allocate_udp_virtual_port(const UdpKey4& key, const Origina
     uint64_t key64 = make_key(key.src_ip, key.src_port);
     auto& shard_k = m_shards[key64 % NUM_SHARDS];
     
+    uint16_t existing_vport = 0;
     {
         std::shared_lock<std::shared_mutex> lock(shard_k.mtx);
         auto it = shard_k.udp_map.find(key);
         if (it != shard_k.udp_map.end() && it->second.vport != 0) {
-            uint16_t v = it->second.vport;
-            // Best-effort update of last_access on the vport shard
-            auto& shard_v = m_shards[v % NUM_SHARDS];
-            std::unique_lock<std::shared_mutex> lock_v(shard_v.mtx);
-            if (shard_v.vport_to_udp.count(v)) {
-                shard_v.vport_to_udp[v].last_access = GetTickCount64();
-                return v;
+            existing_vport = it->second.vport;
+        }
+    }
+
+    uint64_t now = GetTickCount64();
+
+    if (existing_vport != 0) {
+        // Lazy update for vport_to_udp
+        auto& shard_v = m_shards[existing_vport % NUM_SHARDS];
+        {
+            std::shared_lock<std::shared_mutex> lock_v(shard_v.mtx);
+            auto it_v = shard_v.vport_to_udp.find(existing_vport);
+            if (it_v != shard_v.vport_to_udp.end() && (now - it_v->second.last_access > 1000)) {
+                lock_v.unlock();
+                std::unique_lock<std::shared_mutex> ulock_v(shard_v.mtx);
+                auto it_retry = shard_v.vport_to_udp.find(existing_vport);
+                if (it_retry != shard_v.vport_to_udp.end()) {
+                    it_retry->second.last_access = now;
+                }
             }
         }
+        
+        // Lazy update for udp_map
+        {
+            std::shared_lock<std::shared_mutex> lock_k(shard_k.mtx);
+            auto it_k = shard_k.udp_map.find(key);
+            if (it_k != shard_k.udp_map.end() && (now - it_k->second.last_access > 1000)) {
+                lock_k.unlock();
+                std::unique_lock<std::shared_mutex> ulock_k(shard_k.mtx);
+                auto it_retry = shard_k.udp_map.find(key);
+                if (it_retry != shard_k.udp_map.end()) {
+                    it_retry->second.last_access = now;
+                }
+            }
+        }
+        return existing_vport;
     }
 
     uint16_t vport = m_next_vport++;
     if (m_next_vport > VPORT_END) m_next_vport = VPORT_START;
-
-    uint64_t now = GetTickCount64();
 
     {
         std::unique_lock<std::shared_mutex> lock_k(shard_k.mtx);
