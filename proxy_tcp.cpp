@@ -117,6 +117,11 @@ void ProxyTCP::connect_remote() {
         return;
     }
 
+    char target_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &remote_addr.sin_addr, target_ip, INET_ADDRSTRLEN);
+    LOG_INFO("[ProxyTCP] Connecting to %s:%d (DIRECT=%d, Domain=%s)", 
+        target_ip, ntohs(remote_addr.sin_port), m_is_direct, m_detected_domain.c_str());
+
     // 优化 socket 性能
     int optval = 1;
     setsockopt(m_remote_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&optval, sizeof(optval)); // 禁用 Nagle 算法
