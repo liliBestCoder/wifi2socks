@@ -31,6 +31,7 @@ IO_CONTEXT* acquire_io_context() {
     io->task = nullptr;
     io->parent = nullptr;
     io->data_len = 0;
+    io->error_code = 0;
     io->write_buffers.clear();
     io->wsa_bufs.clear();
     return io;
@@ -115,6 +116,26 @@ void Worker::loop() {
             if (io->task) {
                 try { io->task(); }
                 catch (...) { LOG_ERROR("[Worker] Task execution failed."); }
+            }
+            release_io_context(io);
+            continue;
+        }
+
+        if (io->type == IO_ACCEPT) {
+            if (ret) {
+                io->error_code = 0;
+                // Success: update socket context for the new socket
+                setsockopt(io->sock, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (char*)&io->parent->sock, sizeof(SOCKET));
+                if (io->task) io->task();
+            } else {
+                io->error_code = WSAGetLastError();
+                if (io->error_code != ERROR_OPERATION_ABORTED) {
+                    LOG_ERROR("[Worker] AcceptEx failed: %d", io->error_code);
+                }
+                closesocket(io->sock);
+                // Even on failure, we might want to notify or retry, 
+                // but usually the listener will post a new AcceptEx.
+                if (io->task) io->task(); 
             }
             release_io_context(io);
             continue;
@@ -251,6 +272,79 @@ void WorkerPool::remove_socket(SOCKET s, std::function<void()> on_done) {
     io->sock = s;
     io->task = on_done;
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io);
+}
+
+void WorkerPool::accept_async(SOCKET listen_sock, std::function<void(SOCKET, sockaddr_in&)> on_accepted) {
+    IO_CONTEXT* init_task = acquire_io_context();
+    init_task->type = IO_TASK;
+    init_task->task = [this, listen_sock, on_accepted]() {
+        std::shared_ptr<SocketContext> ctx = find_context(listen_sock);
+        if (!ctx) {
+            ctx = std::make_shared<SocketContext>();
+            ctx->sock = listen_sock;
+            register_context(listen_sock, ctx);
+            CreateIoCompletionPort((HANDLE)listen_sock, m_shared_iocp, (ULONG_PTR)ctx.get(), 0);
+        }
+
+        LPFN_ACCEPTEX AcceptExPtr = nullptr;
+        GUID guid = WSAID_ACCEPTEX;
+        DWORD bytes = 0;
+        WSAIoctl(listen_sock, SIO_GET_EXTENSION_FUNCTION_POINTER, &guid, sizeof(guid), &AcceptExPtr, sizeof(AcceptExPtr), &bytes, NULL, NULL);
+
+        if (AcceptExPtr) {
+            SOCKET client_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            if (client_socket == INVALID_SOCKET) {
+                LOG_ERROR("[WorkerPool] Failed to create socket for AcceptEx.");
+                return;
+            }
+
+            IO_CONTEXT* io = acquire_io_context();
+            io->type = IO_ACCEPT;
+            io->sock = client_socket;
+            io->parent = ctx;
+            io->task = [this, on_accepted, client_socket, io, listen_sock]() {
+                if (io->parent && !io->parent->closing) {
+                    if (io->error_code == 0) {
+                        sockaddr_in remote_addr;
+                        memset(&remote_addr, 0, sizeof(remote_addr));
+                        
+                        LPFN_GETACCEPTEXSOCKADDRS GetAcceptExSockaddrsPtr = nullptr;
+                        GUID guid2 = WSAID_GETACCEPTEXSOCKADDRS;
+                        DWORD bytes2 = 0;
+                        WSAIoctl(client_socket, SIO_GET_EXTENSION_FUNCTION_POINTER, &guid2, sizeof(guid2), &GetAcceptExSockaddrsPtr, sizeof(GetAcceptExSockaddrsPtr), &bytes2, NULL, NULL);
+
+                        if (GetAcceptExSockaddrsPtr) {
+                            LPSOCKADDR pLocalAddr = nullptr;
+                            LPSOCKADDR pRemoteAddr = nullptr;
+                            int local_len = 0, remote_len = 0;
+                            GetAcceptExSockaddrsPtr(io->buf, 0, sizeof(sockaddr_in) + 16, sizeof(sockaddr_in) + 16, &pLocalAddr, &local_len, &pRemoteAddr, &remote_len);
+                            if (pRemoteAddr && remote_len >= sizeof(sockaddr_in)) {
+                                memcpy(&remote_addr, pRemoteAddr, sizeof(sockaddr_in));
+                            }
+                        }
+                        if (on_accepted) on_accepted(client_socket, remote_addr);
+                    }
+                    
+                    // Post next accept
+                    accept_async(listen_sock, on_accepted);
+                } else {
+                    if (io->error_code == 0) {
+                        closesocket(client_socket);
+                    }
+                }
+            };
+
+            BOOL ret = AcceptExPtr(listen_sock, client_socket, io->buf, 0, sizeof(sockaddr_in) + 16, sizeof(sockaddr_in) + 16, &bytes, &io->overlapped);
+            if (!ret && WSAGetLastError() != ERROR_IO_PENDING) {
+                closesocket(client_socket);
+                release_io_context(io);
+                LOG_ERROR("[WorkerPool] AcceptEx failed immediately: %d", WSAGetLastError());
+            }
+        } else {
+            LOG_ERROR("[WorkerPool] Failed to get AcceptEx pointer.");
+        }
+    };
+    PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)init_task);
 }
 
 void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect,

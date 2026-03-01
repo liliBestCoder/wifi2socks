@@ -21,6 +21,7 @@ enum IO_TYPE {
     IO_READ,    
     IO_WRITE,   
     IO_CONNECT, 
+    IO_ACCEPT,  // Added IO_ACCEPT
     IO_REMOVE,
     IO_TASK,     // 通过 IOCP 投递的控制任务
     IO_PROXY_BUFFER // Custom IoBuffer for ProxyTCP
@@ -34,6 +35,7 @@ struct IO_CONTEXT {
     OVERLAPPED overlapped;
     IO_TYPE type;
     SOCKET sock;
+    int error_code; // Added error_code
     std::function<void()> task; 
     uint8_t buf[131072]; // 128KB fixed buffer to avoid vector allocations/zeroing
     size_t data_len;
@@ -46,7 +48,7 @@ struct IO_CONTEXT {
     std::vector<WSABUF> wsa_bufs;
     size_t total_bytes_submitted;
 
-    IO_CONTEXT() : type(IO_READ), sock(INVALID_SOCKET), data_len(0), remote_addr_len(0), parent(nullptr), total_bytes_submitted(0) {
+    IO_CONTEXT() : type(IO_READ), sock(INVALID_SOCKET), error_code(0), data_len(0), remote_addr_len(0), parent(nullptr), total_bytes_submitted(0) {
         memset(&overlapped, 0, sizeof(OVERLAPPED));
     }
 };
@@ -95,6 +97,7 @@ public:
     // 全局控制方法，现在它们会将任务投递给共享 IOCP
     void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp = false, std::function<void()> on_init = nullptr);
     void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
+    void accept_async(SOCKET listen_sock, std::function<void(SOCKET, sockaddr_in&)> on_accepted);
     void connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect, 
                       std::function<void(char*, int, sockaddr_in*)> on_read = nullptr,
                       std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write = nullptr,

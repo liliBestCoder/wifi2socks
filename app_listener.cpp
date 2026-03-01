@@ -47,10 +47,12 @@ void AppListener::stop() {
     m_running = false;
 
     if (m_tcp_socket != nullptr) {
-        closesocket((SOCKET)m_tcp_socket);
+        WorkerPool::instance().remove_socket((SOCKET)m_tcp_socket);
         m_tcp_socket = nullptr;
     }
     if (m_udp_socket != nullptr) {
+        // UDP socket is still managed traditionally here, but let's keep it consistent if needed.
+        // For now, closesocket is okay for UDP if not registered in WorkerPool with IO_READ.
         closesocket((SOCKET)m_udp_socket);
         m_udp_socket = nullptr;
     }
@@ -71,25 +73,28 @@ void AppListener::tcp_listener_thread() {
     inet_pton(AF_INET, m_host.c_str(), &service.sin_addr);
     service.sin_port = htons(m_port);
 
+    // Reuse address to avoid "Address already in use" errors on restart
+    int reuse = 1;
+    setsockopt(listen_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&reuse, sizeof(reuse));
+
     if (bind(listen_socket, (SOCKADDR*)&service, sizeof(service)) == SOCKET_ERROR) {
+        LOG_ERROR("[AppListener] TCP bind failed: %d", WSAGetLastError());
         closesocket(listen_socket);
         return;
     }
 
     if (listen(listen_socket, SOMAXCONN) == SOCKET_ERROR) {
+        LOG_ERROR("[AppListener] TCP listen failed: %d", WSAGetLastError());
         closesocket(listen_socket);
         return;
     }
 
-    LOG_INFO("[AppListener] TCP listener is running.");
+    LOG_INFO("[AppListener] TCP listener is running using IOCP.");
 
-    while (m_running) {
-        sockaddr_in client_addr;
-        int client_addr_len = sizeof(client_addr);
-        SOCKET client_socket = accept(listen_socket, (SOCKADDR*)&client_addr, &client_addr_len);
-
-        if (client_socket == INVALID_SOCKET) continue;
-
+    // Using IOCP AcceptEx instead of blocking accept loop
+    WorkerPool::instance().accept_async(listen_socket, [](SOCKET client_socket, sockaddr_in& client_addr) {
+        // This callback is executed in a Worker thread
+        
         // 优化客户端 socket 性能
         int flag = 1;
         setsockopt(client_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag)); // 禁用 Nagle 算法
@@ -104,8 +109,15 @@ void AppListener::tcp_listener_thread() {
         } else {
             closesocket(client_socket);
         }
+    });
+
+    // We don't need a loop here anymore, but the thread should stay alive if needed or we can just return.
+    // However, AppListener expects m_tcp_thread to be joinable and potentially running?
+    // In the original code, it was a loop. Now it's event driven.
+    // Let's keep the thread alive until m_running is false to maintain compatibility with stop().
+    while (m_running) {
+        Sleep(100);
     }
-    closesocket(listen_socket);
 }
 
 void AppListener::udp_listener_thread() {
