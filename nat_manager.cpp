@@ -96,8 +96,8 @@ uint16_t NatManager::allocate_udp_virtual_port(const UdpKey4& key, const Origina
     uint64_t now = GetTickCount64();
 
     if (existing_vport != 0) {
-        // Update timestamps for existing mapping
         auto& shard_v = m_shards[existing_vport % NUM_SHARDS];
+        // Use a faster update strategy for existing ports
         {
             std::unique_lock<std::shared_mutex> ulock_v(shard_v.mtx);
             auto it_v = shard_v.vport_to_udp.find(existing_vport);
@@ -105,7 +105,6 @@ uint16_t NatManager::allocate_udp_virtual_port(const UdpKey4& key, const Origina
                 it_v->second.last_access = now;
             }
         }
-        
         {
             std::unique_lock<std::shared_mutex> ulock_k(shard_k.mtx);
             auto it_k = shard_k.udp_map.find(key);
@@ -116,33 +115,43 @@ uint16_t NatManager::allocate_udp_virtual_port(const UdpKey4& key, const Origina
         return existing_vport;
     }
 
-    // Allocate new vport with collision check
+    // Allocation logic: Limit search to prevent CPU spikes if pool is congested
     uint16_t start_vport = m_next_vport.load();
     uint16_t candidate = start_vport;
     uint16_t found_vport = 0;
+    int max_tries = (std::min)((int)(VPORT_END - VPORT_START + 1), 4096); // Limit search
 
-    // Search for an available port
-    for (int i = 0; i < (VPORT_END - VPORT_START + 1); ++i) {
+    for (int i = 0; i < max_tries; ++i) {
         uint16_t vport = candidate++;
         if (candidate > VPORT_END) candidate = VPORT_START;
 
         auto& shard_v = m_shards[vport % NUM_SHARDS];
-        std::unique_lock<std::shared_mutex> lock_v(shard_v.mtx);
-        cleanup_shard(shard_v, now); // Opportunistic cleanup
-
-        auto it_v = shard_v.vport_to_udp.find(vport);
-        if (it_v == shard_v.vport_to_udp.end() || (now - it_v->second.last_access > UDP_TIMEOUT_MS)) {
-            // Found a free or expired port
-            shard_v.vport_to_udp[vport] = { key, now };
-            found_vport = vport;
-            m_next_vport.store(candidate);
-            break;
+        
+        // Try shared lock first to see if it's free
+        {
+            std::shared_lock<std::shared_mutex> lock_v(shard_v.mtx);
+            auto it_v = shard_v.vport_to_udp.find(vport);
+            if (it_v == shard_v.vport_to_udp.end() || (now - it_v->second.last_access > UDP_TIMEOUT_MS)) {
+                // Potential candidate found, upgrade to unique_lock
+                lock_v.unlock();
+                std::unique_lock<std::shared_mutex> ulock_v(shard_v.mtx);
+                
+                // Re-verify after locking
+                auto it_retry = shard_v.vport_to_udp.find(vport);
+                if (it_retry == shard_v.vport_to_udp.end() || (now - it_retry->second.last_access > UDP_TIMEOUT_MS)) {
+                    shard_v.vport_to_udp[vport] = { key, now };
+                    found_vport = vport;
+                    m_next_vport.store(candidate);
+                    break;
+                }
+                // If failed re-verify, the loop continues...
+            }
         }
     }
 
     if (found_vport != 0) {
         std::unique_lock<std::shared_mutex> lock_k(shard_k.mtx);
-        cleanup_shard(shard_k, now);
+        cleanup_shard(shard_k, now); // Only cleanup the target shard once
         shard_k.udp_map[key] = { dest, now, key, found_vport };
         return found_vport;
     }

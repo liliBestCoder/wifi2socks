@@ -389,16 +389,22 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                                     // Allocate virtual source port for this 4-tuple to uniquely identify it
                                     uint16_t virtual_port = NatManager::instance().allocate_udp_virtual_port(key4, od);
 
-                                    ip->DstAddr = m_gateway_ip;
-                                    udp->DstPort = htons(NAT_TARGET_PORT);
-                                    udp->SrcPort = htons(virtual_port); // Rewrite source port to virtual port
+                                    if (virtual_port != 0) {
+                                        ip->DstAddr = m_gateway_ip;
+                                        udp->DstPort = htons(NAT_TARGET_PORT);
+                                        udp->SrcPort = htons(virtual_port); // Rewrite source port to virtual port
 
-                                    incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
-                                    incremental_checksum_update(&udp->Csum, old_dst_ip, ip->DstAddr);
-                                    incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
-                                    incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
+                                        incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
+                                        incremental_checksum_update(&udp->Csum, old_dst_ip, ip->DstAddr);
+                                        incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
+                                        incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
+                                        packets_to_mstcp.push_back(std::move(p)); handled = true;
+                                    } else {
+                                        // Pool exhausted, drop packet
+                                        PacketPool::instance().release(p.data.release());
+                                        handled = true;
+                                    }
                                 }
-                                packets_to_mstcp.push_back(std::move(p)); handled = true;
                             }
                             else if (p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP)) {
                                 USHORT sport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort) : ntohs(((PUDP_HEADER)((char*)ip + (ip->Ver_HLen & 0x0F) * 4))->SrcPort);
@@ -502,7 +508,7 @@ void WinPkFilterDriver::run() {
 
         // 1. Read & Dispatch
         bool data_available = true;
-        for (int r = 0; r < 20 && m_running && data_available; ++r) {
+        for (int r = 0; r < 10 && m_running && data_available; ++r) { // Reduced from 20 to 10
             m_read_request->dwPacketsNumber = BATCH_SIZE;
             if (m_ndis_api.ReadPackets(m_read_request)) {
                 if (m_read_request->dwPacketsSuccess > 0) {

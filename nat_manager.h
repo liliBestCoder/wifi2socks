@@ -99,12 +99,12 @@ private:
     void cleanup_shard(Shard& shard, uint64_t now);
     Shard m_shards[NUM_SHARDS];
     
-    // Virtual port range: 10000 - 60000
-    std::atomic<uint16_t> m_next_vport{ 10000 };
-    const uint16_t VPORT_START = 10000;
-    const uint16_t VPORT_END = 60000;
+    // Virtual port range: 5000 - 65000
+    std::atomic<uint16_t> m_next_vport{ 5000 };
+    const uint16_t VPORT_START = 5000;
+    const uint16_t VPORT_END = 65000;
     
     // Timeouts
     const uint64_t TCP_TIMEOUT_MS = 300000;
-    const uint64_t UDP_TIMEOUT_MS = 60000;
+    const uint64_t UDP_TIMEOUT_MS = 30000; // Reduced from 60s to 30s
 };
