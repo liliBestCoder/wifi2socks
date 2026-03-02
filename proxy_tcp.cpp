@@ -119,7 +119,7 @@ void ProxyTCP::connect_remote() {
 
     char target_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &remote_addr.sin_addr, target_ip, INET_ADDRSTRLEN);
-    LOG_INFO("[ProxyTCP] Connecting to %s:%d (DIRECT=%d, Domain=%s)", 
+    LOG_DEBUG("[ProxyTCP] Connecting to %s:%d (DIRECT=%d, Domain=%s)", 
         target_ip, ntohs(remote_addr.sin_port), m_is_direct, m_detected_domain.c_str());
 
     // 优化 socket 性能
