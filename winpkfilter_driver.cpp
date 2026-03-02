@@ -808,7 +808,7 @@ void WinPkFilterDriver::adapter_sender_loop(unsigned int worker_id) {
                 PacketPool::instance().release(p_req->EthPacket[i].Buffer);
             }
         } else {
-            std::this_thread::yield();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
     free(p_req);
@@ -832,7 +832,7 @@ void WinPkFilterDriver::stack_sender_loop(unsigned int worker_id) {
                 PacketPool::instance().release(p_req->EthPacket[i].Buffer);
             }
         } else {
-            std::this_thread::yield();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
     free(p_req);
