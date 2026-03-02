@@ -293,7 +293,7 @@ void DhcpServer::handle_request(const char* buffer, int size, const sockaddr_in&
 
     // Option 51: IP Address Lease Time
     *resp_options++ = 51; *resp_options++ = 4;
-    uint32_t lease_time_n = htonl((uint32_t)lease_duration_.count());
+    uint32_t lease_time_n = htonl((uint32_t)std::chrono::duration_cast<std::chrono::seconds>(lease_duration_).count());
     memcpy(resp_options, &lease_time_n, 4); resp_options += 4;
 
     // Option 26: Interface MTU (1300 bytes to be safe over proxy/tunnels)
@@ -409,7 +409,7 @@ DhcpResponse DhcpServer::handle_request_buffer(const char* buffer, int size) {
     memcpy(resp_options, &server_ip_n, 4); resp_options += 4;
 
     *resp_options++ = 51; *resp_options++ = 4;
-    uint32_t lease_time_n = htonl((uint32_t)lease_duration_.count());
+    uint32_t lease_time_n = htonl((uint32_t)std::chrono::duration_cast<std::chrono::seconds>(lease_duration_).count());
     memcpy(resp_options, &lease_time_n, 4); resp_options += 4;
 
     *resp_options++ = 26; *resp_options++ = 2;

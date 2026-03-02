@@ -590,8 +590,8 @@ void WinPkFilterDriver::run() {
                                         m_read_request->EthPacket[i].Buffer = nullptr;
                                         handled = true;
                                     }
-                                } else if (ether_type == htons(0x888E)) { // EAPOL
-                                    LOG_DEBUG("[FastPath] Forwarding EAPOL packet directly");
+                                } else if (ether_type == 0x888E) { // EAPOL
+                                    LOG_INFO("[FastPath] Forwarding EAPOL packet directly");
                                 }
 
                                 if (!handled) {
