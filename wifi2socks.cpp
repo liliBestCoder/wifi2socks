@@ -35,23 +35,13 @@
 #include "http_server.h"
 #include "wifi_ap.h"
 #include "wifi_ap_listener.h"
+#include "adapter.h"
 
 DhcpServer* g_dhcp_server_ptr = nullptr;
 
-std::string find_adapter_by_desc() {
-    ULONG outBufLen = 15000;
-    PIP_ADAPTER_ADDRESSES pAddresses = (IP_ADAPTER_ADDRESSES*)malloc(outBufLen);
-    if (!pAddresses) return "";
+/* REMOVED OLD ADAPTER FINDER */
 
-    std::string prefix = "Microsoft Wi-Fi Direct Virtual Adapter";
-
-    if (GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, pAddresses, &outBufLen) == ERROR_SUCCESS) {
-        for (PIP_ADAPTER_ADDRESSES pCurr = pAddresses; pCurr != nullptr; pCurr = pCurr->Next) {
-            if (!pCurr->Description) continue;
-
-            // Convert wchar_t* to std::wstring
-            std::wstring desc_w(pCurr->Description);
-            if (desc_w.find(L"Microsoft Wi-Fi Direct Virtual Adapter #") != std::wstring::npos) {
+int main() {
 
                 // AdapterName �� char*��ֱ����
                 std::string adapterName = pCurr->AdapterName ? pCurr->AdapterName : "";
@@ -116,7 +106,7 @@ int main() {
 
     PacketPool::instance().init(1024 * 64);
 
-    std::string adapter_name = find_adapter_by_desc();
+    std::string adapter_name = find_best_wifi_direct_adapter();
     static WinPkFilterDriver pk_driver;
     
     int worker_count = std::thread::hardware_concurrency();
