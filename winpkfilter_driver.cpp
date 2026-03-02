@@ -165,44 +165,10 @@ static void recalculate_tcp_udp_checksum(PIP_HEADER ip) {
     }
 }
 
-static bool clamp_mss(PIP_HEADER ip, uint16_t max_mss) {
-    if (ip->Proto != IPPROTO_TCP) return false;
-
-    int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
-    PTCP_HEADER tcp = (PTCP_HEADER)((uint8_t*)ip + ip_hdr_len);
-
-    // Only process SYN packets
-    if (!(tcp->Flags & 0x02)) return false; // 0x02 is SYN
-
-    int tcp_hdr_len = (tcp->HdrLen >> 4) * 4;
-    uint8_t* options = (uint8_t*)tcp + sizeof(TCP_HEADER);
-    int options_len = tcp_hdr_len - (int)sizeof(TCP_HEADER);
-
-    bool changed = false;
-    for (int i = 0; i <= options_len - 4; ) {
-        uint8_t opt_kind = options[i];
-        if (opt_kind == 0) break; // End of options
-        if (opt_kind == 1) { i++; continue; } // NOP
-
-        uint8_t opt_len = options[i + 1];
-        if (opt_len < 2) break; // Invalid length
-
-        if (opt_kind == 2 && opt_len == 4) { // MSS option
-            uint16_t current_mss = ntohs(*(uint16_t*)(options + i + 2));
-            if (current_mss > max_mss) {
-                *(uint16_t*)(options + i + 2) = htons(max_mss);
-                changed = true;
-            }
-        }
-        i += opt_len;
-    }
-    return changed;
-}
-
 // Smart worker dispatch: Symmetric Hash (Client IP ^ Client Port)
 // This ensures that all packets for the same flow (both directions) go to the same worker.
 // WARNING: This assumes NO IP FRAGMENTATION. If packets are fragmented, port info is missing
-// in subsequent fragments, which might lead to mis-hashing. We rely on DHCP MTU=1300 to avoid this.
+// in subsequent fragments, which might lead to mis-hashing.
 static uint32_t get_target_worker(const char* packet, size_t length, uint32_t device_flags, uint32_t num_workers) {
     if (length < 14) return 0;
     
@@ -375,18 +341,12 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                 if (ether_type == ETHERTYPE_IP && length >= 34) {
                     PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
 
-                    if (ip->Proto == IPPROTO_TCP) {
-                        if (clamp_mss(ip, 1300)) {
-                            recalculate_tcp_udp_checksum(ip);
-                        }
-                    }
+                    if (!handled) {
+                        bool should_intercept = false;
+                        int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
+                        bool is_fragment = (ntohs(ip->Flags_Frag) & 0x1FFF) != 0;
 
-                        if (!handled) {
-                            bool should_intercept = false;
-                            int ip_hdr_len = (ip->Ver_HLen & 0x0F) * 4;
-                            bool is_fragment = (ntohs(ip->Flags_Frag) & 0x1FFF) != 0;
-
-                            if (!p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) && ip->SrcAddr != m_gateway_ip) {
+                        if (!p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) && ip->SrcAddr != m_gateway_ip) {
                                 // Only intercept if it's not a fragment, or it's the first fragment (offset 0)
                                 // Subsequent fragments don't have TCP/UDP headers.
                                 if (!is_fragment) {
