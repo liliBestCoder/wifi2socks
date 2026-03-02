@@ -68,7 +68,6 @@ public:
 
 private:
     void reader_loop();
-    void sender_loop();
     void worker_loop(unsigned int worker_id);
 
     CNdisApi m_ndis_api;
@@ -81,7 +80,6 @@ private:
     std::function<void()> m_on_after_batch;
 
     std::thread m_reader_thread;
-    std::thread m_sender_thread;
     std::atomic<bool> m_running;
 
     // --- Multi-threading members ---
@@ -101,18 +99,6 @@ private:
     // Use unique_ptr to handle mutex non-copyable issue (C2280)
     std::vector<std::unique_ptr<WorkerQueue>> m_worker_queues;
 
-    enum class PacketDestination { TO_ADAPTER, TO_MSTCP };
-    struct ProcessedPacket {
-        PINTERMEDIATE_BUFFER buffer;
-        PacketDestination destination;
-    };
-    
-    struct ResultQueue {
-        std::list<ProcessedPacket> packets;
-        std::mutex mtx;
-        std::condition_variable cv;
-    } m_results_queue;
-    
     // Statistics counters (Pure atomic, no logging overhead in worker loop)
     std::atomic<uint64_t> m_stat_dl_pkts{0};
     std::atomic<uint64_t> m_stat_dl_bytes{0};
@@ -126,9 +112,6 @@ private:
     static const int BATCH_SIZE = 512;
     PETH_M_REQUEST m_read_request;
     PINTERMEDIATE_BUFFER m_read_buffers[BATCH_SIZE];
-    
-    PETH_M_REQUEST m_write_request;
-    PETH_M_REQUEST m_mstcp_request;
     
     INTERMEDIATE_BUFFER* m_send_buffer;
     std::mutex m_send_mutex;

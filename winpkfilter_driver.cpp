@@ -234,8 +234,6 @@ WinPkFilterDriver::WinPkFilterDriver()
     }
     m_read_request = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
     for (int i = 0; i < BATCH_SIZE; ++i) m_read_buffers[i] = nullptr;
-    m_write_request = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
-    m_mstcp_request = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
     m_send_buffer = new INTERMEDIATE_BUFFER();
     memset(m_adapter_mac, 0, 6);
     m_last_stat_time = std::chrono::steady_clock::now();
@@ -244,7 +242,7 @@ WinPkFilterDriver::WinPkFilterDriver()
 WinPkFilterDriver::~WinPkFilterDriver() {
     stop();
     for (int i = 0; i < BATCH_SIZE; ++i) if (m_read_buffers[i]) PacketPool::instance().release(m_read_buffers[i]);
-    free(m_read_request); free(m_write_request); free(m_mstcp_request); delete m_send_buffer;
+    free(m_read_request); delete m_send_buffer;
 }
 
 std::vector<std::pair<std::string, std::string>> WinPkFilterDriver::get_adapters() {
@@ -287,9 +285,6 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
     m_reader_thread = std::thread(&WinPkFilterDriver::reader_loop, this);
     SetThreadPriority(m_reader_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
 
-    m_sender_thread = std::thread(&WinPkFilterDriver::sender_loop, this);
-    SetThreadPriority(m_sender_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
-
     for (unsigned int i = 0; i < m_num_workers; ++i) {
         m_worker_threads.emplace_back(&WinPkFilterDriver::worker_loop, this, i);
         SetThreadPriority(m_worker_threads.back().native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
@@ -300,10 +295,8 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
 void WinPkFilterDriver::stop() {
     m_running = false;
     if (m_wait_event) SetEvent(m_wait_event);
-    m_results_queue.cv.notify_all();
     for (auto& q : m_worker_queues) q->cv.notify_all();
     if (m_reader_thread.joinable()) m_reader_thread.join();
-    if (m_sender_thread.joinable()) m_sender_thread.join();
     for (auto& w : m_worker_threads) if (w.joinable()) w.join();
     if (m_adapter_handle) {
         ADAPTER_MODE mode = { m_adapter_handle, 0 }; m_ndis_api.SetAdapterMode(&mode);
@@ -322,6 +315,11 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
     std::list<QueuedPacket> local_queue;
     std::vector<Packet> packets_to_send; packets_to_send.reserve(BATCH_SIZE);
     std::vector<Packet> packets_to_mstcp; packets_to_mstcp.reserve(BATCH_SIZE);
+
+    // 为本地批处理分配请求缓冲区
+    PETH_M_REQUEST p_write_req = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
+    PETH_M_REQUEST p_mstcp_req = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
+
     while (m_running) {
         {
             std::unique_lock<std::mutex> lock(m_worker_queues[worker_id]->mtx);
@@ -490,75 +488,47 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
 
         m_stat_work_time_us += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_time).count();
         local_queue.clear();
-        if (!packets_to_send.empty() || !packets_to_mstcp.empty()) {
-            std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-            for (auto& pkt : packets_to_send) m_results_queue.packets.push_back({ pkt.data.release(), PacketDestination::TO_ADAPTER });
-            for (auto& pkt : packets_to_mstcp) m_results_queue.packets.push_back({ pkt.data.release(), PacketDestination::TO_MSTCP });
-            m_results_queue.cv.notify_one();
+
+        // 批量发回网卡 (TO_ADAPTER)
+        while (!packets_to_send.empty()) {
+            p_write_req->dwPacketsNumber = 0;
+            p_write_req->hAdapterHandle = m_adapter_handle;
+            size_t batch_count = (std::min)((size_t)BATCH_SIZE, packets_to_send.size());
+            for (size_t i = 0; i < batch_count; ++i) {
+                p_write_req->EthPacket[i].Buffer = packets_to_send[i].data.release();
+                p_write_req->dwPacketsNumber++;
+            }
+            m_ndis_api.SendPacketsToAdapter(p_write_req);
+            
+            // 批量释放内存
+            std::vector<RawPacket*> ptrs(p_write_req->dwPacketsNumber);
+            for (unsigned int i = 0; i < p_write_req->dwPacketsNumber; ++i) ptrs[i] = p_write_req->EthPacket[i].Buffer;
+            PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
+
+            packets_to_send.erase(packets_to_send.begin(), packets_to_send.begin() + batch_count);
+        }
+
+        // 批量发回协议栈 (TO_MSTCP)
+        while (!packets_to_mstcp.empty()) {
+            p_mstcp_req->dwPacketsNumber = 0;
+            p_mstcp_req->hAdapterHandle = m_adapter_handle;
+            size_t batch_count = (std::min)((size_t)BATCH_SIZE, packets_to_mstcp.size());
+            for (size_t i = 0; i < batch_count; ++i) {
+                p_mstcp_req->EthPacket[i].Buffer = packets_to_mstcp[i].data.release();
+                p_mstcp_req->dwPacketsNumber++;
+            }
+            m_ndis_api.SendPacketsToMstcp(p_mstcp_req);
+
+            // 批量释放内存
+            std::vector<RawPacket*> ptrs(p_mstcp_req->dwPacketsNumber);
+            for (unsigned int i = 0; i < p_mstcp_req->dwPacketsNumber; ++i) ptrs[i] = p_mstcp_req->EthPacket[i].Buffer;
+            PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
+
+            packets_to_mstcp.erase(packets_to_mstcp.begin(), packets_to_mstcp.begin() + batch_count);
         }
     }
-}
-
-void WinPkFilterDriver::sender_loop() {
-    std::list<ProcessedPacket> local_results;
-    while (m_running) {
-        {
-            std::unique_lock<std::mutex> lock(m_results_queue.mtx);
-            m_results_queue.cv.wait(lock, [&] { return !m_running || !m_results_queue.packets.empty(); });
-            if (!m_running && m_results_queue.packets.empty()) break;
-            local_results.splice(local_results.end(), m_results_queue.packets);
-        }
-
-        if (!local_results.empty()) {
-            std::list<PINTERMEDIATE_BUFFER> to_adapter;
-            std::list<PINTERMEDIATE_BUFFER> to_mstcp;
-
-            // Sort packets into separate queues once
-            for (auto& pr : local_results) {
-                if (pr.destination == PacketDestination::TO_ADAPTER) to_adapter.push_back(pr.buffer);
-                else to_mstcp.push_back(pr.buffer);
-            }
-            local_results.clear();
-
-            // Drain adapter queue
-            while (!to_adapter.empty() && m_running) {
-                m_write_request->dwPacketsNumber = 0;
-                while (!to_adapter.empty() && m_write_request->dwPacketsNumber < BATCH_SIZE) {
-                    m_write_request->EthPacket[m_write_request->dwPacketsNumber++].Buffer = to_adapter.front();
-                    to_adapter.pop_front();
-                }
-                m_write_request->hAdapterHandle = m_adapter_handle;
-                if (m_ndis_api.SendPacketsToAdapter(m_write_request)) {
-                    std::vector<RawPacket*> ptrs;
-                    for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) ptrs.push_back(m_write_request->EthPacket[i].Buffer);
-                    PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
-                } else {
-                    std::vector<RawPacket*> ptrs;
-                    for (unsigned int i = 0; i < m_write_request->dwPacketsNumber; ++i) ptrs.push_back(m_write_request->EthPacket[i].Buffer);
-                    PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
-                }
-            }
-
-            // Drain mstcp queue
-            while (!to_mstcp.empty() && m_running) {
-                m_mstcp_request->dwPacketsNumber = 0;
-                while (!to_mstcp.empty() && m_mstcp_request->dwPacketsNumber < BATCH_SIZE) {
-                    m_mstcp_request->EthPacket[m_mstcp_request->dwPacketsNumber++].Buffer = to_mstcp.front();
-                    to_mstcp.pop_front();
-                }
-                m_mstcp_request->hAdapterHandle = m_adapter_handle;
-                if (m_ndis_api.SendPacketsToMstcp(m_mstcp_request)) {
-                    std::vector<RawPacket*> ptrs;
-                    for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) ptrs.push_back(m_mstcp_request->EthPacket[i].Buffer);
-                    PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
-                } else {
-                    std::vector<RawPacket*> ptrs;
-                    for (unsigned int i = 0; i < m_mstcp_request->dwPacketsNumber; ++i) ptrs.push_back(m_mstcp_request->EthPacket[i].Buffer);
-                    PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
-                }
-            }
-        }
-    }
+    free(p_write_req);
+    free(p_mstcp_req);
 }
 
 void WinPkFilterDriver::reader_loop() {
@@ -661,10 +631,9 @@ void WinPkFilterDriver::reader_loop() {
                                         recalculate_ip_checksum(ip);
                                         recalculate_tcp_udp_checksum(ip);
 
-                                        std::lock_guard<std::mutex> lock(m_results_queue.mtx);
-                                        m_results_queue.packets.push_back({ b, PacketDestination::TO_ADAPTER });
-                                        m_results_queue.cv.notify_one();
-                                        m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred
+                                        this->send_to_adapter((const char*)buffer, b->m_Length);
+                                        PacketPool::instance().release(b);
+                                        m_read_request->EthPacket[i].Buffer = nullptr;
                                         handled = true;
                                     }
                                 }
