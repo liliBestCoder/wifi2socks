@@ -508,7 +508,7 @@ void WinPkFilterDriver::run() {
 
         // 1. Read & Dispatch
         bool data_available = true;
-        for (int r = 0; r < 10 && m_running && data_available; ++r) { // Reduced from 20 to 10
+        for (int r = 0; r < 2 && m_running && data_available; ++r) { // Reduced from 20 to 10
             m_read_request->dwPacketsNumber = BATCH_SIZE;
             if (m_ndis_api.ReadPackets(m_read_request)) {
                 if (m_read_request->dwPacketsSuccess > 0) {

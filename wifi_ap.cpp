@@ -96,6 +96,15 @@ void WiFiAPManager::Start() {
             StartListener();
             if (_listener) _listener->OnAdvertisementStarted();
         }
+        else if (status == WiFiDirectAdvertisementPublisherStatus_Aborted) {
+            WiFiDirectError error;
+            args->get_Error(&error);
+            std::wstring msg = L"Aborted with error: " + std::to_wstring((int)error);
+            if (_listener) _listener->OnAdvertisementAborted(msg);
+        }
+        else if (status == WiFiDirectAdvertisementPublisherStatus_Stopped) {
+            if (_listener) _listener->OnAdvertisementStopped(L"Stopped by system or user.");
+        }
         return S_OK;
         }).Get(), &_statusChangedToken);
 
