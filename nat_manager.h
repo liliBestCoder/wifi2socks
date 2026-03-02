@@ -96,11 +96,12 @@ private:
         uint64_t last_cleanup_time = 0;
     };
 
+    void cleanup_shard(Shard& shard, uint64_t now);
     Shard m_shards[NUM_SHARDS];
     
-    // Virtual port range: 40000 - 60000
-    std::atomic<uint16_t> m_next_vport{ 40000 };
-    const uint16_t VPORT_START = 40000;
+    // Virtual port range: 10000 - 60000
+    std::atomic<uint16_t> m_next_vport{ 10000 };
+    const uint16_t VPORT_START = 10000;
     const uint16_t VPORT_END = 60000;
     
     // Timeouts
