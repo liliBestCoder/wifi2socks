@@ -286,6 +286,11 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
     SetThreadPriority(m_reader_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
 
     for (unsigned int i = 0; i < m_num_workers; ++i) {
+        m_worker_queues[i]->adapter_sender = std::make_unique<std::thread>(&WinPkFilterDriver::adapter_sender_loop, this, i);
+        m_worker_queues[i]->stack_sender = std::make_unique<std::thread>(&WinPkFilterDriver::stack_sender_loop, this, i);
+        SetThreadPriority(m_worker_queues[i]->adapter_sender->native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
+        SetThreadPriority(m_worker_queues[i]->stack_sender->native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
+
         m_worker_threads.emplace_back(&WinPkFilterDriver::worker_loop, this, i);
         SetThreadPriority(m_worker_threads.back().native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
     }
@@ -298,6 +303,10 @@ void WinPkFilterDriver::stop() {
     for (auto& q : m_worker_queues) q->cv.notify_all();
     if (m_reader_thread.joinable()) m_reader_thread.join();
     for (auto& w : m_worker_threads) if (w.joinable()) w.join();
+    for (auto& q : m_worker_queues) {
+        if (q->adapter_sender && q->adapter_sender->joinable()) q->adapter_sender->join();
+        if (q->stack_sender && q->stack_sender->joinable()) q->stack_sender->join();
+    }
     if (m_adapter_handle) {
         ADAPTER_MODE mode = { m_adapter_handle, 0 }; m_ndis_api.SetAdapterMode(&mode);
         m_ndis_api.SetPacketEvent(m_adapter_handle, nullptr); m_adapter_handle = nullptr;
@@ -489,42 +498,22 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
         m_stat_work_time_us += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start_time).count();
         local_queue.clear();
 
-        // 批量发回网卡 (TO_ADAPTER)
-        while (!packets_to_send.empty()) {
-            p_write_req->dwPacketsNumber = 0;
-            p_write_req->hAdapterHandle = m_adapter_handle;
-            size_t batch_count = (std::min)((size_t)BATCH_SIZE, packets_to_send.size());
-            for (size_t i = 0; i < batch_count; ++i) {
-                p_write_req->EthPacket[i].Buffer = packets_to_send[i].data.release();
-                p_write_req->dwPacketsNumber++;
+        // 异步分堆：投递到对应的 Sender 无锁队列
+        for (auto& p : packets_to_send) {
+            PINTERMEDIATE_BUFFER b = p.data.release();
+            if (b) {
+                if (!m_worker_queues[worker_id]->to_adapter_q.push(b)) {
+                    PacketPool::instance().release(b);
+                }
             }
-            m_ndis_api.SendPacketsToAdapter(p_write_req);
-            
-            // 批量释放内存
-            std::vector<RawPacket*> ptrs(p_write_req->dwPacketsNumber);
-            for (unsigned int i = 0; i < p_write_req->dwPacketsNumber; ++i) ptrs[i] = p_write_req->EthPacket[i].Buffer;
-            PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
-
-            packets_to_send.erase(packets_to_send.begin(), packets_to_send.begin() + batch_count);
         }
-
-        // 批量发回协议栈 (TO_MSTCP)
-        while (!packets_to_mstcp.empty()) {
-            p_mstcp_req->dwPacketsNumber = 0;
-            p_mstcp_req->hAdapterHandle = m_adapter_handle;
-            size_t batch_count = (std::min)((size_t)BATCH_SIZE, packets_to_mstcp.size());
-            for (size_t i = 0; i < batch_count; ++i) {
-                p_mstcp_req->EthPacket[i].Buffer = packets_to_mstcp[i].data.release();
-                p_mstcp_req->dwPacketsNumber++;
+        for (auto& p : packets_to_mstcp) {
+            PINTERMEDIATE_BUFFER b = p.data.release();
+            if (b) {
+                if (!m_worker_queues[worker_id]->to_stack_q.push(b)) {
+                    PacketPool::instance().release(b);
+                }
             }
-            m_ndis_api.SendPacketsToMstcp(p_mstcp_req);
-
-            // 批量释放内存
-            std::vector<RawPacket*> ptrs(p_mstcp_req->dwPacketsNumber);
-            for (unsigned int i = 0; i < p_mstcp_req->dwPacketsNumber; ++i) ptrs[i] = p_mstcp_req->EthPacket[i].Buffer;
-            PacketPool::instance().release_batch(ptrs.data(), ptrs.size());
-
-            packets_to_mstcp.erase(packets_to_mstcp.begin(), packets_to_mstcp.begin() + batch_count);
         }
     }
     free(p_write_req);
@@ -799,4 +788,52 @@ void  WinPkFilterDriver::send_dhcp_response(const uint8_t* client_mac, const uin
 
     // --- 发送 ---
     this->send_to_adapter((const char*)frame.data(), frame.size());
+}
+
+void WinPkFilterDriver::adapter_sender_loop(unsigned int worker_id) {
+    PETH_M_REQUEST p_req = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
+    p_req->hAdapterHandle = m_adapter_handle;
+    
+    while (m_running) {
+        p_req->dwPacketsNumber = 0;
+        PINTERMEDIATE_BUFFER b = nullptr;
+        while (p_req->dwPacketsNumber < BATCH_SIZE && m_worker_queues[worker_id]->to_adapter_q.pop(b)) {
+            p_req->EthPacket[p_req->dwPacketsNumber].Buffer = b;
+            p_req->dwPacketsNumber++;
+        }
+
+        if (p_req->dwPacketsNumber > 0) {
+            m_ndis_api.SendPacketsToAdapter(p_req);
+            for (unsigned int i = 0; i < p_req->dwPacketsNumber; ++i) {
+                PacketPool::instance().release(p_req->EthPacket[i].Buffer);
+            }
+        } else {
+            std::this_thread::yield();
+        }
+    }
+    free(p_req);
+}
+
+void WinPkFilterDriver::stack_sender_loop(unsigned int worker_id) {
+    PETH_M_REQUEST p_req = (PETH_M_REQUEST)malloc(sizeof(ETH_M_REQUEST) + (BATCH_SIZE - 1) * sizeof(NDISRD_ETH_Packet));
+    p_req->hAdapterHandle = m_adapter_handle;
+    
+    while (m_running) {
+        p_req->dwPacketsNumber = 0;
+        PINTERMEDIATE_BUFFER b = nullptr;
+        while (p_req->dwPacketsNumber < BATCH_SIZE && m_worker_queues[worker_id]->to_stack_q.pop(b)) {
+            p_req->EthPacket[p_req->dwPacketsNumber].Buffer = b;
+            p_req->dwPacketsNumber++;
+        }
+
+        if (p_req->dwPacketsNumber > 0) {
+            m_ndis_api.SendPacketsToMstcp(p_req);
+            for (unsigned int i = 0; i < p_req->dwPacketsNumber; ++i) {
+                PacketPool::instance().release(p_req->EthPacket[i].Buffer);
+            }
+        } else {
+            std::this_thread::yield();
+        }
+    }
+    free(p_req);
 }

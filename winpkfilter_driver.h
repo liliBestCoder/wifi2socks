@@ -69,6 +69,8 @@ public:
 private:
     void reader_loop();
     void worker_loop(unsigned int worker_id);
+    void adapter_sender_loop(unsigned int worker_id);
+    void stack_sender_loop(unsigned int worker_id);
 
     CNdisApi m_ndis_api;
     HANDLE m_adapter_handle;
@@ -91,10 +93,43 @@ private:
         PINTERMEDIATE_BUFFER buffer;
     };
 
+    // --- High Performance Lock-free SPSC Queue ---
+    template <typename T, size_t Size>
+    class SPSCQueue {
+    public:
+        static_assert((Size & (Size - 1)) == 0, "Size must be power of 2");
+        bool push(T item) {
+            size_t head = m_head.load(std::memory_order_relaxed);
+            if (head - m_tail.load(std::memory_order_acquire) == Size) return false;
+            m_buffer[head & (Size - 1)] = std::move(item);
+            m_head.store(head + 1, std::memory_order_release);
+            return true;
+        }
+        bool pop(T& item) {
+            size_t tail = m_tail.load(std::memory_order_relaxed);
+            if (tail == m_head.load(std::memory_order_acquire)) return false;
+            item = std::move(m_buffer[tail & (Size - 1)]);
+            m_tail.store(tail + 1, std::memory_order_release);
+            return true;
+        }
+    private:
+        alignas(64) T m_buffer[Size];
+        alignas(64) std::atomic<size_t> m_head{0};
+        alignas(64) std::atomic<size_t> m_tail{0};
+    };
+
     struct WorkerQueue {
+        // Input from Reader (keeping mutex for now as requested no change to reader_loop)
         std::list<QueuedPacket> packets;
         std::mutex mtx;
         std::condition_variable cv;
+
+        // Output to Senders (SPSC - lock-free)
+        SPSCQueue<PINTERMEDIATE_BUFFER, 1024> to_adapter_q;
+        SPSCQueue<PINTERMEDIATE_BUFFER, 1024> to_stack_q;
+
+        std::unique_ptr<std::thread> adapter_sender;
+        std::unique_ptr<std::thread> stack_sender;
     };
     // Use unique_ptr to handle mutex non-copyable issue (C2280)
     std::vector<std::unique_ptr<WorkerQueue>> m_worker_queues;
