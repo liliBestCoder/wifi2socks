@@ -499,9 +499,6 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
     }
 }
 
-
-
-
 void WinPkFilterDriver::sender_loop() {
     std::list<ProcessedPacket> local_results;
     while (m_running) {
