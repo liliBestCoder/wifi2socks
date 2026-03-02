@@ -68,6 +68,7 @@ public:
 
 private:
     void run();
+    void sender_loop();
     void worker_loop(unsigned int worker_id);
 
     CNdisApi m_ndis_api;
@@ -80,6 +81,7 @@ private:
     std::function<void()> m_on_after_batch;
 
     std::thread m_reader_thread;
+    std::thread m_sender_thread;
     std::atomic<bool> m_running;
 
     // --- Multi-threading members ---
@@ -108,10 +110,9 @@ private:
     struct ResultQueue {
         std::list<ProcessedPacket> packets;
         std::mutex mtx;
+        std::condition_variable cv;
     } m_results_queue;
     
-    HANDLE m_results_event; // Win32 Event for signaling
-
     // Statistics counters (Pure atomic, no logging overhead in worker loop)
     std::atomic<uint64_t> m_stat_dl_pkts{0};
     std::atomic<uint64_t> m_stat_dl_bytes{0};
