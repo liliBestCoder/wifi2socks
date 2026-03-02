@@ -67,7 +67,7 @@ public:
     static std::vector<std::pair<std::string, std::string>> get_adapters();
 
 private:
-    void run();
+    void reader_loop();
     void sender_loop();
     void worker_loop(unsigned int worker_id);
 

@@ -284,7 +284,7 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
     m_running = true;
     m_read_request->hAdapterHandle = m_adapter_handle;
 
-    m_reader_thread = std::thread(&WinPkFilterDriver::run, this);
+    m_reader_thread = std::thread(&WinPkFilterDriver::reader_loop, this);
     SetThreadPriority(m_reader_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
 
     m_sender_thread = std::thread(&WinPkFilterDriver::sender_loop, this);
@@ -564,7 +564,7 @@ void WinPkFilterDriver::sender_loop() {
     }
 }
 
-void WinPkFilterDriver::run() {
+void WinPkFilterDriver::reader_loop() {
     HANDLE wait_events[1] = { m_wait_event };
     while (m_running) {
         WaitForMultipleObjects(1, wait_events, FALSE, 10);
