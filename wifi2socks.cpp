@@ -39,26 +39,6 @@
 
 DhcpServer* g_dhcp_server_ptr = nullptr;
 
-/* REMOVED OLD ADAPTER FINDER */
-
-int main() {
-
-                // AdapterName �� char*��ֱ����
-                std::string adapterName = pCurr->AdapterName ? pCurr->AdapterName : "";
-
-                std::cout << "[INFO] MATCH FOUND BY DESC: " << adapterName << std::endl;
-
-                free(pAddresses);
-                return "\\DEVICE\\" + adapterName;
-            }
-        }
-    }
-
-    free(pAddresses);
-    return "";
-}
-
-
 int main() {
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;

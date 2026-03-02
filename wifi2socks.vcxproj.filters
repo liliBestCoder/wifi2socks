@@ -49,6 +49,9 @@
     <ClCompile Include="packet_pool.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
+    <ClCompile Include="adapter.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
     <ClCompile Include="proxy_tcp.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -116,6 +119,9 @@
     </ClInclude>
 
     <ClInclude Include="packet_pool.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="adapter.h">
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="proxy_tcp.h">

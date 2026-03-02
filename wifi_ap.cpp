@@ -2,6 +2,7 @@
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include "wifi_ap.h"
+#include "adapter.h"
 #include "app_config.h"
 #include "logger.h"
 #include <iostream>
@@ -186,6 +187,15 @@ void WiFiAPManager::Reset() {
 }
 
 bool ForceSetStaticIP(const std::string& targetIp) {
+    auto adapters = get_wifi_direct_adapters();
+    if (adapters.empty()) {
+        LOG_WARN("[WIFI-AP] No Wi-Fi Direct adapters found for ForceSetStaticIP.");
+        return false;
+    }
+
+    // Always take the best one (the one with the highest suffix, or the first in the sorted list)
+    const auto& bestAdapter = adapters[0];
+
     ULONG bufferSize = 0;
     GetAdaptersAddresses(AF_INET, GAA_FLAG_INCLUDE_PREFIX, nullptr, nullptr, &bufferSize);
     std::vector<BYTE> buffer(bufferSize);
@@ -195,53 +205,53 @@ bool ForceSetStaticIP(const std::string& targetIp) {
         return false;
 
     for (auto pCurr = pAddresses; pCurr; pCurr = pCurr->Next) {
-        std::wstring desc = pCurr->Description;
-        if (desc.find(L"Microsoft Wi-Fi Direct Virtual Adapter #") != std::wstring::npos) {
-            bool alreadyHasTarget = false;
-            std::vector<IN_ADDR> existingIps;
+        // Match by LUID for perfect identification
+        if (pCurr->Luid.Value != bestAdapter.luid.Value) continue;
 
-            for (auto pUnicast = pCurr->FirstUnicastAddress; pUnicast; pUnicast = pUnicast->Next) {
-                if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
-                    IN_ADDR addr = ((sockaddr_in*)pUnicast->Address.lpSockaddr)->sin_addr;
-                    char ip_str[INET_ADDRSTRLEN];
-                    inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
-                    if (targetIp == ip_str) {
-                        alreadyHasTarget = true;
-                    } else {
-                        existingIps.push_back(addr);
-                    }
+        bool alreadyHasTarget = false;
+        std::vector<IN_ADDR> existingIps;
+
+        for (auto pUnicast = pCurr->FirstUnicastAddress; pUnicast; pUnicast = pUnicast->Next) {
+            if (pUnicast->Address.lpSockaddr->sa_family == AF_INET) {
+                IN_ADDR addr = ((sockaddr_in*)pUnicast->Address.lpSockaddr)->sin_addr;
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
+                if (targetIp == ip_str) {
+                    alreadyHasTarget = true;
+                } else {
+                    existingIps.push_back(addr);
                 }
             }
+        }
 
-            if (alreadyHasTarget && existingIps.empty()) {
-                // IP is already correctly set and no dirty ICS IPs (like 137.1) remain.
-                return true; 
-            }
-
-            // Remove other IPs (especially remnants of ICS 192.168.137.1)
-            for (auto& addr : existingIps) {
-                MIB_UNICASTIPADDRESS_ROW row;
-                InitializeUnicastIpAddressEntry(&row);
-                row.InterfaceLuid = pCurr->Luid;
-                row.Address.Ipv4.sin_family = AF_INET;
-                row.Address.Ipv4.sin_addr = addr;
-                DeleteUnicastIpAddressEntry(&row);
-            }
-
-            // Set our target IP if not present
-            if (!alreadyHasTarget) {
-                MIB_UNICASTIPADDRESS_ROW newRow;
-                InitializeUnicastIpAddressEntry(&newRow);
-                newRow.InterfaceLuid = pCurr->Luid;
-                newRow.Address.Ipv4.sin_family = AF_INET;
-                newRow.OnLinkPrefixLength = 24;
-                newRow.DadState = IpDadStatePreferred;
-                inet_pton(AF_INET, targetIp.c_str(), &newRow.Address.Ipv4.sin_addr);
-                CreateUnicastIpAddressEntry(&newRow);
-            }
-
+        if (alreadyHasTarget && existingIps.empty()) {
+            // IP is already correctly set and no dirty ICS IPs (like 137.1) remain.
             return true;
         }
+
+        // Remove other IPs (especially remnants of ICS 192.168.137.1)
+        for (auto& addr : existingIps) {
+            MIB_UNICASTIPADDRESS_ROW row;
+            InitializeUnicastIpAddressEntry(&row);
+            row.InterfaceLuid = pCurr->Luid;
+            row.Address.Ipv4.sin_family = AF_INET;
+            row.Address.Ipv4.sin_addr = addr;
+            DeleteUnicastIpAddressEntry(&row);
+        }
+
+        // Set our target IP if not present
+        if (!alreadyHasTarget) {
+            MIB_UNICASTIPADDRESS_ROW newRow;
+            InitializeUnicastIpAddressEntry(&newRow);
+            newRow.InterfaceLuid = pCurr->Luid;
+            newRow.Address.Ipv4.sin_family = AF_INET;
+            newRow.OnLinkPrefixLength = 24;
+            newRow.DadState = IpDadStatePreferred;
+            inet_pton(AF_INET, targetIp.c_str(), &newRow.Address.Ipv4.sin_addr);
+            CreateUnicastIpAddressEntry(&newRow);
+        }
+
+        return true;
     }
     return false;
 }
