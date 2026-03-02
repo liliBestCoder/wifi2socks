@@ -9,196 +9,139 @@ NatManager& NatManager::instance() {
     return inst;
 }
 
-NatManager::NatManager() {}
+NatManager::NatManager() {
+    // Initialize the free port pool
+    for (uint16_t port = VPORT_START; port <= VPORT_END; ++port) {
+        m_free_vports.push_back(port);
+    }
+    LOG_INFO("[NAT] Initialized with %zu virtual ports", m_free_vports.size());
+}
+
 NatManager::~NatManager() {}
 
-void NatManager::cleanup_shard(Shard& shard, uint64_t now) {
-    if (now - shard.last_cleanup_time < 10000) return;
+void NatManager::cleanup_expired(uint64_t now) {
+    if (now - m_last_cleanup_time < 5000) return; // 5 second interval
+    m_last_cleanup_time = now;
+
+    size_t cleaned_udp = 0;
+    // Cleanup UDP & VPorts (They MUST be cleaned together for consistency)
+    for (auto it = m_vport_to_udp.begin(); it != m_vport_to_udp.end(); ) {
+        if (now - it->second.last_access > UDP_TIMEOUT_MS) {
+            // 1. Remove from forward map
+            m_udp_map.erase(it->second.key);
+            // 2. Return port to the free pool
+            m_free_vports.push_back(it->first);
+            // 3. Remove from reverse map
+            it = m_vport_to_udp.erase(it);
+            cleaned_udp++;
+        }
+        else {
+            ++it;
+        }
+    }
 
     // Cleanup TCP
-    for (auto it = shard.tcp_map.begin(); it != shard.tcp_map.end();) {
+    size_t cleaned_tcp = 0;
+    for (auto it = m_tcp_map.begin(); it != m_tcp_map.end(); ) {
         if (now - it->second.last_access > TCP_TIMEOUT_MS) {
-            it = shard.tcp_map.erase(it);
+            it = m_tcp_map.erase(it);
+            cleaned_tcp++;
         }
         else {
             ++it;
         }
     }
-    // Cleanup UDP
-    for (auto it = shard.udp_map.begin(); it != shard.udp_map.end();) {
-        if (now - it->second.last_access > UDP_TIMEOUT_MS) {
-            it = shard.udp_map.erase(it);
-        }
-        else {
-            ++it;
-        }
+
+    if (cleaned_udp > 0 || cleaned_tcp > 0) {
+        LOG_DEBUG("[NAT] Cleanup: %zu UDP, %zu TCP mappings removed. Free ports: %zu", 
+            cleaned_udp, cleaned_tcp, m_free_vports.size());
     }
-    // Cleanup VPort
-    for (auto it = shard.vport_to_udp.begin(); it != shard.vport_to_udp.end();) {
-        if (now - it->second.last_access > UDP_TIMEOUT_MS) {
-            it = shard.vport_to_udp.erase(it);
-        }
-        else {
-            ++it;
-        }
-    }
-    shard.last_cleanup_time = now;
 }
 
 void NatManager::create_tcp_mapping(uint64_t key, const OriginalDestination& dest, uint32_t worker_id) {
-    auto& shard = m_shards[key % NUM_SHARDS];
-    
+    std::unique_lock<std::shared_mutex> lock(m_global_mtx);
     uint64_t now = GetTickCount64();
-    OriginalDestination d = dest;
-    d.worker_id = worker_id;
+    cleanup_expired(now);
     
-    std::unique_lock<std::shared_mutex> lock(shard.mtx);
-    cleanup_shard(shard, now);
-    shard.tcp_map[key] = { d, now };
+    m_tcp_map[key] = { dest, now, {}, 0 };
+    m_tcp_map[key].dest.worker_id = worker_id;
 }
 
 void NatManager::remove_tcp_mapping(uint64_t key) {
-    auto& shard = m_shards[key % NUM_SHARDS];
-    std::unique_lock<std::shared_mutex> lock(shard.mtx);
-    shard.tcp_map.erase(key);
+    std::unique_lock<std::shared_mutex> lock(m_global_mtx);
+    m_tcp_map.erase(key);
 }
 
 void NatManager::create_or_update_udp_mapping(const UdpKey4& key, const OriginalDestination& dest, uint32_t worker_id) {
-    uint64_t shard_key = make_key(key.src_ip, key.src_port);
-    auto& shard = m_shards[shard_key % NUM_SHARDS];
+    std::unique_lock<std::shared_mutex> lock(m_global_mtx);
     uint64_t now = GetTickCount64();
-
-    std::unique_lock<std::shared_mutex> lock(shard.mtx);
-    cleanup_shard(shard, now);
+    cleanup_expired(now);
     
-    uint16_t vport = 0;
-    auto it = shard.udp_map.find(key);
-    if (it != shard.udp_map.end()) vport = it->second.vport;
-
-    OriginalDestination d = dest;
-    d.worker_id = worker_id;
-    shard.udp_map[key] = { d, now, key, vport };
+    auto it = m_udp_map.find(key);
+    if (it != m_udp_map.end()) {
+        it->second.last_access = now;
+        it->second.dest.worker_id = worker_id;
+        if (it->second.vport != 0) {
+            m_vport_to_udp[it->second.vport].last_access = now;
+        }
+    } else {
+        // Note: This function doesn't allocate vports. 
+        // allocate_udp_virtual_port must be called first or instead.
+        MappingEntry entry = { dest, now, key, 0 };
+        entry.dest.worker_id = worker_id;
+        m_udp_map[key] = entry;
+    }
 }
 
 uint16_t NatManager::allocate_udp_virtual_port(const UdpKey4& key, const OriginalDestination& dest) {
-    uint64_t key64 = make_key(key.src_ip, key.src_port);
-    auto& shard_k = m_shards[key64 % NUM_SHARDS];
-    
-    uint16_t existing_vport = 0;
-    {
-        std::shared_lock<std::shared_mutex> lock(shard_k.mtx);
-        auto it = shard_k.udp_map.find(key);
-        if (it != shard_k.udp_map.end() && it->second.vport != 0) {
-            existing_vport = it->second.vport;
-        }
-    }
-
+    std::unique_lock<std::shared_mutex> lock(m_global_mtx);
     uint64_t now = GetTickCount64();
-
-    if (existing_vport != 0) {
-        auto& shard_v = m_shards[existing_vport % NUM_SHARDS];
-        // Use a faster update strategy for existing ports
-        {
-            std::unique_lock<std::shared_mutex> ulock_v(shard_v.mtx);
-            auto it_v = shard_v.vport_to_udp.find(existing_vport);
-            if (it_v != shard_v.vport_to_udp.end()) {
-                it_v->second.last_access = now;
-            }
-        }
-        {
-            std::unique_lock<std::shared_mutex> ulock_k(shard_k.mtx);
-            auto it_k = shard_k.udp_map.find(key);
-            if (it_k != shard_k.udp_map.end()) {
-                it_k->second.last_access = now;
-            }
-        }
-        return existing_vport;
+    
+    // Always try to cleanup if pool is getting low
+    if (m_free_vports.empty() || (now - m_last_cleanup_time > 5000)) {
+        cleanup_expired(now);
     }
 
-    // Allocation logic: Limit search to prevent CPU spikes if pool is congested
-    uint16_t start_vport = m_next_vport.load();
-    uint16_t candidate = start_vport;
-    uint16_t found_vport = 0;
-    int max_tries = (std::min)((int)(VPORT_END - VPORT_START + 1), 4096); // Limit search
-
-    for (int i = 0; i < max_tries; ++i) {
-        uint16_t vport = candidate++;
-        if (candidate > VPORT_END) candidate = VPORT_START;
-
-        auto& shard_v = m_shards[vport % NUM_SHARDS];
-        
-        // Try shared lock first to see if it's free
-        {
-            std::shared_lock<std::shared_mutex> lock_v(shard_v.mtx);
-            auto it_v = shard_v.vport_to_udp.find(vport);
-            if (it_v == shard_v.vport_to_udp.end() || (now - it_v->second.last_access > UDP_TIMEOUT_MS)) {
-                // Potential candidate found, upgrade to unique_lock
-                lock_v.unlock();
-                std::unique_lock<std::shared_mutex> ulock_v(shard_v.mtx);
-                
-                // Re-verify after locking
-                auto it_retry = shard_v.vport_to_udp.find(vport);
-                if (it_retry == shard_v.vport_to_udp.end() || (now - it_retry->second.last_access > UDP_TIMEOUT_MS)) {
-                    shard_v.vport_to_udp[vport] = { key, now };
-                    found_vport = vport;
-                    m_next_vport.store(candidate);
-                    break;
-                }
-                // If failed re-verify, the loop continues...
-            }
-        }
+    // 1. Check if we already have a mapping for this flow
+    auto it = m_udp_map.find(key);
+    if (it != m_udp_map.end() && it->second.vport != 0) {
+        it->second.last_access = now;
+        m_vport_to_udp[it->second.vport].last_access = now;
+        return it->second.vport;
     }
 
-    if (found_vport != 0) {
-        std::unique_lock<std::shared_mutex> lock_k(shard_k.mtx);
-        cleanup_shard(shard_k, now); // Only cleanup the target shard once
-        shard_k.udp_map[key] = { dest, now, key, found_vport };
-        return found_vport;
+    // 2. Allocate a new port from the free pool
+    if (m_free_vports.empty()) {
+        LOG_ERROR("[NAT] UDP Virtual Port Pool Exhausted!");
+        return 0;
     }
 
-    LOG_ERROR("[NAT] UDP Virtual Port Pool Exhausted!");
-    return 0;
+    uint16_t vport = m_free_vports.front();
+    m_free_vports.pop_front();
+
+    // 3. Create bidirectional mapping
+    m_udp_map[key] = { dest, now, key, vport };
+    m_vport_to_udp[vport] = { key, now, true };
+
+    return vport;
 }
 
 std::optional<UdpKey4> NatManager::get_udp_key_by_virtual_port(uint16_t vport) {
-    auto& shard_v = m_shards[vport % NUM_SHARDS]; 
-    std::shared_lock<std::shared_mutex> lock(shard_v.mtx);
-    auto it = shard_v.vport_to_udp.find(vport);
-    if (it != shard_v.vport_to_udp.end()) {
-        uint64_t now = GetTickCount64();
-        if (now - it->second.last_access > 1000) {
-            lock.unlock();
-            std::unique_lock<std::shared_mutex> ulock(shard_v.mtx);
-            auto it_retry = shard_v.vport_to_udp.find(vport);
-            if (it_retry != shard_v.vport_to_udp.end()) {
-                it_retry->second.last_access = now;
-                return it_retry->second.key;
-            }
-            return std::nullopt;
-        }
+    std::shared_lock<std::shared_mutex> lock(m_global_mtx);
+    auto it = m_vport_to_udp.find(vport);
+    if (it != m_vport_to_udp.end()) {
+        // Update access time (Note: requires unique lock for writing, or atomic)
+        // For simplicity and performance, we'll skip the update in the shared_lock path
+        // and rely on the receive path (allocate_udp_virtual_port) to keep it alive.
         return it->second.key;
     }
     return std::nullopt;
 }
 
 std::optional<OriginalDestination> NatManager::get_udp_mapping(const UdpKey4& key) {
-    uint64_t shard_key = make_key(key.src_ip, key.src_port);
-    auto& shard = m_shards[shard_key % NUM_SHARDS];
-    std::shared_lock<std::shared_mutex> lock(shard.mtx);
-    
-    auto it = shard.udp_map.find(key);
-    if (it != shard.udp_map.end()) {
-        uint64_t now = GetTickCount64();
-        if (now - it->second.last_access > 1000) {
-            lock.unlock();
-            std::unique_lock<std::shared_mutex> ulock(shard.mtx);
-            auto it_retry = shard.udp_map.find(key);
-            if (it_retry != shard.udp_map.end()) {
-                it_retry->second.last_access = now;
-                return it_retry->second.dest;
-            }
-            return std::nullopt;
-        }
+    std::shared_lock<std::shared_mutex> lock(m_global_mtx);
+    auto it = m_udp_map.find(key);
+    if (it != m_udp_map.end()) {
         return it->second.dest;
     }
     return std::nullopt;
@@ -208,6 +151,7 @@ std::optional<OriginalDestination> NatManager::get_mapping(uint64_t key) {
     uint16_t port_nbo = (uint16_t)(key & 0xFFFF);
     uint16_t port_hbo = ntohs(port_nbo);
     
+    // Fast path: Check if it's a known virtual port
     if (port_hbo >= VPORT_START && port_hbo <= VPORT_END) {
         auto key4 = get_udp_key_by_virtual_port(port_hbo);
         if (key4) {
@@ -215,40 +159,11 @@ std::optional<OriginalDestination> NatManager::get_mapping(uint64_t key) {
         }
     }
 
-    auto& shard = m_shards[key % NUM_SHARDS];
-    std::shared_lock<std::shared_mutex> lock(shard.mtx); 
-    
-    uint64_t now = GetTickCount64();
-
-    auto it_tcp = shard.tcp_map.find(key);
-    if (it_tcp != shard.tcp_map.end()) {
-        if (now - it_tcp->second.last_access > 1000) {
-            lock.unlock();
-            std::unique_lock<std::shared_mutex> ulock(shard.mtx);
-            auto it_retry = shard.tcp_map.find(key);
-            if (it_retry != shard.tcp_map.end()) {
-                it_retry->second.last_access = now;
-                return it_retry->second.dest;
-            }
-            return std::nullopt;
-        }
+    // Otherwise check TCP map
+    std::shared_lock<std::shared_mutex> lock(m_global_mtx);
+    auto it_tcp = m_tcp_map.find(key);
+    if (it_tcp != m_tcp_map.end()) {
         return it_tcp->second.dest;
-    }
-
-    std::optional<OriginalDestination> latest_udp;
-    uint64_t max_access = 0;
-    
-    for (auto const& [udp_key, entry] : shard.udp_map) {
-        if (make_key(udp_key.src_ip, udp_key.src_port) == key) {
-            if (entry.last_access > max_access) {
-                max_access = entry.last_access;
-                latest_udp = entry.dest;
-            }
-        }
-    }
-    
-    if (latest_udp) {
-        return latest_udp;
     }
 
     return std::nullopt;

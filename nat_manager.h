@@ -13,6 +13,8 @@
 #include <mutex>
 #include <shared_mutex>
 #include <optional>
+#include <deque>
+#include <atomic>
 
 // Forward declaration if Common.h is complex, or include it if it defines needed flags
 #include "Common.h"
@@ -82,29 +84,28 @@ private:
         uint16_t vport = 0; // Add virtual port reference
     };
 
-    static const int NUM_SHARDS = 16;
-    struct Shard {
-        std::shared_mutex mtx;
-        std::unordered_map<uint64_t, MappingEntry> tcp_map;
-        std::unordered_map<UdpKey4, MappingEntry, UdpKey4Hash> udp_map;
-        
-        struct VPortEntry {
-            UdpKey4 key;
-            uint64_t last_access;
-        };
-        std::unordered_map<uint16_t, VPortEntry> vport_to_udp;
-        uint64_t last_cleanup_time = 0;
+    struct VPortEntry {
+        UdpKey4 key;
+        uint64_t last_access;
+        bool active = false;
     };
 
-    void cleanup_shard(Shard& shard, uint64_t now);
-    Shard m_shards[NUM_SHARDS];
+    void cleanup_expired(uint64_t now);
+
+    // Global structures (No more sharding)
+    mutable std::shared_mutex m_global_mtx;
+    std::unordered_map<uint64_t, MappingEntry> m_tcp_map;
+    std::unordered_map<UdpKey4, MappingEntry, UdpKey4Hash> m_udp_map;
+    std::unordered_map<uint16_t, VPortEntry> m_vport_to_udp;
     
-    // Virtual port range: 5000 - 65000
-    std::atomic<uint16_t> m_next_vport{ 5000 };
+    // Port Pool Management
+    std::deque<uint16_t> m_free_vports;
+    uint64_t m_last_cleanup_time = 0;
+
     const uint16_t VPORT_START = 5000;
     const uint16_t VPORT_END = 65000;
     
     // Timeouts
     const uint64_t TCP_TIMEOUT_MS = 300000;
-    const uint64_t UDP_TIMEOUT_MS = 30000; // Reduced from 60s to 30s
+    const uint64_t UDP_TIMEOUT_MS = 30000; 
 };
