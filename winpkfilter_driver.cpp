@@ -572,7 +572,7 @@ void WinPkFilterDriver::reader_loop() {
 
         // 1. Read & Dispatch
         bool data_available = true;
-        for (int r = 0; r < 2 && m_running && data_available; ++r) { // Reduced from 20 to 10
+        for (int r = 0; r < 8 && m_running && data_available; ++r) { // Max 8 batches (4096 pkts) per event
             m_read_request->dwPacketsNumber = BATCH_SIZE;
             if (m_ndis_api.ReadPackets(m_read_request)) {
                 if (m_read_request->dwPacketsSuccess > 0) {
