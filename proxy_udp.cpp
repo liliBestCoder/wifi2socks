@@ -281,7 +281,6 @@ public:
         if (dport == 443) {
             uint32_t ip_h = ntohl(dest->ip);
             bool is_cn = GeoChecker::instance().is_cn_ip(ip_h);
-            return;
             
             if (!is_cn) {
                 // Check if it's a known Tencent IP range even if geoip fails

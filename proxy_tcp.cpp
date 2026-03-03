@@ -552,13 +552,15 @@ void ProxyTCP::process_write_queue(SOCKET socket) {
         *fin_sent = true;
         LOG_DEBUG("[TCP] Shutdown send on socket %p", (void*)socket);
         shutdown(socket, SD_SEND);
+    }
 
-        // If both sides have sent FIN, we can close the session
-        if (m_client_fin_sent && m_remote_fin_sent) {
-            // Delay close slightly to allow FIN packets to be processed? 
-            // Or just call close_session
-            close_session_internal();
-        }
+    // Final Closure Logic: 
+    // A session is only truly done when:
+    // 1. Client has sent EOF AND Proxy has sent FIN to Client.
+    // 2. Remote has sent EOF AND Proxy has sent FIN to Remote.
+    if (m_client_eof && m_client_fin_sent && m_remote_eof && m_remote_fin_sent) {
+        LOG_DEBUG("[TCP] Both sides gracefully closed. Cleaning up.");
+        close_session_internal();
     }
 }
 
