@@ -183,7 +183,7 @@ void Worker::loop() {
                     setsockopt(ctx->sock, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT, NULL, 0);
                     if (io->task) io->task();
                     if (ctx->on_read) {
-                        for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
+                        for (int i = 0; i < ctx->concurrent_reads; ++i) {
                             WorkerPool::instance().post_read(ctx);
                         }
                     }
@@ -238,10 +238,10 @@ void WorkerPool::init(int count) {
     }
 }
 
-void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp, std::function<void()> on_init) {
+void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp, std::function<void()> on_init, int concurrent_reads) {
     IO_CONTEXT* io = acquire_io_context();
     io->type = IO_TASK;
-    io->task = [this, s, on_read, on_write, is_udp, on_init]() {
+    io->task = [this, s, on_read, on_write, is_udp, on_init, concurrent_reads]() {
         std::shared_ptr<SocketContext> ctx = find_context(s);
         if (!ctx) {
             ctx = std::make_shared<SocketContext>();
@@ -252,13 +252,14 @@ void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in
         ctx->on_read = on_read;
         ctx->on_write = on_write;
         ctx->is_udp = is_udp;
+        ctx->concurrent_reads = concurrent_reads;
 
         if (on_init) {
             on_init();
         }
 
         if (on_read) {
-            for (int i = 0; i < CONCURRENT_READ_COUNT; ++i) {
+            for (int i = 0; i < ctx->concurrent_reads; ++i) {
                 post_read(ctx);
             }
         }

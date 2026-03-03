@@ -51,9 +51,7 @@ void AppListener::stop() {
         m_tcp_socket = nullptr;
     }
     if (m_udp_socket != nullptr) {
-        // UDP socket is still managed traditionally here, but let's keep it consistent if needed.
-        // For now, closesocket is okay for UDP if not registered in WorkerPool with IO_READ.
-        closesocket((SOCKET)m_udp_socket);
+        WorkerPool::instance().remove_socket((SOCKET)m_udp_socket);
         m_udp_socket = nullptr;
     }
 
@@ -132,34 +130,29 @@ void AppListener::udp_listener_thread() {
 
     if (bind(listen_socket, (SOCKADDR*)&service, sizeof(service)) == SOCKET_ERROR) {
         closesocket(listen_socket);
+        m_udp_socket = nullptr;
         return;
     }
     
-    LOG_INFO("[AppListener] UDP listener is running.");
+    LOG_INFO("[AppListener] UDP listener is running (IOCP).");
 
-    char buffer[65536]; 
+    WorkerPool::instance().add_socket(listen_socket, [this, listen_socket](char* data, int len, sockaddr_in* from) {
+        if (len > 0 && from) {
+            uint64_t key = NatManager::make_key(from->sin_addr.s_addr, from->sin_port);
+            auto dest = NatManager::instance().get_mapping(key);
+
+            if (dest) {
+                UdpProxy::handle_client_data(listen_socket, data, len, from, &(*dest));
+            }
+        }
+        
+        // Always re-issue the read for the listener socket if still running
+        if (m_running) {
+            WorkerPool::instance().read_async(listen_socket);
+        }
+    }, nullptr, true, nullptr, 16); // 16 concurrent reads for the listener
 
     while (m_running) {
-        sockaddr_in client_addr;
-        int client_addr_len = sizeof(client_addr);
-
-        int bytes_read = recvfrom(listen_socket, buffer, sizeof(buffer), 0, (SOCKADDR*)&client_addr, &client_addr_len);
-
-        if (bytes_read == SOCKET_ERROR) continue;
-
-        uint64_t key = NatManager::make_key(client_addr.sin_addr.s_addr, client_addr.sin_port);
-        auto dest = NatManager::instance().get_mapping(key);
-
-        if (dest) {
-            // Offload to worker pool to avoid blocking the listener thread
-            std::vector<char> packet_data(buffer, buffer + bytes_read);
-            sockaddr_in client_copy = client_addr;
-            OriginalDestination dest_copy = *dest;
-
-            WorkerPool::instance().queue_task([listen_socket, packet_data = std::move(packet_data), client_copy, dest_copy]() {
-                UdpProxy::handle_client_data(listen_socket, packet_data.data(), (int)packet_data.size(), &client_copy, &dest_copy);
-            });
-        }
+        Sleep(100);
     }
-    closesocket(listen_socket);
 }
