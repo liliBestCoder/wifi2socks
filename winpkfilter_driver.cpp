@@ -78,6 +78,23 @@ typedef struct _PSD_HEADER {
     USHORT Len;
 } PSD_HEADER, * PPSD_HEADER;
 
+typedef struct _IPV6_HEADER {
+    ULONG   Ver_Traffic_Flow;
+    USHORT  PayloadLen;
+    UCHAR   NextHeader;
+    UCHAR   HopLimit;
+    UCHAR   SrcAddr[16];
+    UCHAR   DstAddr[16];
+} IPV6_HEADER, * PIPV6_HEADER;
+
+typedef struct _TCPV6_PSD_HEADER {
+    UCHAR   SrcAddr[16];
+    UCHAR   DstAddr[16];
+    ULONG   PayloadLen;
+    UCHAR   Zero[3];
+    UCHAR   NextHeader;
+} TCPV6_PSD_HEADER, * PTCPV6_PSD_HEADER;
+
 #include <poppack.h>
 
 const USHORT ETHERTYPE_IP = 0x0800;
@@ -510,6 +527,16 @@ void WinPkFilterDriver::reader_loop() {
                             // Directly send to bypass worker latency and results queue
                             if (ether_type != ETHERTYPE_IP) {
                                 if (ether_type == ETHERTYPE_IPV6) {
+                                    // Try to send TCP RST for IPv6 TCP SYN packets from client to force fast fallback
+                                    if (b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + sizeof(IPV6_HEADER) + sizeof(TCP_HEADER)) {
+                                        PIPV6_HEADER ipv6 = (PIPV6_HEADER)(buffer + 14);
+                                        if (ipv6->NextHeader == IPPROTO_TCP) {
+                                            PTCP_HEADER tcp = (PTCP_HEADER)(buffer + 14 + sizeof(IPV6_HEADER));
+                                            if (tcp->Flags & 0x02) { // SYN
+                                                this->send_ipv6_tcp_rst((const char*)buffer, b->m_Length);
+                                            }
+                                        }
+                                    }
                                     // Drop IPv6 to force fallback to IPv4
                                     PacketPool::instance().release(b);
                                     m_read_request->EthPacket[i].Buffer = nullptr;
@@ -689,6 +716,69 @@ bool WinPkFilterDriver::send_to_mstcp(const char* packet, size_t length) {
     memcpy(m_send_buffer->m_IBuffer, packet, clen); m_send_buffer->m_Length = (ULONG)clen; m_send_buffer->m_dwDeviceFlags = PACKET_FLAG_ON_RECEIVE;
     ETH_REQUEST req = { m_adapter_handle, { m_send_buffer } };
     return m_ndis_api.SendPacketToMstcp(&req) != FALSE;
+}
+
+void WinPkFilterDriver::send_ipv6_tcp_rst(const char* packet, size_t length) {
+    if (length < 14 + sizeof(IPV6_HEADER) + sizeof(TCP_HEADER)) return;
+
+    // Use a local buffer for the RST packet
+    uint8_t rst_frame[14 + sizeof(IPV6_HEADER) + sizeof(TCP_HEADER)];
+    
+    // Original headers
+    const uint8_t* eth_orig = (const uint8_t*)packet;
+    PIPV6_HEADER ipv6_orig = (PIPV6_HEADER)(packet + 14);
+    PTCP_HEADER tcp_orig = (PTCP_HEADER)(packet + 14 + sizeof(IPV6_HEADER));
+
+    if (ipv6_orig->NextHeader != IPPROTO_TCP) return;
+
+    // Ethernet Header
+    memcpy(rst_frame, eth_orig + 6, 6);        // Dst = Original Src
+    memcpy(rst_frame + 6, eth_orig, 6);        // Src = Original Dst
+    *(USHORT*)(rst_frame + 12) = htons(ETHERTYPE_IPV6);
+
+    // IPv6 Header
+    PIPV6_HEADER ipv6 = (PIPV6_HEADER)(rst_frame + 14);
+    ipv6->Ver_Traffic_Flow = ipv6_orig->Ver_Traffic_Flow; // Copy version/traffic class/flow label
+    ipv6->PayloadLen = htons(sizeof(TCP_HEADER));
+    ipv6->NextHeader = IPPROTO_TCP;
+    ipv6->HopLimit = 64;
+    memcpy(ipv6->SrcAddr, ipv6_orig->DstAddr, 16);
+    memcpy(ipv6->DstAddr, ipv6_orig->SrcAddr, 16);
+
+    // TCP Header
+    PTCP_HEADER tcp = (PTCP_HEADER)(rst_frame + 14 + sizeof(IPV6_HEADER));
+    memset(tcp, 0, sizeof(TCP_HEADER));
+    tcp->SrcPort = tcp_orig->DstPort;
+    tcp->DstPort = tcp_orig->SrcPort;
+    
+    // RST Logic
+    if (tcp_orig->Flags & 0x02) { // SYN
+        tcp->SeqNum = 0;
+        tcp->AckNum = htonl(ntohl(tcp_orig->SeqNum) + 1);
+        tcp->Flags = 0x14; // RST | ACK
+    } else {
+        tcp->SeqNum = tcp_orig->AckNum;
+        tcp->AckNum = 0;
+        tcp->Flags = 0x04; // RST
+    }
+
+    tcp->HdrLen = (sizeof(TCP_HEADER) / 4) << 4;
+    tcp->WinSize = 0;
+    tcp->Csum = 0;
+
+    // TCP Checksum calculation
+    TCPV6_PSD_HEADER psd;
+    memcpy(psd.SrcAddr, ipv6->SrcAddr, 16);
+    memcpy(psd.DstAddr, ipv6->DstAddr, 16);
+    psd.PayloadLen = htonl(sizeof(TCP_HEADER));
+    memset(psd.Zero, 0, sizeof(psd.Zero));
+    psd.NextHeader = IPPROTO_TCP;
+
+    uint32_t sum = csum_partial(&psd, sizeof(psd), 0);
+    tcp->Csum = csum_finalize(csum_partial(tcp, sizeof(TCP_HEADER), sum));
+
+    // Send back to the client
+    this->send_to_adapter((const char*)rst_frame, sizeof(rst_frame));
 }
 
 void  WinPkFilterDriver::send_dhcp_response(const uint8_t* client_mac, const uint32_t src_ip, const DhcpResponse& dhcp_r, const uint8_t* m_adapter_mac) {
