@@ -126,6 +126,11 @@ private:
     std::atomic<bool> m_client_fin_sent{ false };
     std::atomic<bool> m_remote_fin_sent{ false };
 
+    // Activity tracking to prevent zombie sessions
+    std::atomic<uint64_t> m_last_access_time{ 0 };
+    static const uint64_t IDLE_TIMEOUT_MS = 300000; // 5 minutes total silence
+    static const uint64_t FIN_WAIT_TIMEOUT_MS = 30000; // 30 seconds wait for the other side's FIN
+
     // Handshake special handling
     std::vector<char> m_proxy_response_buffer;
 

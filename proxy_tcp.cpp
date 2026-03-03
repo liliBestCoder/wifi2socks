@@ -71,6 +71,7 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
     m_remote_eof = false;
     m_client_fin_sent = false;
     m_remote_fin_sent = false;
+    m_last_access_time = GetTickCount64();
 }
 
 ProxyTCP::~ProxyTCP() {
@@ -225,6 +226,7 @@ void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int err
         }
 
         buffer->total_bytes = bytes_transferred;
+        m_last_access_time = GetTickCount64();
         if (buffer->socket == m_client_socket) {
             handle_client_read_complete(buffer);
         }
@@ -554,12 +556,27 @@ void ProxyTCP::process_write_queue(SOCKET socket) {
         shutdown(socket, SD_SEND);
     }
 
-    // Final Closure Logic: 
+    // Final Closure Logic with Timeout Safeguards: 
+    uint64_t now = GetTickCount64();
+    uint64_t idle_time = now - m_last_access_time.load();
+
     // A session is only truly done when:
     // 1. Client has sent EOF AND Proxy has sent FIN to Client.
     // 2. Remote has sent EOF AND Proxy has sent FIN to Remote.
-    if (m_client_eof && m_client_fin_sent && m_remote_eof && m_remote_fin_sent) {
-        LOG_DEBUG("[TCP] Both sides gracefully closed. Cleaning up.");
+    bool fully_closed = (m_client_eof && m_client_fin_sent && m_remote_eof && m_remote_fin_sent);
+    
+    // Safeguard 1: If any side has started closing, don't wait forever for the other side (30s max)
+    bool partial_close_timeout = (m_client_fin_sent || m_remote_fin_sent || m_client_eof || m_remote_eof) && 
+                                 (idle_time > FIN_WAIT_TIMEOUT_MS);
+
+    // Safeguard 2: Absolute idle timeout (5 minutes)
+    bool absolute_idle_timeout = (idle_time > IDLE_TIMEOUT_MS);
+
+    if (fully_closed || partial_close_timeout || absolute_idle_timeout) {
+        if (partial_close_timeout) LOG_DEBUG("[TCP] Closing due to FIN_WAIT timeout.");
+        else if (absolute_idle_timeout) LOG_DEBUG("[TCP] Closing due to absolute idle timeout.");
+        else LOG_DEBUG("[TCP] Both sides gracefully closed. Cleaning up.");
+        
         close_session_internal();
     }
 }
