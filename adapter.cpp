@@ -32,7 +32,7 @@ std::vector<AdapterInfo> get_wifi_direct_adapters() {
         std::wstring desc = pCurr->Description;
         if (desc.find(prefix) != std::wstring::npos) {
             AdapterInfo info;
-            info.guid_name = pCurr->AdapterName ? "\DEVICE" + std::string(pCurr->AdapterName) : "";
+            info.guid_name = pCurr->AdapterName ? "\\DEVICE\\" + std::string(pCurr->AdapterName) : "";
             info.luid = pCurr->Luid;
             info.description = desc;
             info.index = 0;

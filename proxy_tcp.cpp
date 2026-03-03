@@ -351,7 +351,7 @@ void ProxyTCP::handle_client_read_complete(IoBuffer* buffer) {
                     m_detected_domain = host;
                     proceed = true;
                 }
-                else if (combined_size >= 4096) {
+                else if (combined_size >= 512) {
                     proceed = true;
                 }
             }
