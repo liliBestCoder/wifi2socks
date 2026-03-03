@@ -81,6 +81,7 @@ typedef struct _PSD_HEADER {
 #include <poppack.h>
 
 const USHORT ETHERTYPE_IP = 0x0800;
+const USHORT ETHERTYPE_IPV6 = 0x86DD;
 const USHORT ETHERTYPE_ARP = 0x0806;
 const USHORT NAT_TARGET_PORT = 3080;
 
@@ -508,7 +509,13 @@ void WinPkFilterDriver::reader_loop() {
                             // Non-IP Fast Path (ARP, EAPOL, IPv6, etc.)
                             // Directly send to bypass worker latency and results queue
                             if (ether_type != ETHERTYPE_IP) {
-                                if (ether_type == ETHERTYPE_ARP && b->m_Length >= 14 + sizeof(ARP_HEADER)) {
+                                if (ether_type == ETHERTYPE_IPV6) {
+                                    // Drop IPv6 to force fallback to IPv4
+                                    PacketPool::instance().release(b);
+                                    m_read_request->EthPacket[i].Buffer = nullptr;
+                                    handled = true;
+                                }
+                                else if (ether_type == ETHERTYPE_ARP && b->m_Length >= 14 + sizeof(ARP_HEADER)) {
                                     PARP_HEADER arp = (PARP_HEADER)(buffer + 14);
                                     // CRITICAL: Only reply if it's an ARP Request from the ADAPTER (phone)
                                     // If Windows (ON_SEND) asks for the gateway, DO NOT reply, otherwise Windows thinks there's an IP CONFLICT.

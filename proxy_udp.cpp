@@ -169,6 +169,18 @@ std::vector<char> build_dns_a_response(const char* request_data, int request_len
     return response;
 }
 
+// Helper to build an empty DNS response (NOERROR, 0 answers)
+std::vector<char> build_dns_empty_response(const char* request_data, int request_len) {
+    if (request_len < 12) return {};
+    std::vector<char> response(request_data, request_data + request_len);
+    uint16_t* flags = (uint16_t*)(response.data() + 2);
+    *flags = htons(0x8180); // QR=1, RA=1, NOERROR
+    *(uint16_t*)(response.data() + 6) = 0; // ANCOUNT
+    *(uint16_t*)(response.data() + 8) = 0; // NSCOUNT
+    *(uint16_t*)(response.data() + 10) = 0; // ARCOUNT
+    return response;
+}
+
 // A manager to handle all UDP proxy operations with proper flow isolation.
 class UdpProxyManager {
 public:
@@ -216,8 +228,18 @@ public:
 
         // --- 1. DNS Interception ---
         if (is_dns) {
-            std::string domain = parse_dns_query_domain(data, len);
+            uint16_t qtype = 0;
+            std::string domain = parse_dns_query_domain(data, len, &qtype);
             if (!domain.empty()) {
+                if (qtype == 28) { // AAAA Record (IPv6)
+                    LOG_DEBUG("[DNS] Blocking AAAA query for '%s' to force IPv4 fallback", domain.c_str());
+                    std::vector<char> resp = build_dns_empty_response(data, len);
+                    if (!resp.empty()) {
+                        sendto(listener_socket, resp.data(), (int)resp.size(), 0, (const sockaddr*)client_addr, sizeof(*client_addr));
+                    }
+                    return;
+                }
+
                 uint32_t cached_ip = DnsCache::instance().get(domain);
                 if (cached_ip != 0) {
                     char ip_str[INET_ADDRSTRLEN];
@@ -438,19 +460,29 @@ private:
         }
     }
 
-    // Helper to parse domain name from DNS query
-    std::string parse_dns_query_domain(const char* data, int len) {
+    // Helper to parse domain name and qtype from DNS query
+    std::string parse_dns_query_domain(const char* data, int len, uint16_t* out_qtype = nullptr) {
         if (len < 13) return "";
         std::string domain = "";
         const unsigned char* qname = (const unsigned char*)(data + 12);
         int pos = 0;
         while (pos < (len - 12)) {
             uint8_t label_len = qname[pos];
-            if (label_len == 0 || (label_len & 0xC0) == 0xC0) break;
+            if (label_len == 0) {
+                pos++;
+                break;
+            }
+            if ((label_len & 0xC0) == 0xC0) {
+                pos += 2;
+                break;
+            }
             if (pos + 1 + label_len > (len - 12)) return "";
             if (!domain.empty()) domain += ".";
             domain.append((const char*)(qname + pos + 1), label_len);
             pos += 1 + label_len;
+        }
+        if (out_qtype && pos + 2 <= (len - 12)) {
+            *out_qtype = ntohs(*(uint16_t*)(qname + pos));
         }
         return domain;
     }
