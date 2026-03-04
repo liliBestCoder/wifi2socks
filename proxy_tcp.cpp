@@ -260,35 +260,57 @@ void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int err
     // Handle WRITE completion
     else if (buffer->state == IoBuffer::IO_WRITING) {
         if (error != 0) {
-            free_buffer(buffer);
+            IoBuffer* b = buffer;
+            while (b) {
+                IoBuffer* next = b->next_in_batch;
+                free_buffer(b);
+                b = next;
+            }
             if (error != 10038) close_session();
             return;
         }
 
-        // Handle Gather Write completion (chained buffers)
+        // --- Correctly handle Gather Write completion to prevent data reordering ---
+        std::vector<IoBuffer*> unfinished;
         DWORD remaining = bytes_transferred;
         IoBuffer* current = buffer;
+
         while (current) {
             IoBuffer* next = current->next_in_batch;
-            current->next_in_batch = nullptr; // Unlink
+            current->next_in_batch = nullptr;
 
             DWORD contributed = (DWORD)(current->total_bytes - current->written_bytes);
             if (remaining >= contributed) {
                 current->written_bytes = current->total_bytes;
                 remaining -= contributed;
+                
+                // Buffer fully sent: regular completion path
+                if (current->socket == m_client_socket) handle_client_write_complete(current);
+                else handle_remote_write_complete(current);
             }
             else {
                 current->written_bytes += remaining;
                 remaining = 0;
-            }
-
-            if (current->socket == m_client_socket) {
-                handle_client_write_complete(current);
-            }
-            else {
-                handle_remote_write_complete(current);
+                // Buffer not fully sent: needs re-queuing
+                unfinished.push_back(current);
             }
             current = next;
+        }
+
+        if (!unfinished.empty()) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            SOCKET s = unfinished[0]->socket;
+            auto& q = (s == m_client_socket) ? m_client_write_queue : m_remote_write_queue;
+            auto& q_size = (s == m_client_socket) ? m_client_write_queue_size : m_remote_write_queue_size;
+
+            // Push back to front in reverse order to maintain original stream sequence
+            for (int i = (int)unfinished.size() - 1; i >= 0; --i) {
+                IoBuffer* b = unfinished[i];
+                b->state = IoBuffer::IO_READY;
+                q_size += (b->total_bytes - b->written_bytes);
+                q.push_front(b);
+            }
+            process_write_queue(s);
         }
     }
 }
@@ -625,16 +647,9 @@ void ProxyTCP::handle_client_write_complete(IoBuffer* buffer) {
         m_client_inflight_write_count--;
         m_client_write_queue_size -= buffer->total_bytes;
 
-        if (buffer->written_bytes < buffer->total_bytes) {
-            m_client_write_queue_size += (buffer->total_bytes - buffer->written_bytes);
-            buffer->state = IoBuffer::IO_READY;
-            m_client_write_queue.push_front(buffer);
-        }
-        else {
-            buffer->state = IoBuffer::IO_COMPLETED;
-            m_last_access_time = GetTickCount64();
-            free_buffer(buffer);
-        }
+        buffer->state = IoBuffer::IO_COMPLETED;
+        m_last_access_time = GetTickCount64();
+        free_buffer(buffer);
 
         if (m_client_write_queue_size < LOW_WATER_MARK && m_remote_read_paused) {
             m_remote_read_paused = false;
@@ -652,16 +667,9 @@ void ProxyTCP::handle_remote_write_complete(IoBuffer* buffer) {
         m_remote_inflight_write_count--;
         m_remote_write_queue_size -= buffer->total_bytes;
 
-        if (buffer->written_bytes < buffer->total_bytes) {
-            m_remote_write_queue_size += (buffer->total_bytes - buffer->written_bytes);
-            buffer->state = IoBuffer::IO_READY;
-            m_remote_write_queue.push_front(buffer);
-        }
-        else {
-            buffer->state = IoBuffer::IO_COMPLETED;
-            m_last_access_time = GetTickCount64();
-            free_buffer(buffer);
-        }
+        buffer->state = IoBuffer::IO_COMPLETED;
+        m_last_access_time = GetTickCount64();
+        free_buffer(buffer);
 
         if (m_remote_write_queue_size < LOW_WATER_MARK && m_client_read_paused) {
             m_client_read_paused = false;
@@ -699,7 +707,7 @@ void ProxyTCP::close_session_internal() {
 
     auto clean_safe = [this](std::deque<IoBuffer*>& q) {
         for (auto* buf : q) {
-            if (buf->state == IoBuffer::IO_READY || buf->state == IoBuffer::IO_DROPPED) free_buffer(buf);
+            if (buf->state == IoBuffer::IO_READY || buf->state == IoBuffer::IO_DROPPED || buf->state == IoBuffer::IO_EOF) free_buffer(buf);
         }
         q.clear();
         };
@@ -721,8 +729,8 @@ void ProxyTCP::check_all_timeouts() {
         }
     }
 
-    uint64_t now = GetTickCount64();
     for (auto& s : sessions_to_check) {
+        std::lock_guard<std::mutex> lock(s->m_mutex);
         // Trigger timeout and closure checks for both directions
         s->process_write_queue(s->m_client_socket);
         s->process_write_queue(s->m_remote_socket);
