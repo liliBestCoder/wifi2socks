@@ -442,44 +442,57 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                                 }
                             }
                         }
-                        // --- Restore Outbound (Proxy -> Adapter) ---
-                        else if (p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP)) {
-                            int sport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + ip_hdr_len))->SrcPort) : ntohs(((PUDP_HEADER)((char*)ip + ip_hdr_len))->SrcPort);
-                            if (sport == NAT_TARGET_PORT) {
-                                if (ip->Proto == IPPROTO_TCP) {
-                                    PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + ip_hdr_len);
-                                    auto od = NatManager::instance().get_mapping(NatManager::make_key(ip->DstAddr, tcp->DstPort));
-                                                                                                    if (od) {
-                                                                                                        uint32_t old_src_ip = ip->SrcAddr;
-                                                                                                        ip->SrcAddr = od->ip;
-                                                                                                        uint16_t old_src_port = tcp->SrcPort;
-                                                                                                        tcp->SrcPort = od->port;
-                                                                                                    
-                                                                                                        incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
-                                                                                                        incremental_checksum_update(&tcp->Csum, old_src_ip, ip->SrcAddr);
-                                                                                                        incremental_checksum_update(&tcp->Csum, old_src_port, tcp->SrcPort);
-                                                                                                    }                                 else {
-                                        recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
-                                    }
-                                } else { // UDP
-                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
-                                    auto key4 = NatManager::instance().get_udp_key_by_virtual_port(ntohs(udp->DstPort));
-                                    if (key4) {
-                                        uint32_t old_src_ip = ip->SrcAddr; uint32_t old_dst_ip = ip->DstAddr;
-                                        uint16_t old_src_port = udp->SrcPort; uint16_t old_dst_port = udp->DstPort;
-                                        ip->SrcAddr = key4->dst_ip; udp->SrcPort = key4->dst_port; udp->DstPort = key4->src_port;
-                                        incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
-                                        incremental_checksum_update(&udp->Csum, old_src_ip, ip->SrcAddr);
-                                        incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
-                                        incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
-                                    } else {
-                                        recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
-                                    }
-                                }
-                                to_adapter = true;
-                                handled = true;
-                            }
-                        }
+                                            // --- Restore Outbound (Proxy -> Adapter) ---
+                                            else if (p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP)) {
+                                                int sport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + ip_hdr_len))->SrcPort) : ntohs(((PUDP_HEADER)((char*)ip + ip_hdr_len))->SrcPort);
+                                                int dport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + ip_hdr_len))->DstPort) : ntohs(((PUDP_HEADER)((char*)ip + ip_hdr_len))->DstPort);
+                                                
+                                                bool is_proxy_reply = (sport == NAT_TARGET_PORT);
+                                                if (!is_proxy_reply && ip->Proto == IPPROTO_UDP) {
+                                                    // If it's UDP, check if destination port is in our virtual port range (5000-65000)
+                                                    if (dport >= 5000 && dport <= 65000) is_proxy_reply = true;
+                                                }
+                        
+                                                if (is_proxy_reply) {
+                                                    if (ip->Proto == IPPROTO_TCP) {
+                                                        PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + ip_hdr_len);
+                                                        auto od = NatManager::instance().get_mapping(NatManager::make_key(ip->DstAddr, tcp->DstPort));
+                                                                                                                        if (od) {
+                                                                                                                            uint32_t old_src_ip = ip->SrcAddr;
+                                                                                                                            ip->SrcAddr = od->ip;
+                                                                                                                            uint16_t old_src_port = tcp->SrcPort;
+                                                                                                                            tcp->SrcPort = od->port;
+                                                                                                                        
+                                                                                                                            incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
+                                                                                                                            incremental_checksum_update(&tcp->Csum, old_src_ip, ip->SrcAddr);
+                                                                                                                            incremental_checksum_update(&tcp->Csum, old_src_port, tcp->SrcPort);
+                                                                                                                        }                                 else {
+                                                            recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
+                                                        }
+                                                    } else { // UDP
+                                                        PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
+                                                        auto key4 = NatManager::instance().get_udp_key_by_virtual_port(ntohs(udp->DstPort));
+                                                        if (key4) {
+                                                            uint32_t old_src_ip = ip->SrcAddr;
+                                                            uint16_t old_src_port = udp->SrcPort; 
+                                                            uint16_t old_dst_port = udp->DstPort;
+                                                            
+                                                            ip->SrcAddr = key4->dst_ip; 
+                                                            udp->SrcPort = key4->dst_port; 
+                                                            udp->DstPort = key4->src_port;
+                        
+                                                            incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
+                                                            incremental_checksum_update(&udp->Csum, old_src_ip, ip->SrcAddr);
+                                                            incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
+                                                            incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
+                                                        } else {
+                                                            recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
+                                                        }
+                                                    }
+                                                    to_adapter = true;
+                                                    handled = true;
+                                                }
+                                            }
                     }
                 }
 
