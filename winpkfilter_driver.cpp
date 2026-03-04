@@ -372,10 +372,10 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
         to_adapter_req->dwPacketsNumber = 0;
         to_stack_req->dwPacketsNumber = 0;
 
-        // Process packets in smaller chunks (64) to keep latency low and steady
-        PINTERMEDIATE_BUFFER batch_bufs[64];
+        // Process packets in larger batches (512) for peak throughput
+        PINTERMEDIATE_BUFFER batch_bufs[BATCH_SIZE];
         size_t popped_count;
-        while ((popped_count = m_worker_queues[worker_id]->pop_batch(batch_bufs, 64)) > 0) {
+        while ((popped_count = m_worker_queues[worker_id]->pop_batch(batch_bufs, BATCH_SIZE)) > 0) {
             for (size_t i = 0; i < popped_count; ++i) {
                 PINTERMEDIATE_BUFFER b = batch_bufs[i];
                 Packet p{ RawPacketPtr(b), (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) };
@@ -399,8 +399,7 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                                     USHORT dport = (ip->Proto == IPPROTO_TCP) ? ((PTCP_HEADER)((char*)ip + ip_hdr_len))->DstPort : ((PUDP_HEADER)((char*)ip + ip_hdr_len))->DstPort;
                                     if (dport == htons(NAT_TARGET_PORT)) {
                                         should_intercept = false;
-                                        recalculate_ip_checksum(ip);
-                                        recalculate_tcp_udp_checksum(ip);
+                                        // Already targeting proxy, skip expensive recalculation
                                     }
                                 }
 
@@ -492,17 +491,16 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                 if (b_raw) {
                     if (to_adapter) {
                         to_adapter_req->EthPacket[to_adapter_req->dwPacketsNumber++].Buffer = b_raw;
+                        if (to_adapter_req->dwPacketsNumber >= BATCH_SIZE) flush_packets(to_adapter_req, true);
                     } else {
                         to_stack_req->EthPacket[to_stack_req->dwPacketsNumber++].Buffer = b_raw;
+                        if (to_stack_req->dwPacketsNumber >= BATCH_SIZE) flush_packets(to_stack_req, false);
                     }
                 }
             }
-            // Flush after each batch pop to keep latency low and prevent accumulation
-            flush_packets(to_adapter_req, true);
-            flush_packets(to_stack_req, false);
         }
 
-        // Final flushes
+        // Flush remaining packets after the queue has been fully drained
         flush_packets(to_adapter_req, true);
         flush_packets(to_stack_req, false);
 
