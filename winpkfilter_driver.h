@@ -92,11 +92,35 @@ private:
         PINTERMEDIATE_BUFFER buffer;
     };
 
+    static const int QUEUE_SIZE = 4096;
     struct WorkerQueue {
-        // Input from Reader
-        std::list<QueuedPacket> packets;
+        PINTERMEDIATE_BUFFER ring[QUEUE_SIZE];
+        std::atomic<uint32_t> head{ 0 };
+        std::atomic<uint32_t> tail{ 0 };
+        
         std::mutex mtx;
         std::condition_variable cv;
+
+        WorkerQueue() : head(0), tail(0) {}
+
+        bool push(PINTERMEDIATE_BUFFER buf) {
+            uint32_t h = head.load(std::memory_order_relaxed);
+            uint32_t t = tail.load(std::memory_order_acquire);
+            uint32_t next = (h + 1) % QUEUE_SIZE;
+            if (next == t) return false; // Full
+            ring[h] = buf;
+            head.store(next, std::memory_order_release);
+            return true;
+        }
+
+        PINTERMEDIATE_BUFFER pop() {
+            uint32_t t = tail.load(std::memory_order_relaxed);
+            uint32_t h = head.load(std::memory_order_acquire);
+            if (h == t) return nullptr; // Empty
+            PINTERMEDIATE_BUFFER buf = ring[t];
+            tail.store((t + 1) % QUEUE_SIZE, std::memory_order_release);
+            return buf;
+        }
     };
     // Use unique_ptr to handle mutex non-copyable issue (C2280)
     std::vector<std::unique_ptr<WorkerQueue>> m_worker_queues;
