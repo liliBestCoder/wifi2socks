@@ -5,6 +5,7 @@
 #include "rule_manager.h"
 #include "geo_checker.h"
 #include <WS2tcpip.h>
+#include <mstcpip.h>
 #include <algorithm>
 
 // --- IoBuffer Pool for high performance ---
@@ -121,7 +122,6 @@ void ProxyTCP::connect_remote() {
 
     sockaddr_in remote_addr = { 0 };
     remote_addr.sin_family = AF_INET;
-    // ... (rest of the IP string logic)
 
     unsigned char* ip_bytes = (unsigned char*)&m_original_dest.ip;
     char ip_str[INET_ADDRSTRLEN];
