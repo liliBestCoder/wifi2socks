@@ -28,6 +28,7 @@ public:
 
     void init(size_t size = 8192);
     RawPacket* acquire();
+    size_t acquire_batch(RawPacket** p, size_t count);
     void release(RawPacket* p);
     void release_batch(RawPacket** p, size_t count);
 

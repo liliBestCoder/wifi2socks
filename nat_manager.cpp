@@ -153,22 +153,26 @@ std::optional<OriginalDestination> NatManager::get_udp_mapping(const UdpKey4& ke
 }
 
 std::optional<OriginalDestination> NatManager::get_mapping(uint64_t key) {
-    uint16_t port_nbo = (uint16_t)(key & 0xFFFF);
-    uint16_t port_hbo = ntohs(port_nbo);
-    
-    // Fast path: Check if it's a known virtual port
-    if (port_hbo >= VPORT_START && port_hbo <= VPORT_END) {
-        auto key4 = get_udp_key_by_virtual_port(port_hbo);
-        if (key4) {
-            return get_udp_mapping(*key4);
-        }
-    }
-
-    // Otherwise check TCP map
     std::shared_lock<std::shared_mutex> lock(m_global_mtx);
+    
+    // 1. First check TCP map
     auto it_tcp = m_tcp_map.find(key);
     if (it_tcp != m_tcp_map.end()) {
         return it_tcp->second.dest;
+    }
+
+    // 2. Check if it's a known virtual port (UDP return path)
+    uint16_t port_nbo = (uint16_t)(key & 0xFFFF);
+    uint16_t port_hbo = ntohs(port_nbo);
+    
+    if (port_hbo >= VPORT_START && port_hbo <= VPORT_END) {
+        auto it_v = m_vport_to_udp.find(port_hbo);
+        if (it_v != m_vport_to_udp.end()) {
+            auto it_u = m_udp_map.find(it_v->second.key);
+            if (it_u != m_udp_map.end()) {
+                return it_u->second.dest;
+            }
+        }
     }
 
     return std::nullopt;

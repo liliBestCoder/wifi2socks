@@ -343,9 +343,14 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
         if (req->dwPacketsNumber > 0) {
             if (to_adapter) m_ndis_api.SendPacketsToAdapter(req);
             else m_ndis_api.SendPacketsToMstcp(req);
+            
+            // Extract pointers for batch release
+            PINTERMEDIATE_BUFFER release_ptrs[BATCH_SIZE];
             for (unsigned int i = 0; i < req->dwPacketsNumber; ++i) {
-                PacketPool::instance().release(req->EthPacket[i].Buffer);
+                release_ptrs[i] = req->EthPacket[i].Buffer;
             }
+            PacketPool::instance().release_batch(release_ptrs, req->dwPacketsNumber);
+            
             req->dwPacketsNumber = 0;
         }
     };
@@ -393,6 +398,7 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                                 uint32_t old_dst_ip = ip->DstAddr;
                                 if (ip->Proto == IPPROTO_TCP) {
                                     PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + ip_hdr_len);
+
                                     uint16_t old_dst_port = tcp->DstPort;
                                     NatManager::instance().create_tcp_mapping(NatManager::make_key(ip->SrcAddr, tcp->SrcPort), { old_dst_ip, old_dst_port, ip->SrcAddr }, worker_id);
                                     
@@ -435,15 +441,16 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                             if (ip->Proto == IPPROTO_TCP) {
                                 PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + ip_hdr_len);
                                 auto od = NatManager::instance().get_mapping(NatManager::make_key(ip->DstAddr, tcp->DstPort));
-                                if (od) {
-                                    uint32_t old_src_ip = ip->SrcAddr;
-                                    ip->SrcAddr = od->ip;
-                                    uint16_t old_src_port = tcp->SrcPort;
-                                    tcp->SrcPort = od->port;
-                                    incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
-                                    incremental_checksum_update(&tcp->Csum, old_src_ip, ip->SrcAddr);
-                                    incremental_checksum_update(&tcp->Csum, old_src_port, tcp->SrcPort);
-                                } else {
+                                                                                                if (od) {
+                                                                                                    uint32_t old_src_ip = ip->SrcAddr;
+                                                                                                    ip->SrcAddr = od->ip;
+                                                                                                    uint16_t old_src_port = tcp->SrcPort;
+                                                                                                    tcp->SrcPort = od->port;
+                                                                                                
+                                                                                                    incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
+                                                                                                    incremental_checksum_update(&tcp->Csum, old_src_ip, ip->SrcAddr);
+                                                                                                    incremental_checksum_update(&tcp->Csum, old_src_port, tcp->SrcPort);
+                                                                                                }                                 else {
                                     recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
                                 }
                             } else { // UDP
@@ -538,8 +545,7 @@ void WinPkFilterDriver::reader_loop() {
                                         }
                                     }
                                     // Drop IPv6 to force fallback to IPv4
-                                    PacketPool::instance().release(b);
-                                    m_read_request->EthPacket[i].Buffer = nullptr;
+                                    // Reuse buffer: do nothing
                                     handled = true;
                                 }
                                 else if (ether_type == ETHERTYPE_ARP && b->m_Length >= 14 + sizeof(ARP_HEADER)) {
@@ -563,8 +569,7 @@ void WinPkFilterDriver::reader_loop() {
                                         // Send back directly to requester (phone)
                                         this->send_to_adapter((const char*)buffer, b->m_Length);
                                         
-                                        PacketPool::instance().release(b);
-                                        m_read_request->EthPacket[i].Buffer = nullptr;
+                                        // Reuse buffer
                                         handled = true;
                                     }
                                 } else if (ether_type == 0x888E) { // EAPOL
@@ -578,8 +583,7 @@ void WinPkFilterDriver::reader_loop() {
                                     } else {
                                         this->send_to_mstcp((const char*)buffer, b->m_Length);
                                     }
-                                    PacketPool::instance().release(b);
-                                    m_read_request->EthPacket[i].Buffer = nullptr;
+                                    // Reuse buffer
                                     handled = true;
                                 }
                             }
@@ -589,8 +593,7 @@ void WinPkFilterDriver::reader_loop() {
                                 
                                 // BLOCK ICS DHCP NAK: Drop packets from 192.168.137.1
                                 if (ip->SrcAddr == 0x0189A8C0) {
-                                    PacketPool::instance().release(b);
-                                    m_read_request->EthPacket[i].Buffer = nullptr;
+                                    // Reuse buffer
                                     handled = true;
                                 }
 
@@ -612,8 +615,7 @@ void WinPkFilterDriver::reader_loop() {
                                         recalculate_tcp_udp_checksum(ip);
 
                                         this->send_to_adapter((const char*)buffer, b->m_Length);
-                                        PacketPool::instance().release(b);
-                                        m_read_request->EthPacket[i].Buffer = nullptr;
+                                        // Reuse buffer
                                         handled = true;
                                     }
                                 }
@@ -628,13 +630,11 @@ void WinPkFilterDriver::reader_loop() {
                                             uint8_t* client_mac = ((uint8_t*)ip) - 8;
                                             this->send_dhcp_response(client_mac, m_gateway_ip, dhcp_r, m_adapter_mac);
                                         }
-                                        PacketPool::instance().release(b);
-                                        m_read_request->EthPacket[i].Buffer = nullptr; // 释放
+                                        // Reuse buffer
                                         handled = true;
                                     }
                                     else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) { // Drop Discovery
-                                        PacketPool::instance().release(b);
-                                        m_read_request->EthPacket[i].Buffer = nullptr; // 释放
+                                        // Reuse buffer
                                         handled = true;
                                     }
                                 }
@@ -646,17 +646,36 @@ void WinPkFilterDriver::reader_loop() {
                         groups[get_target_worker((char*)b->m_IBuffer, b->m_Length, b->m_dwDeviceFlags, m_num_workers)].push_back({ b });
                         m_read_request->EthPacket[i].Buffer = nullptr; // Buffer ownership transferred to worker
                     }
+                }
+                
+                // Batch refill buffers that were moved to workers
+                unsigned int need_refill_count = 0;
+                for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
+                    if (m_read_request->EthPacket[i].Buffer == nullptr) need_refill_count++;
+                }
 
-                    // Replace the used buffer in the read request
-                    PINTERMEDIATE_BUFFER next_b = PacketPool::instance().acquire();
-                    if (next_b) {
-                        m_read_request->EthPacket[i].Buffer = next_b;
-                    } else {
-                        LOG_ERROR("[Driver] Packet pool exhausted! Stopping read batch.");
-                        m_read_request->dwPacketsSuccess = i; // Adjust for partial dispatch
-                        break;
+                if (need_refill_count > 0) {
+                    std::vector<PINTERMEDIATE_BUFFER> new_buffers(need_refill_count);
+                    size_t acquired = PacketPool::instance().acquire_batch(new_buffers.data(), need_refill_count);
+                    
+                    if (acquired < need_refill_count) {
+                        LOG_ERROR("[Driver] Packet pool exhausted! Acquired %zu/%u", acquired, need_refill_count);
+                        // We might need to handle this by dropping packets or stopping
+                    }
+
+                    unsigned int next_new = 0;
+                    for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
+                        if (m_read_request->EthPacket[i].Buffer == nullptr) {
+                            if (next_new < acquired) {
+                                m_read_request->EthPacket[i].Buffer = new_buffers[next_new++];
+                            } else {
+                                // Pool empty, emergency refill (unlikely but possible)
+                                m_read_request->EthPacket[i].Buffer = PacketPool::instance().acquire();
+                            }
+                        }
                     }
                 }
+
                 for (unsigned int i = 0; i < m_num_workers; ++i) {
                     if (!groups[i].empty()) {
                         std::lock_guard<std::mutex> lock(m_worker_queues[i]->mtx);

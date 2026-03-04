@@ -28,6 +28,17 @@ RawPacket* PacketPool::acquire() {
     return p;
 }
 
+size_t PacketPool::acquire_batch(RawPacket** p, size_t count) {
+    if (!p || count == 0) return 0;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    size_t actual = (std::min)(count, m_pool.size());
+    for (size_t i = 0; i < actual; ++i) {
+        p[i] = m_pool.back();
+        m_pool.pop_back();
+    }
+    return actual;
+}
+
 void PacketPool::release(RawPacket* p) {
     if (!p) return;
     std::lock_guard<std::mutex> lock(m_mutex);
