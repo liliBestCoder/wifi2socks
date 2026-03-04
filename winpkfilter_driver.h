@@ -94,9 +94,12 @@ private:
 
     static const int QUEUE_SIZE = 4096;
     struct WorkerQueue {
-        PINTERMEDIATE_BUFFER ring[QUEUE_SIZE];
-        std::atomic<uint32_t> head{ 0 };
-        std::atomic<uint32_t> tail{ 0 };
+        // Prevent False Sharing: keep producer and consumer indices on separate cache lines
+        alignas(64) std::atomic<uint32_t> head{ 0 };
+        alignas(64) std::atomic<uint32_t> tail{ 0 };
+        
+        // Ensure data array starts on a new cache line as well
+        alignas(64) PINTERMEDIATE_BUFFER ring[QUEUE_SIZE];
         
         std::mutex mtx;
         std::condition_variable cv;
