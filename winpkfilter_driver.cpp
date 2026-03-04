@@ -474,21 +474,19 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
                                     auto key4 = NatManager::instance().get_udp_key_by_virtual_port(ntohs(udp->DstPort));
                                     if (key4) {
-                                        uint32_t old_src_ip = ip->SrcAddr;
-                                        uint16_t old_src_port = udp->SrcPort;
-                                        uint16_t old_dst_port = udp->DstPort;
+                                        // key4 is the original inbound key: { phone_ip, phone_port, remote_ip, remote_port }
+                                        // We are restoring the reply: { remote_ip, remote_port } -> { phone_ip, phone_port }
+                                        ip->SrcAddr = key4->dst_ip;    // Restore to remote server IP
+                                        udp->SrcPort = key4->dst_port; // Restore to remote server port
+                                        udp->DstPort = key4->src_port; // Restore to phone's original source port
 
-                                        ip->SrcAddr = key4->dst_ip;
-                                        udp->SrcPort = key4->dst_port;
-                                        udp->DstPort = key4->src_port;
-
-                                        incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
-                                        incremental_checksum_update(&udp->Csum, old_src_ip, ip->SrcAddr);
-                                        incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
-                                        incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
+                                        // Recalculate checksums for the modified packet
+                                        recalculate_ip_checksum(ip);
+                                        recalculate_tcp_udp_checksum(ip);
                                     }
                                     else {
-                                        recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
+                                        recalculate_ip_checksum(ip); 
+                                        recalculate_tcp_udp_checksum(ip);
                                     }
                                 }
                                 to_adapter = true;
