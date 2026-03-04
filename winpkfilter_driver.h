@@ -122,6 +122,20 @@ private:
             return buf;
         }
 
+        size_t pop_batch(PINTERMEDIATE_BUFFER* p, size_t count) {
+            uint32_t t = tail.load(std::memory_order_relaxed);
+            uint32_t h = head.load(std::memory_order_acquire);
+            if (h == t) return 0;
+            size_t available = (h > t) ? (h - t) : (QUEUE_SIZE - t + h);
+            size_t actual = (std::min)(count, available);
+            for (size_t i = 0; i < actual; ++i) {
+                p[i] = ring[t];
+                t = (t + 1) % QUEUE_SIZE;
+            }
+            tail.store(t, std::memory_order_release);
+            return actual;
+        }
+
         size_t size() const {
             uint32_t h = head.load(std::memory_order_relaxed);
             uint32_t t = tail.load(std::memory_order_relaxed);
