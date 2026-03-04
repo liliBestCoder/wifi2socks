@@ -125,17 +125,20 @@ static uint16_t csum_finalize(uint32_t sum) {
 
 // 增量更新16位字段的校验和
 static void incremental_checksum_update(uint16_t* checksum, uint16_t old_val, uint16_t new_val) {
+    if (*checksum == 0) return; // Skip if no checksum
     uint32_t sum = (~(*checksum)) & 0xFFFF;
     sum += (~old_val) & 0xFFFF;
     sum += new_val;
     while (sum >> 16) {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
-    *checksum = ~((uint16_t)sum);
+    uint16_t result = ~((uint16_t)sum);
+    *checksum = (result == 0) ? 0xFFFF : result;
 }
 
 // 增量更新32位字段的校验和
 static void incremental_checksum_update(uint16_t* checksum, uint32_t old_val, uint32_t new_val) {
+    if (*checksum == 0) return; // Skip if no checksum
     uint32_t sum = (~(*checksum)) & 0xFFFF;
     sum += (~(old_val & 0xFFFF)) & 0xFFFF;
     sum += (~(old_val >> 16)) & 0xFFFF;
@@ -144,7 +147,8 @@ static void incremental_checksum_update(uint16_t* checksum, uint32_t old_val, ui
     while (sum >> 16) {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
-    *checksum = ~((uint16_t)sum);
+    uint16_t result = ~((uint16_t)sum);
+    *checksum = (result == 0) ? 0xFFFF : result;
 }
 
 static void recalculate_ip_checksum(PIP_HEADER ip) {

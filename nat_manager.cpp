@@ -146,12 +146,15 @@ uint16_t NatManager::allocate_udp_virtual_port(const UdpKey4& key, const Origina
 
 
 std::optional<UdpKey4> NatManager::get_udp_key_by_virtual_port(uint16_t vport) {
-    std::shared_lock<std::shared_mutex> lock(m_global_mtx);
+    std::unique_lock<std::shared_mutex> lock(m_global_mtx);
     auto it = m_vport_to_udp.find(vport);
     if (it != m_vport_to_udp.end()) {
-        // Update access time (Note: requires unique lock for writing, or atomic)
-        // For simplicity and performance, we'll skip the update in the shared_lock path
-        // and rely on the receive path (allocate_udp_virtual_port) to keep it alive.
+        uint64_t now = GetTickCount64();
+        it->second.last_access = now;
+        auto it_u = m_udp_map.find(it->second.key);
+        if (it_u != m_udp_map.end()) {
+            it_u->second.last_access = now;
+        }
         return it->second.key;
     }
     return std::nullopt;
@@ -167,11 +170,13 @@ std::optional<OriginalDestination> NatManager::get_udp_mapping(const UdpKey4& ke
 }
 
 std::optional<OriginalDestination> NatManager::get_mapping(uint64_t key) {
-    std::shared_lock<std::shared_mutex> lock(m_global_mtx);
+    std::unique_lock<std::shared_mutex> lock(m_global_mtx);
+    uint64_t now = GetTickCount64();
     
     // 1. First check TCP map
     auto it_tcp = m_tcp_map.find(key);
     if (it_tcp != m_tcp_map.end()) {
+        it_tcp->second.last_access = now;
         return it_tcp->second.dest;
     }
 
@@ -182,8 +187,10 @@ std::optional<OriginalDestination> NatManager::get_mapping(uint64_t key) {
     if (port_hbo >= VPORT_START && port_hbo <= VPORT_END) {
         auto it_v = m_vport_to_udp.find(port_hbo);
         if (it_v != m_vport_to_udp.end()) {
+            it_v->second.last_access = now;
             auto it_u = m_udp_map.find(it_v->second.key);
             if (it_u != m_udp_map.end()) {
+                it_u->second.last_access = now;
                 return it_u->second.dest;
             }
         }

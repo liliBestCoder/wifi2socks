@@ -116,5 +116,5 @@ private:
     
     // Timeouts
     const uint64_t TCP_TIMEOUT_MS = 300000;
-    const uint64_t UDP_TIMEOUT_MS = 30000; 
+    const uint64_t UDP_TIMEOUT_MS = 300000; 
 };
