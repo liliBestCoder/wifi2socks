@@ -370,8 +370,27 @@ private:
         SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (s == INVALID_SOCKET) return INVALID_SOCKET;
 
+        // Set SO_REUSEADDR to allow the socket to bind to the virtual port even if it was recently closed
+        BOOL reuse = TRUE;
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char*)&reuse, sizeof(reuse));
+
         u_long mode = 1;
         ioctlsocket(s, FIONBIO, &mode);
+
+        // Bind to the virtual port assigned by the driver.
+        // This ensures the external source port is stable and consistent with the NAT mapping,
+        // preventing QUIC session breaks and improving compatibility with push services.
+        sockaddr_in local_addr = {};
+        local_addr.sin_family = AF_INET;
+        local_addr.sin_addr.s_addr = INADDR_ANY;
+        local_addr.sin_port = client_addr->sin_port; // This is the virtual_port in NBO
+        
+        if (bind(s, (const sockaddr*)&local_addr, sizeof(local_addr)) == SOCKET_ERROR) {
+            // Fallback: if binding to the specific virtual port fails, let the OS pick one
+            // to avoid complete connectivity loss, though this may affect QUIC stability.
+            local_addr.sin_port = 0;
+            bind(s, (const sockaddr*)&local_addr, sizeof(local_addr));
+        }
 
         m_sessions[flow] = { s, *client_addr, now };
         m_socket_to_flow[s] = flow;
