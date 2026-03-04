@@ -297,8 +297,30 @@ public:
             }
         }
 
-        // --- 2. QUIC Blocking (REMOVED) ---
-        // We allow all UDP traffic including QUIC through the transparent proxy.
+        // --- 2. QUIC Blocking (Port 443) ---
+        // For foreign QUIC traffic, we DROP the packets to force apps to fallback to TCP (HTTPS).
+        // Domestic QUIC is allowed to go DIRECT for speed.
+        if (dport == 443) {
+            uint32_t ip_h = ntohl(dest->ip);
+            bool is_cn = GeoChecker::instance().is_cn_ip(ip_h);
+            
+            if (!is_cn) {
+                // Check if it's a known Tencent IP range even if geoip fails
+                uint8_t first = (uint8_t)(ip_h >> 24);
+                if (first == 113 || first == 183 || first == 125 || first == 157) {
+                    // Tencent Bypass
+                } else {
+                    char src_ip[INET_ADDRSTRLEN];
+                    char dst_ip[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &client_addr->sin_addr, src_ip, INET_ADDRSTRLEN);
+                    inet_ntop(AF_INET, &dest->ip, dst_ip, INET_ADDRSTRLEN);
+                    LOG_INFO("[UDP] Blocking foreign QUIC from %s:%d to %s:%d", 
+                        src_ip, ntohs(client_addr->sin_port),
+                        dst_ip, dport);
+                    return; 
+                }
+            }
+        }
 
         // --- 3. Flow Matching & Forwarding (Direct Relay) ---
         FlowKey flow = { client_addr->sin_addr.s_addr, client_addr->sin_port, dest->ip, dest->port };
@@ -415,7 +437,19 @@ private:
         if (found) {
             SOCKET listener = (SOCKET)AppListener::instance().get_udp_socket();
             if (listener != INVALID_SOCKET) {
-                sendto(listener, buf, len, 0, (const sockaddr*)&client_addr, sizeof(client_addr));
+                int sent = sendto(listener, buf, len, 0, (const sockaddr*)&client_addr, sizeof(client_addr));
+                if (sent == SOCKET_ERROR) {
+                    LOG_ERROR("[UDP] Failed to send back to client %s:%d, error: %d",
+                        inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port), WSAGetLastError());
+                } else {
+                    // Only log every 10th packet or for small lengths to avoid spamming, 
+                    // but for troubleshooting we'll log most of them.
+                    if (len < 512 || (GetTickCount64() % 5 == 0)) {
+                        LOG_DEBUG("[UDP] Forwarded %d bytes from %s:%d back to client %s:%d",
+                            len, inet_ntoa(from->sin_addr), ntohs(from->sin_port),
+                            inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+                    }
+                }
                 TrafficManager::instance().report_proxy_rx(len, true);
             }
         }

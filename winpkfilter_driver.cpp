@@ -474,15 +474,20 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
                                     auto key4 = NatManager::instance().get_udp_key_by_virtual_port(ntohs(udp->DstPort));
                                     if (key4) {
+                                        uint32_t old_src_ip = ip->SrcAddr;
+                                        uint16_t old_src_port = udp->SrcPort;
+                                        uint16_t old_dst_port = udp->DstPort;
+
                                         // key4 is the original inbound key: { phone_ip, phone_port, remote_ip, remote_port }
                                         // We are restoring the reply: { remote_ip, remote_port } -> { phone_ip, phone_port }
                                         ip->SrcAddr = key4->dst_ip;    // Restore to remote server IP
                                         udp->SrcPort = key4->dst_port; // Restore to remote server port
                                         udp->DstPort = key4->src_port; // Restore to phone's original source port
 
-                                        // Recalculate checksums for the modified packet
-                                        recalculate_ip_checksum(ip);
-                                        recalculate_tcp_udp_checksum(ip);
+                                        incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
+                                        incremental_checksum_update(&udp->Csum, old_src_ip, ip->SrcAddr);
+                                        incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
+                                        incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
                                     }
                                 }
                                 to_adapter = true;
@@ -582,7 +587,7 @@ void WinPkFilterDriver::reader_loop() {
                             }
                             else if (b->m_Length >= 34) {
                                 PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
-                                // if (ip->SrcAddr == 0x0189A8C0) handled = true; // Block ICS (Commented out for troubleshooting)
+                                if (ip->SrcAddr == 0x0189A8C0) handled = true; // Block ICS
                                 if (ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ((ip->Ver_HLen & 0x0F) * 4) + sizeof(ICMP_HEADER)) {
                                     PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ((ip->Ver_HLen & 0x0F) * 4));
                                     if (icmp->Type == 8) {
