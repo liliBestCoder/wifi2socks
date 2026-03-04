@@ -92,7 +92,7 @@ private:
         PINTERMEDIATE_BUFFER buffer;
     };
 
-    static const int QUEUE_SIZE = 4096;
+    static const int QUEUE_SIZE = 16384;
     struct WorkerQueue {
         // Prevent False Sharing: keep producer and consumer indices on separate cache lines
         alignas(64) std::atomic<uint32_t> head{ 0 };
@@ -155,6 +155,7 @@ private:
     std::atomic<uint64_t> m_stat_ul_pkts{0};
     std::atomic<uint64_t> m_stat_ul_bytes{0};
     std::atomic<uint64_t> m_stat_work_time_us{0};
+    std::atomic<uint64_t> m_stat_dropped_pkts{ 0 };
     std::chrono::steady_clock::time_point m_last_stat_time;
 
     // --- End of new members ---

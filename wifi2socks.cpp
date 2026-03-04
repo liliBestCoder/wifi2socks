@@ -84,7 +84,7 @@ int main() {
     GeoChecker::instance().init();
     LOG_INFO("[CORE] GeoChecker Initialized.");
 
-    PacketPool::instance().init(1024 * 64);
+    PacketPool::instance().init(1024 * 512);
 
     std::string adapter_name = find_best_wifi_direct_adapter();
     static WinPkFilterDriver pk_driver;

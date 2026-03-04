@@ -248,7 +248,7 @@ static uint32_t get_target_worker(const char* packet, size_t length, uint32_t de
 
 WinPkFilterDriver::WinPkFilterDriver()
     : m_adapter_handle(nullptr), m_wait_event(nullptr), m_running(false), m_gateway_ip(0) {
-    CNdisApi::SetPoolSize(32768);
+    CNdisApi::SetPoolSize(524288);
 
     m_num_workers = (std::max)(1u, std::thread::hardware_concurrency());
     for (unsigned int i = 0; i < m_num_workers; ++i) {
@@ -306,20 +306,10 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
 
     m_reader_thread = std::thread(&WinPkFilterDriver::reader_loop, this);
     SetThreadPriority(m_reader_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
-    SetThreadAffinityMask(m_reader_thread.native_handle(), 1); // Bind reader to Core 0
-
-    DWORD_PTR process_mask, system_mask;
-    GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask);
-    int num_cores = 0;
-    for (int i = 0; i < sizeof(DWORD_PTR) * 8; ++i) if (system_mask & ((DWORD_PTR)1 << i)) num_cores++;
 
     for (unsigned int i = 0; i < m_num_workers; ++i) {
         m_worker_threads.emplace_back(&WinPkFilterDriver::worker_loop, this, i);
         SetThreadPriority(m_worker_threads.back().native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
-        
-        // Bind workers to Core 1, 2, 3... (skip Core 0)
-        DWORD_PTR worker_mask = (DWORD_PTR)1 << ((i % (num_cores > 1 ? num_cores - 1 : 1)) + 1);
-        SetThreadAffinityMask(m_worker_threads.back().native_handle(), worker_mask);
     }
     return true;
 }
@@ -382,10 +372,10 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
         to_adapter_req->dwPacketsNumber = 0;
         to_stack_req->dwPacketsNumber = 0;
 
-        // Process all available packets in the ring buffer using batch pop
-        PINTERMEDIATE_BUFFER batch_bufs[BATCH_SIZE];
+        // Process packets in smaller chunks (64) to keep latency low and steady
+        PINTERMEDIATE_BUFFER batch_bufs[64];
         size_t popped_count;
-        while ((popped_count = m_worker_queues[worker_id]->pop_batch(batch_bufs, BATCH_SIZE)) > 0) {
+        while ((popped_count = m_worker_queues[worker_id]->pop_batch(batch_bufs, 64)) > 0) {
             for (size_t i = 0; i < popped_count; ++i) {
                 PINTERMEDIATE_BUFFER b = batch_bufs[i];
                 Packet p{ RawPacketPtr(b), (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) };
@@ -613,6 +603,7 @@ void WinPkFilterDriver::reader_loop() {
                                 worker_notified[target] = true;
                             } else {
                                 // Queue full, reused in-place (packet dropped)
+                                m_stat_dropped_pkts++;
                             }
                         }
                     }
@@ -648,6 +639,7 @@ void WinPkFilterDriver::reader_loop() {
         if (elapsed_ms >= 1000) {
             uint64_t dl_pkts = m_stat_dl_pkts.exchange(0); uint64_t dl_bytes = m_stat_dl_bytes.exchange(0);
             uint64_t ul_pkts = m_stat_ul_pkts.exchange(0); uint64_t ul_bytes = m_stat_ul_bytes.exchange(0);
+            uint64_t drops = m_stat_dropped_pkts.exchange(0);
             uint64_t work_us = m_stat_work_time_us.exchange(0);
             double dl_mbps = (dl_bytes * 8.0) / (elapsed_ms * 1000.0);
             double ul_mbps = (ul_bytes * 8.0) / (elapsed_ms * 1000.0);
@@ -656,8 +648,8 @@ void WinPkFilterDriver::reader_loop() {
                 backlog += q->size();
             }
             uint64_t total_pkts = dl_pkts + ul_pkts;
-            LOG_DEBUG("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us",
-                dl_mbps, dl_pkts, ul_mbps, ul_pkts, backlog, total_pkts > 0 ? work_us / total_pkts : 0);
+            LOG_DEBUG("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Drops: %llu | Backlog: %zu | AvgWork: %llu us",
+                dl_mbps, dl_pkts, ul_mbps, ul_pkts, drops, backlog, total_pkts > 0 ? work_us / total_pkts : 0);
             m_last_stat_time = now;
         }
     }
