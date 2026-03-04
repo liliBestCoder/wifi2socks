@@ -73,6 +73,9 @@ public:
     std::optional<OriginalDestination> get_udp_mapping(const UdpKey4& key);
     void remove_tcp_mapping(uint64_t key);
 
+    // Active maintenance
+    void cleanup();
+
 private:
     NatManager();
     ~NatManager();

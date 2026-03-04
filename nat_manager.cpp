@@ -19,6 +19,11 @@ NatManager::NatManager() {
 
 NatManager::~NatManager() {}
 
+void NatManager::cleanup() {
+    std::unique_lock<std::shared_mutex> lock(m_global_mtx);
+    cleanup_expired(GetTickCount64());
+}
+
 void NatManager::cleanup_expired(uint64_t now) {
     if (now - m_last_cleanup_time < 5000) return; // 5 second interval
     m_last_cleanup_time = now;
