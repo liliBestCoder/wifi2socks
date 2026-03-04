@@ -80,6 +80,12 @@ private:
     NatManager();
     ~NatManager();
 
+    void cleanup_loop();
+    std::thread m_cleanup_thread;
+    std::atomic<bool> m_cleanup_running{ false };
+    std::condition_variable m_cleanup_cv;
+    std::mutex m_cleanup_mtx;
+
     struct MappingEntry {
         OriginalDestination dest;
         uint64_t last_access;

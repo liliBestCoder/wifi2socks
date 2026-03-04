@@ -302,10 +302,20 @@ bool WinPkFilterDriver::start_batch(const std::string& adapter_name, BatchPacket
 
     m_reader_thread = std::thread(&WinPkFilterDriver::reader_loop, this);
     SetThreadPriority(m_reader_thread.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
+    SetThreadAffinityMask(m_reader_thread.native_handle(), 1); // Bind reader to Core 0
+
+    DWORD_PTR process_mask, system_mask;
+    GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask);
+    int num_cores = 0;
+    for (int i = 0; i < sizeof(DWORD_PTR) * 8; ++i) if (system_mask & ((DWORD_PTR)1 << i)) num_cores++;
 
     for (unsigned int i = 0; i < m_num_workers; ++i) {
         m_worker_threads.emplace_back(&WinPkFilterDriver::worker_loop, this, i);
         SetThreadPriority(m_worker_threads.back().native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
+        
+        // Bind workers to Core 1, 2, 3... (skip Core 0)
+        DWORD_PTR worker_mask = (DWORD_PTR)1 << ((i % (num_cores > 1 ? num_cores - 1 : 1)) + 1);
+        SetThreadAffinityMask(m_worker_threads.back().native_handle(), worker_mask);
     }
     return true;
 }

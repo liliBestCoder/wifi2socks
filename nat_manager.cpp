@@ -15,9 +15,29 @@ NatManager::NatManager() {
         m_free_vports.push_back(port);
     }
     LOG_INFO("[NAT] Initialized with %zu virtual ports", m_free_vports.size());
+
+    m_cleanup_running = true;
+    m_cleanup_thread = std::thread(&NatManager::cleanup_loop, this);
 }
 
-NatManager::~NatManager() {}
+NatManager::~NatManager() {
+    m_cleanup_running = false;
+    m_cleanup_cv.notify_all();
+    if (m_cleanup_thread.joinable()) {
+        m_cleanup_thread.join();
+    }
+}
+
+void NatManager::cleanup_loop() {
+    while (m_cleanup_running) {
+        std::unique_lock<std::mutex> lock(m_cleanup_mtx);
+        m_cleanup_cv.wait_for(lock, std::chrono::seconds(10), [this] { return !m_cleanup_running; });
+        if (!m_cleanup_running) break;
+
+        std::unique_lock<std::shared_mutex> global_lock(m_global_mtx);
+        cleanup_expired(GetTickCount64());
+    }
+}
 
 void NatManager::cleanup() {
     std::unique_lock<std::shared_mutex> lock(m_global_mtx);
@@ -25,7 +45,7 @@ void NatManager::cleanup() {
 }
 
 void NatManager::cleanup_expired(uint64_t now) {
-    if (now - m_last_cleanup_time < 5000) return; // 5 second interval
+    // Note: m_last_cleanup_time check removed since it's now controlled by the loop interval
     m_last_cleanup_time = now;
 
     size_t cleaned_udp = 0;
@@ -66,7 +86,6 @@ void NatManager::cleanup_expired(uint64_t now) {
 void NatManager::create_tcp_mapping(uint64_t key, const OriginalDestination& dest, uint32_t worker_id) {
     std::unique_lock<std::shared_mutex> lock(m_global_mtx);
     uint64_t now = GetTickCount64();
-    cleanup_expired(now);
     
     m_tcp_map[key] = { dest, now, {}, 0 };
     m_tcp_map[key].dest.worker_id = worker_id;
@@ -80,7 +99,6 @@ void NatManager::remove_tcp_mapping(uint64_t key) {
 void NatManager::create_or_update_udp_mapping(const UdpKey4& key, const OriginalDestination& dest, uint32_t worker_id) {
     std::unique_lock<std::shared_mutex> lock(m_global_mtx);
     uint64_t now = GetTickCount64();
-    cleanup_expired(now);
     
     auto it = m_udp_map.find(key);
     if (it != m_udp_map.end()) {
@@ -90,8 +108,6 @@ void NatManager::create_or_update_udp_mapping(const UdpKey4& key, const Original
             m_vport_to_udp[it->second.vport].last_access = now;
         }
     } else {
-        // Note: This function doesn't allocate vports. 
-        // allocate_udp_virtual_port must be called first or instead.
         MappingEntry entry = { dest, now, key, 0 };
         entry.dest.worker_id = worker_id;
         m_udp_map[key] = entry;
@@ -102,11 +118,6 @@ uint16_t NatManager::allocate_udp_virtual_port(const UdpKey4& key, const Origina
     std::unique_lock<std::shared_mutex> lock(m_global_mtx);
     uint64_t now = GetTickCount64();
     
-    // Always try to cleanup if pool is getting low
-    if (m_free_vports.empty() || (now - m_last_cleanup_time > 5000)) {
-        cleanup_expired(now);
-    }
-
     // 1. Check if we already have a mapping for this flow
     auto it = m_udp_map.find(key);
     if (it != m_udp_map.end() && it->second.vport != 0) {
@@ -117,7 +128,9 @@ uint16_t NatManager::allocate_udp_virtual_port(const UdpKey4& key, const Origina
 
     // 2. Allocate a new port from the free pool
     if (m_free_vports.empty()) {
-        LOG_ERROR("[NAT] UDP Virtual Port Pool Exhausted!");
+        // Emergency wake cleanup if empty
+        LOG_WARN("[NAT] UDP Virtual Port Pool Exhausted! Waking cleanup thread.");
+        m_cleanup_cv.notify_all();
         return 0;
     }
 
@@ -130,6 +143,7 @@ uint16_t NatManager::allocate_udp_virtual_port(const UdpKey4& key, const Origina
 
     return vport;
 }
+
 
 std::optional<UdpKey4> NatManager::get_udp_key_by_virtual_port(uint16_t vport) {
     std::shared_lock<std::shared_mutex> lock(m_global_mtx);
