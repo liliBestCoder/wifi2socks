@@ -11,6 +11,23 @@
 static std::mutex g_proxy_buf_mtx;
 static std::vector<ProxyTCP::IoBuffer*> g_proxy_buf_pool;
 
+// --- Static Registry ---
+std::mutex ProxyTCP::g_sessions_mtx;
+std::vector<std::weak_ptr<ProxyTCP>> ProxyTCP::g_sessions;
+
+static void enable_keepalive(SOCKET s) {
+    int optval = 1;
+    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (char*)&optval, sizeof(optval));
+
+    // Windows specific: Configure keepalive intervals
+    tcp_keepalive keepalive;
+    keepalive.onoff = 1;
+    keepalive.keepalivetime = 60000;    // 60 seconds idle before first probe
+    keepalive.keepaliveinterval = 10000; // 10 seconds between probes
+    DWORD bytes;
+    WSAIoctl(s, SIO_KEEPALIVE_VALS, &keepalive, sizeof(keepalive), NULL, 0, &bytes, NULL, NULL);
+}
+
 ProxyTCP::IoBuffer* ProxyTCP::alloc_buffer(size_t size) {
     ProxyTCP::IoBuffer* buf = nullptr;
     {
@@ -72,6 +89,10 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
     m_client_fin_sent = false;
     m_remote_fin_sent = false;
     m_last_access_time = GetTickCount64();
+
+    if (m_client_socket != INVALID_SOCKET) {
+        enable_keepalive(m_client_socket);
+    }
 }
 
 ProxyTCP::~ProxyTCP() {
@@ -80,6 +101,12 @@ ProxyTCP::~ProxyTCP() {
 
 void ProxyTCP::start() {
     auto self = shared_from_this();
+
+    {
+        std::lock_guard<std::mutex> lock(g_sessions_mtx);
+        g_sessions.push_back(self);
+    }
+
     WorkerPool::instance().add_socket(m_client_socket, nullptr, nullptr, false, [this, self]() {
         post_reads(m_client_socket);
     });
@@ -126,6 +153,7 @@ void ProxyTCP::connect_remote() {
     // 优化 socket 性能
     int optval = 1;
     setsockopt(m_remote_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&optval, sizeof(optval)); // 禁用 Nagle 算法
+    enable_keepalive(m_remote_socket);
 
     auto self = shared_from_this();
     WorkerPool::instance().connect_async(
@@ -595,6 +623,7 @@ void ProxyTCP::handle_client_write_complete(IoBuffer* buffer) {
         }
         else {
             buffer->state = IoBuffer::IO_COMPLETED;
+            m_last_access_time = GetTickCount64();
             free_buffer(buffer);
         }
 
@@ -621,6 +650,7 @@ void ProxyTCP::handle_remote_write_complete(IoBuffer* buffer) {
         }
         else {
             buffer->state = IoBuffer::IO_COMPLETED;
+            m_last_access_time = GetTickCount64();
             free_buffer(buffer);
         }
 
@@ -666,4 +696,27 @@ void ProxyTCP::close_session_internal() {
         };
     clean_safe(m_client_write_queue);
     clean_safe(m_remote_write_queue);
+}
+
+void ProxyTCP::check_all_timeouts() {
+    std::vector<std::shared_ptr<ProxyTCP>> sessions_to_check;
+    {
+        std::lock_guard<std::mutex> lock(g_sessions_mtx);
+        for (auto it = g_sessions.begin(); it != g_sessions.end(); ) {
+            if (auto s = it->lock()) {
+                sessions_to_check.push_back(s);
+                ++it;
+            } else {
+                it = g_sessions.erase(it);
+            }
+        }
+    }
+
+    uint64_t now = GetTickCount64();
+    for (auto& s : sessions_to_check) {
+        // We call process_write_queue(INVALID_SOCKET) or similar to trigger the internal timeout logic
+        // Or we can directly check here if the state is suitable.
+        // Let's call process_write_queue with an invalid socket to reuse the existing logic safely.
+        s->process_write_queue(INVALID_SOCKET);
+    }
 }

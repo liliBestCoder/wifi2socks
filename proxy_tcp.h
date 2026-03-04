@@ -128,11 +128,15 @@ private:
 
     // Activity tracking to prevent zombie sessions
     std::atomic<uint64_t> m_last_access_time{ 0 };
-    static const uint64_t IDLE_TIMEOUT_MS = 300000; // 5 minutes total silence
+    static const uint64_t IDLE_TIMEOUT_MS = 120000; // Reduced to 2 minutes to prevent client-side RST
     static const uint64_t FIN_WAIT_TIMEOUT_MS = 30000; // 30 seconds wait for the other side's FIN
 
-    // Handshake special handling
-    std::vector<char> m_proxy_response_buffer;
+    // Static registry for periodic cleanup
+    static std::mutex g_sessions_mtx;
+    static std::vector<std::weak_ptr<ProxyTCP>> g_sessions;
+public:
+    static void check_all_timeouts();
+private:
 
     // Cleanup
     void free_buffer(IoBuffer* buffer);
