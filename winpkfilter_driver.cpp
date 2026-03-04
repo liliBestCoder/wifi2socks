@@ -193,16 +193,17 @@ static void recalculate_tcp_udp_checksum(PIP_HEADER ip) {
 // in subsequent fragments, which might lead to mis-hashing.
 static uint32_t get_target_worker(const char* packet, size_t length, uint32_t device_flags, uint32_t num_workers) {
     if (length < 14) return 0;
-    
+
     USHORT ether_type = ntohs(*(USHORT*)(packet + 12));
     if (ether_type != ETHERTYPE_IP) {
         // Non-IP packets (ARP, IPv6, EAPOL, etc.)
         // Fallback: Hash the "Client" MAC to keep the session pinned to one worker.
         const uint8_t* mac;
         if (device_flags == PACKET_FLAG_ON_SEND) {
-             mac = (const uint8_t*)(packet + 0); // Dst MAC (Client)
-        } else {
-             mac = (const uint8_t*)(packet + 6); // Src MAC (Client)
+            mac = (const uint8_t*)(packet + 0); // Dst MAC (Client)
+        }
+        else {
+            mac = (const uint8_t*)(packet + 6); // Src MAC (Client)
         }
         uint32_t hash = mac[0] ^ mac[1] ^ mac[2] ^ mac[3] ^ mac[4] ^ mac[5];
         return hash % num_workers;
@@ -218,7 +219,7 @@ static uint32_t get_target_worker(const char* packet, size_t length, uint32_t de
     if (device_flags == PACKET_FLAG_ON_SEND) {
         // Outbound (Stack -> Adapter): Destination is Client
         client_ip = ip->DstAddr;
-        
+
         // Attempt to extract Dest Port (Client Port)
         if (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP) {
             // Check if packet is large enough to contain the port
@@ -227,7 +228,8 @@ static uint32_t get_target_worker(const char* packet, size_t length, uint32_t de
                 client_port = *(uint16_t*)(packet + 14 + ip_hdr_len + 2);
             }
         }
-    } else {
+    }
+    else {
         // Inbound (Adapter -> Stack): Source is Client
         client_ip = ip->SrcAddr;
 
@@ -345,25 +347,25 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
         if (req->dwPacketsNumber > 0) {
             if (to_adapter) m_ndis_api.SendPacketsToAdapter(req);
             else m_ndis_api.SendPacketsToMstcp(req);
-            
+
             // Extract pointers for batch release
             PINTERMEDIATE_BUFFER release_ptrs[BATCH_SIZE];
             for (unsigned int i = 0; i < req->dwPacketsNumber; ++i) {
                 release_ptrs[i] = req->EthPacket[i].Buffer;
             }
             PacketPool::instance().release_batch(release_ptrs, req->dwPacketsNumber);
-            
+
             req->dwPacketsNumber = 0;
         }
-    };
+        };
 
     while (m_running) {
         // Wait for packets if queue is empty
         {
             std::unique_lock<std::mutex> lock(m_worker_queues[worker_id]->mtx);
-            m_worker_queues[worker_id]->cv.wait(lock, [&] { 
-                return !m_running || (m_worker_queues[worker_id]->head.load(std::memory_order_relaxed) != m_worker_queues[worker_id]->tail.load(std::memory_order_relaxed)); 
-            });
+            m_worker_queues[worker_id]->cv.wait(lock, [&] {
+                return !m_running || (m_worker_queues[worker_id]->head.load(std::memory_order_relaxed) != m_worker_queues[worker_id]->tail.load(std::memory_order_relaxed));
+                });
         }
 
         if (!m_running) break;
@@ -409,7 +411,7 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                                         PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + ip_hdr_len);
                                         uint16_t old_dst_port = tcp->DstPort;
                                         NatManager::instance().create_tcp_mapping(NatManager::make_key(ip->SrcAddr, tcp->SrcPort), { old_dst_ip, old_dst_port, ip->SrcAddr }, worker_id);
-                                        
+
                                         ip->DstAddr = m_gateway_ip;
                                         tcp->DstPort = htons(NAT_TARGET_PORT);
                                         incremental_checksum_update(&ip->Csum, old_dst_ip, ip->DstAddr);
@@ -435,64 +437,64 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
 
                                             to_adapter = false;
                                             handled = true;
-                                        } else {
+                                        }
+                                        else {
                                             handled = true; // Dropped
                                         }
                                     }
                                 }
                             }
                         }
-                                            // --- Restore Outbound (Proxy -> Adapter) ---
-                                            else if (p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP)) {
-                                                int sport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + ip_hdr_len))->SrcPort) : ntohs(((PUDP_HEADER)((char*)ip + ip_hdr_len))->SrcPort);
-                                                int dport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + ip_hdr_len))->DstPort) : ntohs(((PUDP_HEADER)((char*)ip + ip_hdr_len))->DstPort);
-                                                
-                                                bool is_proxy_reply = (sport == NAT_TARGET_PORT);
-                                                if (!is_proxy_reply && ip->Proto == IPPROTO_UDP) {
-                                                    // If it's UDP, check if destination port is in our virtual port range (5000-65000)
-                                                    if (dport >= 5000 && dport <= 65000) is_proxy_reply = true;
-                                                }
-                        
-                                                if (is_proxy_reply) {
-                                                    if (ip->Proto == IPPROTO_TCP) {
-                                                        PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + ip_hdr_len);
-                                                        auto od = NatManager::instance().get_mapping(NatManager::make_key(ip->DstAddr, tcp->DstPort));
-                                                                                                                        if (od) {
-                                                                                                                            uint32_t old_src_ip = ip->SrcAddr;
-                                                                                                                            ip->SrcAddr = od->ip;
-                                                                                                                            uint16_t old_src_port = tcp->SrcPort;
-                                                                                                                            tcp->SrcPort = od->port;
-                                                                                                                        
-                                                                                                                            incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
-                                                                                                                            incremental_checksum_update(&tcp->Csum, old_src_ip, ip->SrcAddr);
-                                                                                                                            incremental_checksum_update(&tcp->Csum, old_src_port, tcp->SrcPort);
-                                                                                                                        }                                 else {
-                                                            recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
-                                                        }
-                                                    } else { // UDP
-                                                        PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
-                                                        auto key4 = NatManager::instance().get_udp_key_by_virtual_port(ntohs(udp->DstPort));
-                                                        if (key4) {
-                                                            uint32_t old_src_ip = ip->SrcAddr;
-                                                            uint16_t old_src_port = udp->SrcPort; 
-                                                            uint16_t old_dst_port = udp->DstPort;
-                                                            
-                                                            ip->SrcAddr = key4->dst_ip; 
-                                                            udp->SrcPort = key4->dst_port; 
-                                                            udp->DstPort = key4->src_port;
-                        
-                                                            incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
-                                                            incremental_checksum_update(&udp->Csum, old_src_ip, ip->SrcAddr);
-                                                            incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
-                                                            incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
-                                                        } else {
-                                                            recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
-                                                        }
-                                                    }
-                                                    to_adapter = true;
-                                                    handled = true;
-                                                }
-                                            }
+                        // --- Restore Outbound (Proxy -> Adapter) ---
+                        else if (p.outbound && (ip->Proto == IPPROTO_TCP || ip->Proto == IPPROTO_UDP)) {
+                            int sport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + ip_hdr_len))->SrcPort) : ntohs(((PUDP_HEADER)((char*)ip + ip_hdr_len))->SrcPort);
+                            int dport = (ip->Proto == IPPROTO_TCP) ? ntohs(((PTCP_HEADER)((char*)ip + ip_hdr_len))->DstPort) : ntohs(((PUDP_HEADER)((char*)ip + ip_hdr_len))->DstPort);
+
+                            bool is_proxy_reply = (sport == NAT_TARGET_PORT);
+
+                            if (is_proxy_reply) {
+                                if (ip->Proto == IPPROTO_TCP) {
+                                    PTCP_HEADER tcp = (PTCP_HEADER)((char*)ip + ip_hdr_len);
+                                    auto od = NatManager::instance().get_mapping(NatManager::make_key(ip->DstAddr, tcp->DstPort));
+                                    if (od) {
+                                        uint32_t old_src_ip = ip->SrcAddr;
+                                        ip->SrcAddr = od->ip;
+                                        uint16_t old_src_port = tcp->SrcPort;
+                                        tcp->SrcPort = od->port;
+
+                                        incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
+                                        incremental_checksum_update(&tcp->Csum, old_src_ip, ip->SrcAddr);
+                                        incremental_checksum_update(&tcp->Csum, old_src_port, tcp->SrcPort);
+                                    }
+                                    else {
+                                        recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
+                                    }
+                                }
+                                else { // UDP
+                                    PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ip_hdr_len);
+                                    auto key4 = NatManager::instance().get_udp_key_by_virtual_port(ntohs(udp->DstPort));
+                                    if (key4) {
+                                        uint32_t old_src_ip = ip->SrcAddr;
+                                        uint16_t old_src_port = udp->SrcPort;
+                                        uint16_t old_dst_port = udp->DstPort;
+
+                                        ip->SrcAddr = key4->dst_ip;
+                                        udp->SrcPort = key4->dst_port;
+                                        udp->DstPort = key4->src_port;
+
+                                        incremental_checksum_update(&ip->Csum, old_src_ip, ip->SrcAddr);
+                                        incremental_checksum_update(&udp->Csum, old_src_ip, ip->SrcAddr);
+                                        incremental_checksum_update(&udp->Csum, old_src_port, udp->SrcPort);
+                                        incremental_checksum_update(&udp->Csum, old_dst_port, udp->DstPort);
+                                    }
+                                    else {
+                                        recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
+                                    }
+                                }
+                                to_adapter = true;
+                                handled = true;
+                            }
+                        }
                     }
                 }
 
@@ -505,7 +507,8 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                     if (to_adapter) {
                         to_adapter_req->EthPacket[to_adapter_req->dwPacketsNumber++].Buffer = b_raw;
                         if (to_adapter_req->dwPacketsNumber >= BATCH_SIZE) flush_packets(to_adapter_req, true);
-                    } else {
+                    }
+                    else {
                         to_stack_req->EthPacket[to_stack_req->dwPacketsNumber++].Buffer = b_raw;
                         if (to_stack_req->dwPacketsNumber >= BATCH_SIZE) flush_packets(to_stack_req, false);
                     }
@@ -576,12 +579,14 @@ void WinPkFilterDriver::reader_loop() {
                                         this->send_to_adapter((const char*)buffer, b->m_Length);
                                         handled = true; // Buffer reused
                                     }
-                                } else if (ether_type == 0x888E) { // EAPOL
+                                }
+                                else if (ether_type == 0x888E) { // EAPOL
                                     if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) this->send_to_adapter((const char*)buffer, b->m_Length);
                                     else this->send_to_mstcp((const char*)buffer, b->m_Length);
                                     handled = true;
                                 }
-                            } else if (b->m_Length >= 34) {
+                            }
+                            else if (b->m_Length >= 34) {
                                 PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
                                 if (ip->SrcAddr == 0x0189A8C0) handled = true; // Block ICS
                                 else if (ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ((ip->Ver_HLen & 0x0F) * 4) + sizeof(ICMP_HEADER)) {
@@ -602,7 +607,7 @@ void WinPkFilterDriver::reader_loop() {
                                         if (dhcp_r.length > 0) this->send_dhcp_response(((uint8_t*)ip) - 8, m_gateway_ip, dhcp_r, m_adapter_mac);
                                         handled = true;
                                     }
-                                    else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353) handled = true;
+                                    else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353 || sp == 137 || dp == 137 || sp == 138 || dp == 138) handled = true;
                                 }
                             }
                         }
@@ -612,7 +617,8 @@ void WinPkFilterDriver::reader_loop() {
                             if (m_worker_queues[target]->push(b)) {
                                 m_read_request->EthPacket[i].Buffer = nullptr; // Transferred
                                 worker_notified[target] = true;
-                            } else {
+                            }
+                            else {
                                 // Queue full, reused in-place (packet dropped)
                                 m_stat_dropped_pkts++;
                             }
@@ -636,10 +642,12 @@ void WinPkFilterDriver::reader_loop() {
                     for (unsigned int i = 0; i < m_num_workers; ++i) {
                         if (worker_notified[i]) m_worker_queues[i]->cv.notify_one();
                     }
-                } else {
+                }
+                else {
                     data_available = false;
                 }
-            } else {
+            }
+            else {
                 data_available = false;
             }
         }
@@ -654,7 +662,7 @@ void WinPkFilterDriver::reader_loop() {
             uint64_t work_us = m_stat_work_time_us.exchange(0);
             double dl_mbps = (dl_bytes * 8.0) / (elapsed_ms * 1000.0);
             double ul_mbps = (ul_bytes * 8.0) / (elapsed_ms * 1000.0);
-            size_t backlog = 0; 
+            size_t backlog = 0;
             for (auto& q : m_worker_queues) {
                 backlog += q->size();
             }
@@ -695,7 +703,7 @@ void WinPkFilterDriver::send_ipv6_tcp_rst(const char* packet, size_t length) {
 
     // Use a local buffer for the RST packet
     uint8_t rst_frame[14 + sizeof(IPV6_HEADER) + sizeof(TCP_HEADER)];
-    
+
     // Original headers
     const uint8_t* eth_orig = (const uint8_t*)packet;
     PIPV6_HEADER ipv6_orig = (PIPV6_HEADER)(packet + 14);
@@ -722,13 +730,14 @@ void WinPkFilterDriver::send_ipv6_tcp_rst(const char* packet, size_t length) {
     memset(tcp, 0, sizeof(TCP_HEADER));
     tcp->SrcPort = tcp_orig->DstPort;
     tcp->DstPort = tcp_orig->SrcPort;
-    
+
     // RST Logic
     if (tcp_orig->Flags & 0x02) { // SYN
         tcp->SeqNum = 0;
         tcp->AckNum = htonl(ntohl(tcp_orig->SeqNum) + 1);
         tcp->Flags = 0x14; // RST | ACK
-    } else {
+    }
+    else {
         tcp->SeqNum = tcp_orig->AckNum;
         tcp->AckNum = 0;
         tcp->Flags = 0x04; // RST
