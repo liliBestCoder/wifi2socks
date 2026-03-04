@@ -220,35 +220,30 @@ void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int err
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 if (buffer->socket == m_client_socket) {
-                    if (!m_client_eof) {
-                        m_client_eof = true;
-                        LOG_DEBUG("[TCP] Client sent FIN (EOF)");
-                    }
                     m_client_pending_read_count--;
                 }
                 else {
-                    if (!m_remote_eof) {
-                        m_remote_eof = true;
-                        LOG_DEBUG("[TCP] Remote sent FIN (EOF)");
-                    }
                     m_remote_pending_read_count--;
                 }
 
-                buffer->state = IoBuffer::IO_DROPPED;
+                if (error == 0) {
+                    // Graceful FIN: Mark as EOF in queue to preserve order
+                    buffer->state = IoBuffer::IO_EOF;
+                } else {
+                    // Actual error: Drop and close immediately
+                    buffer->state = IoBuffer::IO_DROPPED;
+                    
+                    if (error == ERROR_NETNAME_DELETED || error == ERROR_CONNECTION_ABORTED || error == 10038 ||
+                        error == 10054 || error == 10053 || error == 10060 || error == 10057 || error == 121 || 
+                        error == 1236 || error == 64) {
+                        LOG_DEBUG("[TCP] IO closure on socket: %d", error);
+                    } else {
+                        LOG_ERROR("[TCP] IO Error on socket: %d", error);
+                    }
+                    close_session_internal();
+                }
                 process_write_queue(m_client_socket);
                 process_write_queue(m_remote_socket);
-            }
-
-            if (error != 0) {
-                // Common network errors during connection closure
-                if (error == ERROR_NETNAME_DELETED || error == ERROR_CONNECTION_ABORTED || error == 10038 ||
-                    error == 10054 || error == 10053 || error == 10060 || error == 10057 || error == 121 || 
-                    error == 1236 || error == 64) {
-                    LOG_DEBUG("[TCP] IO closure on socket: %d", error);
-                } else {
-                    LOG_ERROR("[TCP] IO Error on socket: %d", error);
-                }
-                close_session();
             }
             return;
         }
@@ -487,101 +482,115 @@ void ProxyTCP::handle_remote_read_complete(IoBuffer* buffer) {
 }
 
 void ProxyTCP::process_write_queue(SOCKET socket) {
-    if (socket == INVALID_SOCKET) return;
-    
-    // Ensure caller holds m_mutex or take it if necessary. 
-    // Current architecture assumes caller holds the lock for handle_XXX_complete.
-    // We'll add a check here just in case.
-    
     if (m_state == CLOSING) return;
 
-    // Remote write requires connection to be established
-    if (socket == m_remote_socket && m_state != ESTABLISHED) return;
+    if (socket != INVALID_SOCKET) {
+        // Remote write requires connection to be established
+        if (socket == m_remote_socket && m_state != ESTABLISHED) return;
 
-    std::deque<IoBuffer*>* queue = (socket == m_client_socket) ? &m_client_write_queue : &m_remote_write_queue;
-    std::atomic<int>* inflight_count = (socket == m_client_socket) ? &m_client_inflight_write_count : &m_remote_inflight_write_count;
+        std::deque<IoBuffer*>* queue = (socket == m_client_socket) ? &m_client_write_queue : &m_remote_write_queue;
+        std::atomic<int>* inflight_count = (socket == m_client_socket) ? &m_client_inflight_write_count : &m_remote_inflight_write_count;
 
-    // Check if we should send FIN (Graceful shutdown)
-    bool is_eof = (socket == m_client_socket) ? m_remote_eof.load() : m_client_eof.load();
-    std::atomic<bool>* fin_sent = (socket == m_client_socket) ? &m_client_fin_sent : &m_remote_fin_sent;
+        while (!queue->empty() && inflight_count->load() < MAX_PENDING_WRITES) {
+            if (m_state == CLOSING) break;
 
-    while (!queue->empty() && inflight_count->load() < MAX_PENDING_WRITES) {
-        if (m_state == CLOSING) break;
+            IoBuffer* leader = queue->front();
 
-        IoBuffer* leader = queue->front();
+            // If the head is still READING, we must wait to maintain stream order
+            if (leader->state == IoBuffer::IO_READING) break;
 
-        // If the head is still READING, we must wait to maintain stream order
-        if (leader->state == IoBuffer::IO_READING) break;
-
-        queue->pop_front();
-        if (leader->state == IoBuffer::IO_DROPPED) {
-            free_buffer(leader);
-            continue;
-        }
-
-        if (leader->state == IoBuffer::IO_READY) {
-            // --- IMPLEMENT GATHER WRITE (BATCHING) ---
-            WSABUF batch_bufs[MAX_GATHER_BATCH];
-            batch_bufs[0].buf = (char*)leader->buffer + leader->written_bytes;
-            batch_bufs[0].len = (ULONG)(leader->total_bytes - leader->written_bytes);
-
-            IoBuffer* current = leader;
-            int count = 1;
-
-            // Gather more ready buffers from queue
-            while (count < MAX_GATHER_BATCH && !queue->empty()) {
-                IoBuffer* next = queue->front();
-                if (next->state != IoBuffer::IO_READY) break;
-
-                queue->pop_front();
-                next->state = IoBuffer::IO_WRITING;
-                current->next_in_batch = next;
-                current = next;
-
-                batch_bufs[count].buf = (char*)next->buffer + next->written_bytes;
-                batch_bufs[count].len = (ULONG)(next->total_bytes - next->written_bytes);
-                count++;
+            queue->pop_front();
+            if (leader->state == IoBuffer::IO_DROPPED) {
+                free_buffer(leader);
+                continue;
             }
 
-            leader->state = IoBuffer::IO_WRITING;
-            leader->socket = socket;
-            memset(&leader->overlapped, 0, sizeof(OVERLAPPED));
-
-            auto self = shared_from_this();
-            leader->on_complete = [this, self, leader](DWORD bytes, int err) {
-                this->on_io_complete(leader, bytes, err);
-            };
-
-            DWORD bytes_sent = 0;
-            (*inflight_count)++;
-            int ret = WSASend(socket, batch_bufs, count, &bytes_sent, 0, &leader->overlapped, NULL);
-            if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-                int err = WSAGetLastError();
-                if (err == 10054 || err == 10053 || err == 10060 || err == 10057 || err == 10038) {
-                    LOG_DEBUG("[ProxyTCP] Send failed (err: %d), closing session", err);
-                } else {
-                    LOG_ERROR("[ProxyTCP] WSASend Gather failed: %d", err);
+            if (leader->state == IoBuffer::IO_EOF) {
+                // EOF reached the front of the queue: Set flags in correct order
+                if (socket == m_client_socket) {
+                    if (!m_remote_eof) {
+                        m_remote_eof = true;
+                        LOG_DEBUG("[TCP] Remote EOF reached queue head");
+                    }
                 }
-                (*inflight_count)--;
-                IoBuffer* b = leader;
-                while (b) {
-                    IoBuffer* n = b->next_in_batch;
-                    free_buffer(b);
-                    b = n;
+                else {
+                    if (!m_client_eof) {
+                        m_client_eof = true;
+                        LOG_DEBUG("[TCP] Client EOF reached queue head");
+                    }
                 }
-                close_session_internal(); break;
+                free_buffer(leader);
+                continue;
+            }
+
+            if (leader->state == IoBuffer::IO_READY) {
+                // --- IMPLEMENT GATHER WRITE (BATCHING) ---
+                WSABUF batch_bufs[MAX_GATHER_BATCH];
+                batch_bufs[0].buf = (char*)leader->buffer + leader->written_bytes;
+                batch_bufs[0].len = (ULONG)(leader->total_bytes - leader->written_bytes);
+
+                IoBuffer* current = leader;
+                int count = 1;
+
+                // Gather more ready buffers from queue
+                while (count < MAX_GATHER_BATCH && !queue->empty()) {
+                    IoBuffer* next = queue->front();
+                    if (next->state != IoBuffer::IO_READY) break;
+
+                    queue->pop_front();
+                    next->state = IoBuffer::IO_WRITING;
+                    current->next_in_batch = next;
+                    current = next;
+
+                    batch_bufs[count].buf = (char*)next->buffer + next->written_bytes;
+                    batch_bufs[count].len = (ULONG)(next->total_bytes - next->written_bytes);
+                    count++;
+                }
+
+                leader->state = IoBuffer::IO_WRITING;
+                leader->socket = socket;
+                memset(&leader->overlapped, 0, sizeof(OVERLAPPED));
+
+                auto self = shared_from_this();
+                leader->on_complete = [this, self, leader](DWORD bytes, int err) {
+                    this->on_io_complete(leader, bytes, err);
+                };
+
+                DWORD bytes_sent = 0;
+                (*inflight_count)++;
+                int ret = WSASend(socket, batch_bufs, count, &bytes_sent, 0, &leader->overlapped, NULL);
+                if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+                    int err = WSAGetLastError();
+                    if (err == 10054 || err == 10053 || err == 10060 || err == 10057 || err == 10038) {
+                        LOG_DEBUG("[ProxyTCP] Send failed (err: %d), closing session", err);
+                    }
+                    else {
+                        LOG_ERROR("[ProxyTCP] WSASend Gather failed: %d", err);
+                    }
+                    (*inflight_count)--;
+                    IoBuffer* b = leader;
+                    while (b) {
+                        IoBuffer* n = b->next_in_batch;
+                        free_buffer(b);
+                        b = n;
+                    }
+                    close_session_internal(); break;
+                }
+            }
+            else {
+                break;
             }
         }
-        else {
-            break;
-        }
-    }
 
-    // After attempting to drain queue, check if we need to send FIN
-    if (is_eof && queue->empty() && inflight_count->load() == 0 && !fin_sent->load()) {
-        *fin_sent = true;
-        LOG_DEBUG("[TCP] Shutdown send on socket %p", (void*)socket);
-        shutdown(socket, SD_SEND);
+        // After attempting to drain queue, check if we need to send FIN
+        bool is_eof = (socket == m_client_socket) ? m_remote_eof.load() : m_client_eof.load();
+        std::atomic<bool>* fin_sent = (socket == m_client_socket) ? &m_client_fin_sent : &m_remote_fin_sent;
+
+        if (is_eof && queue->empty() && inflight_count->load() == 0 && !fin_sent->load()) {
+            *fin_sent = true;
+            LOG_DEBUG("[TCP] Shutdown send on socket %p", (void*)socket);
+            shutdown(socket, SD_SEND);
+        }
     }
 
     // Final Closure Logic with Timeout Safeguards: 
@@ -592,19 +601,19 @@ void ProxyTCP::process_write_queue(SOCKET socket) {
     // 1. Client has sent EOF AND Proxy has sent FIN to Client.
     // 2. Remote has sent EOF AND Proxy has sent FIN to Remote.
     bool fully_closed = (m_client_eof && m_client_fin_sent && m_remote_eof && m_remote_fin_sent);
-    
-    // Safeguard 1: If any side has started closing, don't wait forever for the other side (30s max)
-    bool partial_close_timeout = (m_client_fin_sent || m_remote_fin_sent || m_client_eof || m_remote_eof) && 
-                                 (idle_time > FIN_WAIT_TIMEOUT_MS);
 
-    // Safeguard 2: Absolute idle timeout (5 minutes)
+    // Safeguard 1: If any side has started closing, don't wait forever for the other side (30s max)
+    bool partial_close_timeout = (m_client_fin_sent || m_remote_fin_sent || m_client_eof || m_remote_eof) &&
+        (idle_time > FIN_WAIT_TIMEOUT_MS);
+
+    // Safeguard 2: Absolute idle timeout
     bool absolute_idle_timeout = (idle_time > IDLE_TIMEOUT_MS);
 
     if (fully_closed || partial_close_timeout || absolute_idle_timeout) {
         if (partial_close_timeout) LOG_DEBUG("[TCP] Closing due to FIN_WAIT timeout.");
         else if (absolute_idle_timeout) LOG_DEBUG("[TCP] Closing due to absolute idle timeout.");
         else LOG_DEBUG("[TCP] Both sides gracefully closed. Cleaning up.");
-        
+
         close_session_internal();
     }
 }
@@ -714,9 +723,8 @@ void ProxyTCP::check_all_timeouts() {
 
     uint64_t now = GetTickCount64();
     for (auto& s : sessions_to_check) {
-        // We call process_write_queue(INVALID_SOCKET) or similar to trigger the internal timeout logic
-        // Or we can directly check here if the state is suitable.
-        // Let's call process_write_queue with an invalid socket to reuse the existing logic safely.
-        s->process_write_queue(INVALID_SOCKET);
+        // Trigger timeout and closure checks for both directions
+        s->process_write_queue(s->m_client_socket);
+        s->process_write_queue(s->m_remote_socket);
     }
 }

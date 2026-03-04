@@ -133,6 +133,7 @@ int main() {
         if (now - last_keepalive > 1000) {
             WiFiAPManager::instance().CheckKeepAlive();
             ProxyTCP::check_all_timeouts();
+            NatManager::instance().cleanup_expired();
             last_keepalive = now;
         }
 

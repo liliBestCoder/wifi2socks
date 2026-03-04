@@ -24,7 +24,7 @@ public:
         size_t total_bytes; // Bytes read (valid data)
         size_t written_bytes; // Bytes written (progress)
 
-        enum State { IO_READING, IO_READY, IO_WRITING, IO_COMPLETED, IO_DROPPED } state;
+        enum State { IO_READING, IO_READY, IO_WRITING, IO_COMPLETED, IO_DROPPED, IO_EOF } state;
 
         std::function<void(DWORD, int)> on_complete;
         SOCKET socket; // The socket this op is associated with
