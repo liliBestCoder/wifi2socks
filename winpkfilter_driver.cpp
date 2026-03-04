@@ -645,8 +645,7 @@ void WinPkFilterDriver::reader_loop() {
             double ul_mbps = (ul_bytes * 8.0) / (elapsed_ms * 1000.0);
             size_t backlog = 0; 
             for (auto& q : m_worker_queues) {
-                std::lock_guard<std::mutex> lk(q->mtx);
-                backlog += q->packets.size();
+                backlog += q->size();
             }
             uint64_t total_pkts = dl_pkts + ul_pkts;
             LOG_DEBUG("[Perf] DL: %.2f Mbps (%llu p) | UL: %.2f Mbps (%llu p) | Backlog: %zu | AvgWork: %llu us",

@@ -121,6 +121,13 @@ private:
             tail.store((t + 1) % QUEUE_SIZE, std::memory_order_release);
             return buf;
         }
+
+        size_t size() const {
+            uint32_t h = head.load(std::memory_order_relaxed);
+            uint32_t t = tail.load(std::memory_order_relaxed);
+            if (h >= t) return h - t;
+            return QUEUE_SIZE - (t - h);
+        }
     };
     // Use unique_ptr to handle mutex non-copyable issue (C2280)
     std::vector<std::unique_ptr<WorkerQueue>> m_worker_queues;
