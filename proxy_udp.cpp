@@ -297,30 +297,8 @@ public:
             }
         }
 
-        // --- 2. QUIC Blocking (Port 443) ---
-        // For foreign QUIC traffic, we DROP the packets to force apps to fallback to TCP (HTTPS).
-        // Domestic QUIC is allowed to go DIRECT for speed.
-        if (dport == 443) {
-            uint32_t ip_h = ntohl(dest->ip);
-            bool is_cn = GeoChecker::instance().is_cn_ip(ip_h);
-            
-            if (!is_cn) {
-                // Check if it's a known Tencent IP range even if geoip fails
-                uint8_t first = (uint8_t)(ip_h >> 24);
-                if (first == 113 || first == 183 || first == 125 || first == 157) {
-                    // Tencent Bypass
-                } else {
-                    char src_ip[INET_ADDRSTRLEN];
-                    char dst_ip[INET_ADDRSTRLEN];
-                    inet_ntop(AF_INET, &client_addr->sin_addr, src_ip, INET_ADDRSTRLEN);
-                    inet_ntop(AF_INET, &dest->ip, dst_ip, INET_ADDRSTRLEN);
-                    LOG_INFO("[UDP] Blocking foreign QUIC from %s:%d to %s:%d", 
-                        src_ip, ntohs(client_addr->sin_port),
-                        dst_ip, dport);
-                    return; 
-                }
-            }
-        }
+        // --- 2. QUIC Blocking (REMOVED) ---
+        // We allow all UDP traffic including QUIC through the transparent proxy.
 
         // --- 3. Flow Matching & Forwarding (Direct Relay) ---
         FlowKey flow = { client_addr->sin_addr.s_addr, client_addr->sin_port, dest->ip, dest->port };
@@ -446,7 +424,7 @@ private:
     }
 
     void cleanup_sessions(uint64_t now) {
-        const uint64_t timeout = 60000; // 60 seconds
+        const uint64_t timeout = 300000; // 300 seconds (5 minutes)
         for (auto it = m_sessions.begin(); it != m_sessions.end(); ) {
             if (now - it->second.last_access > timeout) {
                 SOCKET s = it->second.sock;

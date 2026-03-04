@@ -484,10 +484,6 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                                         recalculate_ip_checksum(ip);
                                         recalculate_tcp_udp_checksum(ip);
                                     }
-                                    else {
-                                        recalculate_ip_checksum(ip); 
-                                        recalculate_tcp_udp_checksum(ip);
-                                    }
                                 }
                                 to_adapter = true;
                                 handled = true;
@@ -586,8 +582,8 @@ void WinPkFilterDriver::reader_loop() {
                             }
                             else if (b->m_Length >= 34) {
                                 PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
-                                if (ip->SrcAddr == 0x0189A8C0) handled = true; // Block ICS
-                                else if (ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ((ip->Ver_HLen & 0x0F) * 4) + sizeof(ICMP_HEADER)) {
+                                // if (ip->SrcAddr == 0x0189A8C0) handled = true; // Block ICS (Commented out for troubleshooting)
+                                if (ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ((ip->Ver_HLen & 0x0F) * 4) + sizeof(ICMP_HEADER)) {
                                     PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ((ip->Ver_HLen & 0x0F) * 4));
                                     if (icmp->Type == 8) {
                                         uint8_t tmac[6]; memcpy(tmac, buffer, 6); memcpy(buffer, buffer + 6, 6); memcpy(buffer + 6, tmac, 6);

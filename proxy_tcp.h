@@ -128,7 +128,7 @@ private:
 
     // Activity tracking to prevent zombie sessions
     std::atomic<uint64_t> m_last_access_time{ 0 };
-    static const uint64_t IDLE_TIMEOUT_MS = 120000; // Reduced to 2 minutes to prevent client-side RST
+    static const uint64_t IDLE_TIMEOUT_MS = 600000; // 10 minutes
     static const uint64_t FIN_WAIT_TIMEOUT_MS = 30000; // 30 seconds wait for the other side's FIN
 
     // Handshake special handling
