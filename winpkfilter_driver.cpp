@@ -650,28 +650,36 @@ void WinPkFilterDriver::reader_loop() {
                         uint32_t count = worker_packet_counts[w];
                         if (count > 0) {
                             uint32_t offset = worker_offsets[w];
-                            size_t actual = m_worker_queues[w]->push_batch(&sorted_buffers[offset], count);
+                            WorkerQueue* q = m_worker_queues[w].get();
+                            
+                            // Optimization: Check if queue is empty before pushing to decide on notification
+                            bool was_empty = (q->size() == 0);
+                            
+                            size_t actual = q->push_batch(&sorted_buffers[offset], count);
                             if (actual > 0) {
                                 for (size_t j = 0; j < actual; ++j) {
                                     m_read_request->EthPacket[sorted_indices[offset + j]].Buffer = nullptr;
                                 }
-                                m_worker_queues[w]->cv.notify_one();
+                                // Only notify if the worker was likely sleeping
+                                if (was_empty) q->cv.notify_one();
                             }
                             if (actual < count) m_stat_dropped_pkts += (count - actual);
                         }
                     }
 
-                    // Batch Refill
+                    // --- Batch Refill (Corrected to scan entire batch) ---
                     unsigned int refill_needed = 0;
-                    for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
+                    for (unsigned int i = 0; i < BATCH_SIZE; ++i) {
                         if (m_read_request->EthPacket[i].Buffer == nullptr) refill_needed++;
                     }
                     if (refill_needed > 0) {
                         PINTERMEDIATE_BUFFER next_bufs[BATCH_SIZE];
                         size_t got = PacketPool::instance().acquire_batch(next_bufs, refill_needed);
                         unsigned int n = 0;
-                        for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess && n < got; ++i) {
-                            if (m_read_request->EthPacket[i].Buffer == nullptr) m_read_request->EthPacket[i].Buffer = next_bufs[n++];
+                        for (unsigned int i = 0; i < BATCH_SIZE && n < got; ++i) {
+                            if (m_read_request->EthPacket[i].Buffer == nullptr) {
+                                m_read_request->EthPacket[i].Buffer = next_bufs[n++];
+                            }
                         }
                     }
                 } else {
