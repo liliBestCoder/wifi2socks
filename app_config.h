@@ -55,10 +55,8 @@ extern AppConfig g_config;
 #define TAP_CONTROL_CODE(request, method) CTL_CODE(FILE_DEVICE_UNKNOWN, request, method, FILE_ANY_ACCESS)
 #define TAP_IOCTL_SET_MEDIA_STATUS TAP_CONTROL_CODE(6, METHOD_BUFFERED)
 
-#include <stdio.h>
-
 // Macros update: Pass level to AsyncLogger::log
 #define LOG_DEBUG(fmt, ...) AsyncLogger::instance().log(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...)  AsyncLogger::instance().log(LOG_LEVEL_INFO, fmt, ##__VA_ARGS__)
-#define LOG_WARN(fmt, ...)  AsyncLogger::instance().log(LOG_LEVEL_WARN, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)  AsyncLogger::instance().log(LOG_LEVEL_INFO,  fmt, ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...)  AsyncLogger::instance().log(LOG_LEVEL_WARN,  fmt, ##__VA_ARGS__)
 #define LOG_ERROR(fmt, ...) AsyncLogger::instance().log(LOG_LEVEL_ERROR, fmt, ##__VA_ARGS__)

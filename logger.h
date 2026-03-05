@@ -5,8 +5,9 @@
 #include <condition_variable>
 #include <atomic>
 #include <cstdarg>
-#include <queue>
+#include <vector>
 #include <fstream>
+#include <chrono>
 
 enum LogLevel {
     LOG_LEVEL_DEBUG = 0,
@@ -14,6 +15,12 @@ enum LogLevel {
     LOG_LEVEL_WARN = 2,
     LOG_LEVEL_ERROR = 3,
     LOG_LEVEL_NONE = 99
+};
+
+struct LogItem {
+    LogLevel level;
+    std::chrono::system_clock::time_point timestamp;
+    std::string message;
 };
 
 class AsyncLogger {
@@ -36,7 +43,7 @@ private:
 
     std::mutex m_mutex;
     std::condition_variable m_cv;
-    std::queue<std::string> m_queue;
+    std::vector<LogItem> m_queue;
     std::atomic<bool> m_running;
     std::thread m_thread;
     std::ofstream m_file;
