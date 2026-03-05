@@ -568,20 +568,19 @@ void WinPkFilterDriver::reader_loop() {
 
                             if (ether_type != ETHERTYPE_IP) {
                                 if (ether_type == ETHERTYPE_IPV6) {
-                                    if (b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + sizeof(IPV6_HEADER) + sizeof(TCP_HEADER)) {
-                                        PIPV6_HEADER ipv6 = (PIPV6_HEADER)(buffer + 14);
-                                        if (ipv6->NextHeader == IPPROTO_TCP) {
-                                            PTCP_HEADER tcp = (PTCP_HEADER)(buffer + 14 + sizeof(IPV6_HEADER));
-                                            if (tcp->Flags & 0x02) this->send_ipv6_tcp_rst((const char*)buffer, b->m_Length);
-                                        }
-                                    }
-                                    handled = true;
+                                    handled = true; // Drop IPv6
                                 } else if (ether_type == ETHERTYPE_ARP && b->m_Length >= 14 + sizeof(ARP_HEADER)) {
                                     PARP_HEADER arp = (PARP_HEADER)(buffer + 14);
                                     if (ntohs(arp->OpCode) == 1 && arp->DstIp == m_gateway_ip && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND) {
-                                        memcpy(buffer, buffer + 6, 6); memcpy(buffer + 6, m_adapter_mac, 6); arp->OpCode = htons(2);
-                                        memcpy(arp->DstMac, arp->SrcMac, 6); arp->DstIp = arp->SrcIp; memcpy(arp->SrcMac, m_adapter_mac, 6); arp->SrcIp = m_gateway_ip;
-                                        this->send_to_adapter((const char*)buffer, b->m_Length); handled = true;
+                                        memcpy(buffer, buffer + 6, 6);
+                                        memcpy(buffer + 6, m_adapter_mac, 6);
+                                        arp->OpCode = htons(2);
+                                        memcpy(arp->DstMac, arp->SrcMac, 6);
+                                        arp->DstIp = arp->SrcIp;
+                                        memcpy(arp->SrcMac, m_adapter_mac, 6);
+                                        arp->SrcIp = m_gateway_ip;
+                                        this->send_to_adapter((const char*)buffer, b->m_Length);
+                                        handled = true;
                                     }
                                 } else if (ether_type == 0x888E) { // EAPOL
                                     if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) this->send_to_adapter((const char*)buffer, b->m_Length);
@@ -590,18 +589,18 @@ void WinPkFilterDriver::reader_loop() {
                                 }
                             } else if (b->m_Length >= 34) {
                                 PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
-                                if (ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ((ip->Ver_HLen & 0x0F) * 4) + sizeof(ICMP_HEADER)) {
+                                // Block ICS (192.168.137.1)
+                                if (ip->SrcAddr == 0x0189A8C0) {
+                                    handled = true;
+                                } else if (ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ((ip->Ver_HLen & 0x0F) * 4) + sizeof(ICMP_HEADER)) {
                                     PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ((ip->Ver_HLen & 0x0F) * 4));
                                     if (icmp->Type == 8) {
                                         uint8_t tmac[6]; memcpy(tmac, buffer, 6); memcpy(buffer, buffer + 6, 6); memcpy(buffer + 6, tmac, 6);
                                         ULONG tip = ip->SrcAddr; uint32_t old_dst = ip->DstAddr;
                                         ip->SrcAddr = ip->DstAddr; ip->DstAddr = tip; icmp->Type = 0;
-                                        
                                         incremental_checksum_update(&ip->Csum, (uint32_t)tip, (uint32_t)ip->SrcAddr);
                                         incremental_checksum_update(&ip->Csum, (uint32_t)old_dst, (uint32_t)ip->DstAddr);
-                                        // ICMP checksum for Echo Reply can be incrementally updated too
-                                        incremental_checksum_update(&icmp->Csum, (uint16_t)htons(0x0800), (uint16_t)htons(0x0000)); 
-                                        
+                                        incremental_checksum_update(&icmp->Csum, (uint16_t)htons(0x0800), (uint16_t)htons(0x0000));
                                         this->send_to_adapter((const char*)buffer, b->m_Length);
                                         handled = true;
                                     }
@@ -612,7 +611,9 @@ void WinPkFilterDriver::reader_loop() {
                                         DhcpResponse dhcp_r = g_dhcp_server_ptr->handle_request_buffer((const char*)udp + sizeof(UDP_HEADER), b->m_Length);
                                         if (dhcp_r.length > 0) this->send_dhcp_response(((uint8_t*)ip) - 8, m_gateway_ip, dhcp_r, m_adapter_mac);
                                         handled = true;
-                                    } else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353 || sp == 137 || dp == 137 || sp == 138 || dp == 138) handled = true;
+                                    } else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353 || sp == 137 || dp == 137 || sp == 138 || dp == 138) {
+                                        handled = true; // Drop discovery/netbios
+                                    }
                                 }
                             }
                         }
@@ -627,13 +628,16 @@ void WinPkFilterDriver::reader_loop() {
                     }
 
                     // Bucketized Dispatch O(N)
-                    uint32_t worker_offsets[129]; worker_offsets[0] = 0;
-                    for (unsigned int w = 0; w < m_num_workers; ++w) worker_offsets[w + 1] = worker_offsets[w] + worker_packet_counts[w];
+                    uint32_t worker_offsets[129]; 
+                    worker_offsets[0] = 0;
+                    for (unsigned int w = 0; w < m_num_workers; ++w) {
+                        worker_offsets[w + 1] = worker_offsets[w] + worker_packet_counts[w];
+                    }
 
                     PINTERMEDIATE_BUFFER sorted_buffers[BATCH_SIZE];
                     uint32_t sorted_indices[BATCH_SIZE];
                     uint32_t current_worker_pos[128];
-                    memcpy(current_worker_pos, worker_offsets, sizeof(uint32_t) * 128);
+                    memcpy(current_worker_pos, worker_offsets, sizeof(uint32_t) * m_num_workers);
 
                     for (uint32_t i = 0; i < ready_to_dispatch; ++i) {
                         uint32_t target = packet_worker_ids[i];
@@ -648,14 +652,16 @@ void WinPkFilterDriver::reader_loop() {
                             uint32_t offset = worker_offsets[w];
                             size_t actual = m_worker_queues[w]->push_batch(&sorted_buffers[offset], count);
                             if (actual > 0) {
-                                for (size_t j = 0; j < actual; ++j) m_read_request->EthPacket[sorted_indices[offset + j]].Buffer = nullptr;
+                                for (size_t j = 0; j < actual; ++j) {
+                                    m_read_request->EthPacket[sorted_indices[offset + j]].Buffer = nullptr;
+                                }
                                 m_worker_queues[w]->cv.notify_one();
                             }
                             if (actual < count) m_stat_dropped_pkts += (count - actual);
                         }
                     }
 
-                    // --- Batch Refill (Crucial!) ---
+                    // Batch Refill
                     unsigned int refill_needed = 0;
                     for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
                         if (m_read_request->EthPacket[i].Buffer == nullptr) refill_needed++;
@@ -668,12 +674,10 @@ void WinPkFilterDriver::reader_loop() {
                             if (m_read_request->EthPacket[i].Buffer == nullptr) m_read_request->EthPacket[i].Buffer = next_bufs[n++];
                         }
                     }
-                }
-                else {
+                } else {
                     data_available = false;
                 }
-            }
-            else {
+            } else {
                 data_available = false;
             }
         }
