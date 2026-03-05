@@ -278,7 +278,7 @@ public:
                                     
                                     uint32_t first_ip = 0;
                                     inet_pton(AF_INET, res.addresses[0].c_str(), &first_ip);
-                                    DnsCache::instance().put(domain, first_ip, 300);
+                                    DnsCache::instance().put(domain, first_ip, 1200); // Optimized: Cache for 20 minutes
                                 } else if (res.rcode != 0) {
                                     LOG_DEBUG("[DNS] Failed to resolve '%s' via DoT. RCODE: %d", res.qname.c_str(), res.rcode);
                                 } else {
@@ -427,6 +427,11 @@ private:
                         if (i < res.addresses.size() - 1) ips += ", ";
                     }
                     LOG_DEBUG("[DNS] Resolved '%s' to [%s] via DIRECT.", res.qname.c_str(), ips.c_str());
+
+                    // --- OPTIMIZATION: Cache Direct DNS Results ---
+                    uint32_t first_ip = 0;
+                    inet_pton(AF_INET, res.addresses[0].c_str(), &first_ip);
+                    DnsCache::instance().put(res.qname, first_ip, 1200); // Optimized: Cache for 20 minutes
                 }
                 else if (res.rcode != 0) {
                     LOG_DEBUG("[DNS] Failed to resolve '%s' via DIRECT. RCODE: %d", res.qname.c_str(), res.rcode);
