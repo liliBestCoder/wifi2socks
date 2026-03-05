@@ -10,32 +10,15 @@
 
 // --- IoBuffer Pool for high performance ---
 static std::mutex g_proxy_buf_mtx;
-static std::vector<ProxyTCP::IoBuffer*> g_proxy_buf_pool;
-
-// --- Static Registry ---
-std::mutex ProxyTCP::g_sessions_mtx;
-std::vector<std::weak_ptr<ProxyTCP>> ProxyTCP::g_sessions;
-
-static void enable_keepalive(SOCKET s) {
-    int optval = 1;
-    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (char*)&optval, sizeof(optval));
-
-    // Windows specific: Configure keepalive intervals
-    tcp_keepalive keepalive;
-    keepalive.onoff = 1;
-    keepalive.keepalivetime = 60000;    // 60 seconds idle before first probe
-    keepalive.keepaliveinterval = 10000; // 10 seconds between probes
-    DWORD bytes;
-    WSAIoctl(s, SIO_KEEPALIVE_VALS, &keepalive, sizeof(keepalive), NULL, 0, &bytes, NULL, NULL);
-}
+static ProxyTCP::IoBuffer* g_proxy_buf_stack[2048]; // Use a fixed-size stack for faster access
+static int g_proxy_buf_top = 0;
 
 ProxyTCP::IoBuffer* ProxyTCP::alloc_buffer(size_t size) {
     ProxyTCP::IoBuffer* buf = nullptr;
     {
         std::lock_guard<std::mutex> lock(g_proxy_buf_mtx);
-        if (!g_proxy_buf_pool.empty()) {
-            buf = g_proxy_buf_pool.back();
-            g_proxy_buf_pool.pop_back();
+        if (g_proxy_buf_top > 0) {
+            buf = g_proxy_buf_stack[--g_proxy_buf_top];
         }
     }
 
@@ -43,17 +26,16 @@ ProxyTCP::IoBuffer* ProxyTCP::alloc_buffer(size_t size) {
         buf = new IoBuffer();
     }
 
-    // Reset buffer state for reuse
+    // Reset buffer state for reuse (minimal reset)
     memset(&buf->overlapped, 0, sizeof(OVERLAPPED));
     buf->on_complete = nullptr;
     buf->next_in_batch = nullptr;
     buf->total_bytes = 0;
     buf->written_bytes = 0;
-    buf->capacity = sizeof(buf->buffer);
     buf->state = IoBuffer::IO_READING;
     buf->flags = 0;
     buf->wsa_buf.buf = (char*)buf->buffer;
-    buf->wsa_buf.len = (ULONG)buf->capacity;
+    buf->wsa_buf.len = (ULONG)sizeof(buf->buffer);
 
     return buf;
 }
@@ -61,12 +43,11 @@ ProxyTCP::IoBuffer* ProxyTCP::alloc_buffer(size_t size) {
 void ProxyTCP::free_buffer(IoBuffer* buffer) {
     if (!buffer) return;
     
-    // Clear callback to release shared_ptr references immediately
     buffer->on_complete = nullptr;
 
     std::lock_guard<std::mutex> lock(g_proxy_buf_mtx);
-    if (g_proxy_buf_pool.size() < 1024) { // Maintain a reasonable pool size
-        g_proxy_buf_pool.push_back(buffer);
+    if (g_proxy_buf_top < 2048) {
+        g_proxy_buf_stack[g_proxy_buf_top++] = buffer;
     } else {
         delete buffer;
     }

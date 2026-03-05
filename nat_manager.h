@@ -93,6 +93,8 @@ private:
         uint16_t vport = 0; // Add virtual port reference
 
         MappingEntry() : last_access(0), vport(0) {}
+        MappingEntry(const OriginalDestination& d, uint64_t la, const UdpKey4& uk, uint16_t vp) 
+            : dest(d), last_access(la), udp_key(uk), vport(vp) {}
         MappingEntry(const MappingEntry& o) : dest(o.dest), last_access(o.last_access.load()), udp_key(o.udp_key), vport(o.vport) {}
         MappingEntry& operator=(const MappingEntry& o) {
             dest = o.dest;
@@ -109,6 +111,8 @@ private:
         bool active = false;
 
         VPortEntry() : last_access(0), active(false) {}
+        VPortEntry(const UdpKey4& k, uint64_t la, bool act) 
+            : key(k), last_access(la), active(act) {}
         VPortEntry(const VPortEntry& o) : key(o.key), last_access(o.last_access.load()), active(o.active) {}
         VPortEntry& operator=(const VPortEntry& o) {
             key = o.key;

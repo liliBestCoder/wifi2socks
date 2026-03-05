@@ -592,12 +592,19 @@ void WinPkFilterDriver::reader_loop() {
                                 PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
                                 if (ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ((ip->Ver_HLen & 0x0F) * 4) + sizeof(ICMP_HEADER)) {
                                     PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ((ip->Ver_HLen & 0x0F) * 4));
-                                    if (icmp->Type == 8) {
-                                        uint8_t tmac[6]; memcpy(tmac, buffer, 6); memcpy(buffer, buffer + 6, 6); memcpy(buffer + 6, tmac, 6);
-                                        ULONG tip = ip->SrcAddr; ip->SrcAddr = ip->DstAddr; ip->DstAddr = tip; icmp->Type = 0;
-                                        recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
-                                        this->send_to_adapter((const char*)buffer, b->m_Length); handled = true;
-                                    }
+                                                                        if (icmp->Type == 8) {
+                                                                            uint8_t tmac[6]; memcpy(tmac, buffer, 6); memcpy(buffer, buffer + 6, 6); memcpy(buffer + 6, tmac, 6);
+                                                                            ULONG tip = ip->SrcAddr; uint32_t old_dst = ip->DstAddr;
+                                                                            ip->SrcAddr = ip->DstAddr; ip->DstAddr = tip; icmp->Type = 0;
+                                                                            
+                                                                            incremental_checksum_update(&ip->Csum, tip, ip->SrcAddr);
+                                                                            incremental_checksum_update(&ip->Csum, old_dst, ip->DstAddr);
+                                                                            // ICMP checksum for Echo Reply can be incrementally updated too
+                                                                            incremental_checksum_update(&icmp->Csum, htons(0x0800), htons(0x0000)); 
+                                    
+                                                                            this->send_to_adapter((const char*)buffer, b->m_Length);
+                                                                            handled = true;
+                                                                        }
                                 } else if (ip->Proto == IPPROTO_UDP) {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ((ip->Ver_HLen & 0x0F) * 4));
                                     USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
@@ -645,6 +652,20 @@ void WinPkFilterDriver::reader_loop() {
                                 m_worker_queues[w]->cv.notify_one();
                             }
                             if (actual < count) m_stat_dropped_pkts += (count - actual);
+                        }
+                    }
+
+                    // --- Batch Refill (Crucial!) ---
+                    unsigned int refill_needed = 0;
+                    for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
+                        if (m_read_request->EthPacket[i].Buffer == nullptr) refill_needed++;
+                    }
+                    if (refill_needed > 0) {
+                        PINTERMEDIATE_BUFFER next_bufs[BATCH_SIZE];
+                        size_t got = PacketPool::instance().acquire_batch(next_bufs, refill_needed);
+                        unsigned int n = 0;
+                        for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess && n < got; ++i) {
+                            if (m_read_request->EthPacket[i].Buffer == nullptr) m_read_request->EthPacket[i].Buffer = next_bufs[n++];
                         }
                     }
                 }
