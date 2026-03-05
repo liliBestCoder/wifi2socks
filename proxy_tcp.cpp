@@ -13,6 +13,10 @@ static std::mutex g_proxy_buf_mtx;
 static ProxyTCP::IoBuffer* g_proxy_buf_stack[2048]; // Use a fixed-size stack for faster access
 static int g_proxy_buf_top = 0;
 
+// --- Static Registry ---
+std::mutex ProxyTCP::g_sessions_mtx;
+std::vector<std::weak_ptr<ProxyTCP>> ProxyTCP::g_sessions;
+
 static void enable_keepalive(SOCKET s) {
     int optval = 1;
     setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (char*)&optval, sizeof(optval));
