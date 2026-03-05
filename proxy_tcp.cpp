@@ -8,10 +8,16 @@
 #include <mstcpip.h>
 #include <algorithm>
 
-// --- IoBuffer Pool for high performance ---
-static std::mutex g_proxy_buf_mtx;
-static ProxyTCP::IoBuffer* g_proxy_buf_stack[2048]; // Use a fixed-size stack for faster access
-static int g_proxy_buf_top = 0;
+// --- IoBuffer Pool for high performance (Thread Local to avoid lock contention) ---
+struct ThreadLocalTcpPool {
+    std::vector<ProxyTCP::IoBuffer*> pool;
+    ~ThreadLocalTcpPool() {
+        for (auto* b : pool) delete b;
+        pool.clear();
+    }
+};
+
+static thread_local ThreadLocalTcpPool t_tcp_pool;
 
 // --- Static Registry ---
 std::mutex ProxyTCP::g_sessions_mtx;
@@ -32,11 +38,9 @@ static void enable_keepalive(SOCKET s) {
 
 ProxyTCP::IoBuffer* ProxyTCP::alloc_buffer(size_t size) {
     ProxyTCP::IoBuffer* buf = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_proxy_buf_mtx);
-        if (g_proxy_buf_top > 0) {
-            buf = g_proxy_buf_stack[--g_proxy_buf_top];
-        }
+    if (!t_tcp_pool.pool.empty()) {
+        buf = t_tcp_pool.pool.back();
+        t_tcp_pool.pool.pop_back();
     }
 
     if (!buf) {
@@ -62,9 +66,8 @@ void ProxyTCP::free_buffer(IoBuffer* buffer) {
     
     buffer->on_complete = nullptr;
 
-    std::lock_guard<std::mutex> lock(g_proxy_buf_mtx);
-    if (g_proxy_buf_top < 2048) {
-        g_proxy_buf_stack[g_proxy_buf_top++] = buffer;
+    if (t_tcp_pool.pool.size() < 1024) {
+        t_tcp_pool.pool.push_back(buffer);
     } else {
         delete buffer;
     }

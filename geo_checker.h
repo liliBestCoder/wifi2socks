@@ -60,6 +60,7 @@ public:
     static bool is_private_ip(const uint32_t ip_host);
 
 private:
+    uint32_t get_domain_flags(const std::string& domain);
     void load_data(const std::string& geoip_file, const std::string& geosite_file);
     void load_geoip(const std::string& filepath);
     void load_geosite(const std::string& filepath);
@@ -106,4 +107,9 @@ private:
     static const uint32_t FLAG_CN = 0x10000;
     static const uint32_t FLAG_GOOGLE = 0x20000;
     static const uint32_t FLAG_TENCENT = 0x40000;
+
+    // Cache for lookup results
+    mutable std::shared_mutex m_cache_mtx;
+    std::unordered_map<uint32_t, bool> m_ip_cn_cache;
+    std::unordered_map<std::string, uint32_t> m_domain_flags_cache;
 };

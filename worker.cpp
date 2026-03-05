@@ -7,18 +7,22 @@
 
 
 
-// --- IO_CONTEXT Pool ---
-static std::mutex g_io_pool_mtx;
-static std::vector<IO_CONTEXT*> g_io_pool;
+// --- IO_CONTEXT Pool (Thread Local to eliminate lock contention) ---
+struct ThreadLocalIoPool {
+    std::vector<IO_CONTEXT*> pool;
+    ~ThreadLocalIoPool() {
+        for (auto* io : pool) delete io;
+        pool.clear();
+    }
+};
+
+static thread_local ThreadLocalIoPool t_io_pool;
 
 IO_CONTEXT* acquire_io_context() {
     IO_CONTEXT* io = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_io_pool_mtx);
-        if (!g_io_pool.empty()) {
-            io = g_io_pool.back();
-            g_io_pool.pop_back();
-        }
+    if (!t_io_pool.pool.empty()) {
+        io = t_io_pool.pool.back();
+        t_io_pool.pool.pop_back();
     }
 
     if (!io) {
@@ -46,9 +50,8 @@ void release_io_context(IO_CONTEXT* io) {
     io->write_buffers.clear();
     io->wsa_bufs.clear();
 
-    std::lock_guard<std::mutex> lock(g_io_pool_mtx);
-    if (g_io_pool.size() < 4096) {
-        g_io_pool.push_back(io);
+    if (t_io_pool.pool.size() < 1024) {
+        t_io_pool.pool.push_back(io);
     }
     else {
         delete io;

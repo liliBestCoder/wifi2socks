@@ -267,29 +267,47 @@ bool GeoChecker::is_private_ip(const uint32_t ip_h) {
 bool GeoChecker::is_cn_ip(uint32_t ip_host) {
     if (is_private_ip(ip_host)) return true;
     
-    // 快速判断：如果是腾讯 IP，直接认为是 CN (直连)
-    if (is_tencent_ip(ip_host)) return true;
+    // 1. 检查缓存
+    {
+        std::shared_lock<std::shared_mutex> lock(m_cache_mtx);
+        auto it = m_ip_cn_cache.find(ip_host);
+        if (it != m_ip_cn_cache.end()) return it->second;
+    }
 
-    // 如果数据库准备好了且有 CN 索引，先查数据库
-    if (m_ready && cn_ip_idx_ != 0xFFFF) {
-        std::shared_lock<std::shared_mutex> lock(m_mtx);
-        // 使用 std::lower_bound 查找第一个 end_ip >= ip_host 的区间
-        auto it = std::lower_bound(ip_ranges_.begin(), ip_ranges_.end(), ip_host, 
-            [](const GeoIPRange& r, uint32_t val) { 
-                return r.end_ip < val; 
-            });
+    bool result = false;
+    auto perform_lookup = [&]() {
+        // 快速判断：如果是腾讯 IP，直接认为是 CN (直连)
+        if (is_tencent_ip(ip_host)) return true;
 
-        if (it != ip_ranges_.end() && ip_host >= it->start_ip && ip_host <= it->end_ip) {
-            return it->code_index == cn_ip_idx_;
+        // 如果数据库准备好了且有 CN 索引，先查数据库
+        if (m_ready && cn_ip_idx_ != 0xFFFF) {
+            std::shared_lock<std::shared_mutex> lock(m_mtx);
+            // 使用 std::lower_bound 查找第一个 end_ip >= ip_host 的区间
+            auto it = std::lower_bound(ip_ranges_.begin(), ip_ranges_.end(), ip_host, 
+                [](const GeoIPRange& r, uint32_t val) { 
+                    return r.end_ip < val; 
+                });
+
+            if (it != ip_ranges_.end() && ip_host >= it->start_ip && ip_host <= it->end_ip) {
+                return it->code_index == cn_ip_idx_;
+            }
+        }
+
+        // 数据库未命中或数据库未加载时的兜底逻辑
+        return is_common_cn_range(ip_host);
+    };
+
+    result = perform_lookup();
+
+    // 2. 写入缓存 (限额 10000 条以防内存溢出)
+    {
+        std::unique_lock<std::shared_mutex> lock(m_cache_mtx);
+        if (m_ip_cn_cache.size() < 10000) {
+            m_ip_cn_cache[ip_host] = result;
         }
     }
 
-    // 数据库未命中或数据库未加载时的兜底逻辑
-    bool is_common = is_common_cn_range(ip_host);
-    if (!is_common) {
-        LOG_DEBUG("[Geo] IP 0x%08X not found in database and failed common range check.", ip_host);
-    }
-    return is_common;
+    return result;
 }
 
 std::string GeoChecker::query_domain(const std::string& domain) {
@@ -315,79 +333,78 @@ std::string GeoChecker::query_domain(const std::string& domain) {
     return "UNKNOWN";
 }
 
-bool GeoChecker::is_cn_domain(const std::string& domain) {
-    if (!m_ready) return false;
-    if (is_tencent_domain(domain)) return true;
+uint32_t GeoChecker::get_domain_flags(const std::string& domain) {
+    if (!m_ready) return 0;
+    
+    // 1. 检查缓存
+    {
+        std::shared_lock<std::shared_mutex> lock(m_cache_mtx);
+        auto it = m_domain_flags_cache.find(domain);
+        if (it != m_domain_flags_cache.end()) return it->second;
+    }
+
     std::string d = to_lower(domain);
     if (!d.empty() && d.back() == '.') d.pop_back();
-    
-    std::shared_lock<std::shared_mutex> lock(m_mtx);
-    auto it_exact = domain_exact_.find(d);
-    if (it_exact != domain_exact_.end() && (it_exact->second & FLAG_CN)) return true;
 
-    size_t pos = 0;
-    while (true) {
-        std::string s = d.substr(pos);
-        auto it = domain_suffix_.find(s);
-        if (it != domain_suffix_.end() && (it->second & FLAG_CN)) return true;
-        size_t next_dot = d.find('.', pos);
-        if (next_dot == std::string::npos) break;
-        pos = next_dot + 1;
+    uint32_t flags = 0;
+    auto perform_lookup = [&]() {
+        std::shared_lock<std::shared_mutex> lock(m_mtx);
+        
+        // Exact match
+        auto it_exact = domain_exact_.find(d);
+        if (it_exact != domain_exact_.end()) {
+            return it_exact->second & 0xFFFF0000;
+        }
+
+        // Suffix match
+        size_t pos = 0;
+        while (true) {
+            std::string s = d.substr(pos);
+            auto it = domain_suffix_.find(s);
+            if (it != domain_suffix_.end()) {
+                return it->second & 0xFFFF0000;
+            }
+            size_t next_dot = d.find('.', pos);
+            if (next_dot == std::string::npos) break;
+            pos = next_dot + 1;
+        }
+
+        uint32_t res_flags = 0;
+        // Keyword match
+        for (const auto& kv : domain_keyword_) {
+            if (d.find(kv.keyword) != std::string::npos) {
+                res_flags |= ((uint32_t)kv.flags << 16);
+            }
+        }
+        
+        if (d.length() > 3 && d.substr(d.length() - 3) == ".cn") {
+            res_flags |= FLAG_CN;
+        }
+
+        return res_flags;
+    };
+
+    flags = perform_lookup();
+
+    // 2. 写入缓存 (限额 10000 条)
+    {
+        std::unique_lock<std::shared_mutex> lock(m_cache_mtx);
+        if (m_domain_flags_cache.size() < 10000) {
+            m_domain_flags_cache[domain] = flags;
+        }
     }
-    for (const auto& kv : domain_keyword_) if ((kv.flags & (FLAG_CN >> 16)) && d.find(kv.keyword) != std::string::npos) return true;
-    // for (const auto& kv : domain_regex_) if ((kv.flags & (FLAG_CN >> 16)) && std::regex_search(d, kv.reg)) return true;
-    
-    if (d.length() > 3 && d.substr(d.length() - 3) == ".cn") return true;
 
-    return false;
+    return flags;
+}
+
+bool GeoChecker::is_cn_domain(const std::string& domain) {
+    return get_domain_flags(domain) & FLAG_CN;
 }
 
 bool GeoChecker::is_google_domain(const std::string& domain) {
-    if (!m_ready) return false;
-    std::string d = to_lower(domain);
-    if (!d.empty() && d.back() == '.') d.pop_back();
-
-    std::shared_lock<std::shared_mutex> lock(m_mtx);
-    auto it_exact = domain_exact_.find(d);
-    if (it_exact != domain_exact_.end() && (it_exact->second & FLAG_GOOGLE)) return true;
-
-    size_t pos = 0;
-    while (true) {
-        std::string s = d.substr(pos);
-        auto it = domain_suffix_.find(s);
-        if (it != domain_suffix_.end() && (it->second & FLAG_GOOGLE)) return true;
-        size_t next_dot = d.find('.', pos);
-        if (next_dot == std::string::npos) break;
-        pos = next_dot + 1;
-    }
-    
-    for (const auto& kv : domain_keyword_) if ((kv.flags & (FLAG_GOOGLE >> 16)) && d.find(kv.keyword) != std::string::npos) return true;
-    // for (const auto& kv : domain_regex_) if ((kv.flags & (FLAG_GOOGLE >> 16)) && std::regex_search(d, kv.reg)) return true;
-
-    return false;
+    return get_domain_flags(domain) & FLAG_GOOGLE;
 }
 
 bool GeoChecker::is_tencent_domain(const std::string& domain) {
-    if (!m_ready) return false;
-    std::string d = to_lower(domain);
-    if (!d.empty() && d.back() == '.') d.pop_back();
-
-    std::shared_lock<std::shared_mutex> lock(m_mtx);
-    auto it_exact = domain_exact_.find(d);
-    if (it_exact != domain_exact_.end() && (it_exact->second & FLAG_TENCENT)) return true;
-
-    size_t pos = 0;
-    while (true) {
-        std::string s = d.substr(pos);
-        auto it = domain_suffix_.find(s);
-        if (it != domain_suffix_.end() && (it->second & FLAG_TENCENT)) return true;
-        size_t next_dot = d.find('.', pos);
-        if (next_dot == std::string::npos) break;
-        pos = next_dot + 1;
-    }
-
-    for (const auto& kv : domain_keyword_) if ((kv.flags & (FLAG_TENCENT >> 16)) && d.find(kv.keyword) != std::string::npos) return true;
-    // for (const auto& kv : domain_regex_) if ((kv.flags & (FLAG_TENCENT >> 16)) && std::regex_search(d, kv.reg)) return true;
-
-    return false;
+    return get_domain_flags(domain) & FLAG_TENCENT;
 }
