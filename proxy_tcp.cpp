@@ -310,7 +310,6 @@ void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int err
             for (int i = (int)unfinished.size() - 1; i >= 0; --i) {
                 IoBuffer* b = unfinished[i];
                 b->state = IoBuffer::IO_READY;
-                q_size += (b->total_bytes - b->written_bytes);
                 q.push_front(b);
             }
             process_write_queue(s);
