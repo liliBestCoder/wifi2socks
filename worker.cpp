@@ -400,6 +400,40 @@ void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()>
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)init_task);
 }
 
+bool WorkerPool::sendto_async(SOCKET s, const uint8_t* data, size_t len, const sockaddr_in& to) {
+    if (len == 0) return true;
+    auto ctx = find_context(s);
+    if (ctx && !ctx->closing) {
+        IO_CONTEXT* io = acquire_io_context();
+        io->type = IO_WRITE;
+        io->sock = ctx->sock;
+        io->parent = ctx;
+
+        size_t copy_len = (std::min)(len, sizeof(io->buf));
+        memcpy(io->buf, data, copy_len);
+        io->data_len = copy_len;
+        io->total_bytes_submitted = copy_len;
+        io->remote_addr = to;
+        io->remote_addr_len = sizeof(to);
+
+        WSABUF w;
+        w.buf = (char*)io->buf;
+        w.len = (ULONG)io->data_len;
+        io->wsa_bufs.push_back(w);
+
+        DWORD bytes = 0;
+        int ret = WSASendTo(ctx->sock, io->wsa_bufs.data(), (DWORD)io->wsa_bufs.size(), &bytes, 0, (const sockaddr*)&io->remote_addr, io->remote_addr_len, &io->overlapped, NULL);
+
+        if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+            if (ctx->on_write) ctx->on_write(-1, io->write_buffers);
+            release_io_context(io);
+            return false;
+        }
+        return true;
+    }
+    return false;
+}
+
 bool WorkerPool::send_async(SOCKET s, const uint8_t* data, size_t len) {
     if (len == 0) return true;
     auto ctx = find_context(s);

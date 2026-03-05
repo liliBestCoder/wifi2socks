@@ -337,11 +337,11 @@ public:
             target_addr.sin_port = dest->port;
         }
 
-        SOCKET remote_socket = get_or_create_session(flow, client_addr);
+        SOCKET remote_socket = get_or_create_session(flow, client_addr, &target_addr);
         if (remote_socket != INVALID_SOCKET) {
-            int sent = sendto(remote_socket, data, len, 0, (const sockaddr*)&target_addr, sizeof(target_addr));
-            if (sent == SOCKET_ERROR) {
-                LOG_ERROR("[UDP] sendto failed: %d", WSAGetLastError());
+            bool success = WorkerPool::instance().send_async(remote_socket, (const uint8_t*)data, (size_t)len);
+            if (!success) {
+                LOG_ERROR("[UDP] send_async failed for session");
             }
             TrafficManager::instance().report_proxy_tx(len, true);
         } else {
@@ -350,7 +350,7 @@ public:
     }
 
 private:
-    SOCKET get_or_create_session(const FlowKey& flow, const sockaddr_in* client_addr) {
+    SOCKET get_or_create_session(const FlowKey& flow, const sockaddr_in* client_addr, const sockaddr_in* target_addr) {
         uint64_t now = GetTickCount64();
         std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -370,7 +370,7 @@ private:
         SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (s == INVALID_SOCKET) return INVALID_SOCKET;
 
-        // Set SO_REUSEADDR to allow the socket to bind to the virtual port even if it was recently closed
+        // Set SO_REUSEADDR
         BOOL reuse = TRUE;
         setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char*)&reuse, sizeof(reuse));
 
@@ -378,18 +378,21 @@ private:
         ioctlsocket(s, FIONBIO, &mode);
 
         // Bind to the virtual port assigned by the driver.
-        // This ensures the external source port is stable and consistent with the NAT mapping,
-        // preventing QUIC session breaks and improving compatibility with push services.
         sockaddr_in local_addr = {};
         local_addr.sin_family = AF_INET;
         local_addr.sin_addr.s_addr = INADDR_ANY;
         local_addr.sin_port = client_addr->sin_port; // This is the virtual_port in NBO
         
         if (bind(s, (const sockaddr*)&local_addr, sizeof(local_addr)) == SOCKET_ERROR) {
-            // Fallback: if binding to the specific virtual port fails, let the OS pick one
-            // to avoid complete connectivity loss, though this may affect QUIC stability.
             local_addr.sin_port = 0;
             bind(s, (const sockaddr*)&local_addr, sizeof(local_addr));
+        }
+
+        // Connect the UDP socket to the target address to enable WSASend (IOCP)
+        if (connect(s, (const sockaddr*)target_addr, sizeof(sockaddr_in)) == SOCKET_ERROR) {
+            LOG_ERROR("[UDP] Failed to connect UDP socket: %d", WSAGetLastError());
+            closesocket(s);
+            return INVALID_SOCKET;
         }
 
         m_sessions[flow] = { s, *client_addr, now };
@@ -461,15 +464,12 @@ private:
         if (found) {
             SOCKET listener = (SOCKET)AppListener::instance().get_udp_socket();
             if (listener != INVALID_SOCKET) {
-                int sent = sendto(listener, buf, len, 0, (const sockaddr*)&client_addr, sizeof(client_addr));
-                if (sent == SOCKET_ERROR) {
-                    LOG_ERROR("[UDP] Failed to send back to client %s:%d, error: %d",
-                        inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port), WSAGetLastError());
+                bool success = WorkerPool::instance().sendto_async(listener, (const uint8_t*)buf, len, client_addr);
+                if (!success) {
+                    LOG_ERROR("[UDP] sendto_async back to client failed: %d", WSAGetLastError());
                 } else {
-                    // Only log every 10th packet or for small lengths to avoid spamming, 
-                    // but for troubleshooting we'll log most of them.
                     if (len < 512 || (GetTickCount64() % 5 == 0)) {
-                        LOG_DEBUG("[UDP] Forwarded %d bytes from %s:%d back to client %s:%d",
+                        LOG_DEBUG("[UDP] Forwarded %d bytes from %s:%d back to client %s:%d (IOCP)",
                             len, inet_ntoa(from->sin_addr), ntohs(from->sin_port),
                             inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
                     }

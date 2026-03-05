@@ -105,6 +105,7 @@ public:
                       std::function<void()> on_init = nullptr);
     bool send_async(SOCKET s, const uint8_t* data, size_t len);
     bool send_async(SOCKET s, char* buf, int len);
+    bool sendto_async(SOCKET s, const uint8_t* data, size_t len, const sockaddr_in& to);
     bool send_async(SOCKET s, std::shared_ptr<std::vector<char>> buffer);
     bool send_batch_async(SOCKET s, std::vector<std::shared_ptr<std::vector<char>>> buffers);
     void read_async(SOCKET s);
