@@ -2,6 +2,7 @@
 #include <string>
 #include <unordered_map>
 #include <mutex>
+#include <shared_mutex>
 #include <chrono>
 
 class DnsCache {
@@ -12,18 +13,16 @@ public:
     }
 
     void put(const std::string& domain, uint32_t ip, uint32_t ttl) {
-        std::lock_guard<std::mutex> lock(m_mtx);
+        std::unique_lock<std::shared_mutex> lock(m_mtx);
         m_cache[domain] = { ip, std::chrono::steady_clock::now() + std::chrono::seconds(ttl) };
     }
 
     uint32_t get(const std::string& domain) {
-        std::lock_guard<std::mutex> lock(m_mtx);
+        std::shared_lock<std::shared_mutex> lock(m_mtx);
         auto it = m_cache.find(domain);
         if (it != m_cache.end()) {
             if (std::chrono::steady_clock::now() < it->second.expiry) {
                 return it->second.ip;
-            } else {
-                m_cache.erase(it);
             }
         }
         return 0;
@@ -38,5 +37,5 @@ private:
     };
     
     std::unordered_map<std::string, Entry> m_cache;
-    std::mutex m_mtx;
+    std::shared_mutex m_mtx;
 };
