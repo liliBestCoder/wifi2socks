@@ -10,6 +10,7 @@
 #include "proxy_tcp.h"
 #include "dns_over_tcp_proxy.h"
 #include "dns_cache.h"
+#include "winpkfilter_driver.h"
 
 #include <unordered_map>
 #include <map>
@@ -321,9 +322,17 @@ public:
                     char dst_ip[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &client_addr->sin_addr, src_ip, INET_ADDRSTRLEN);
                     inet_ntop(AF_INET, &dest->ip, dst_ip, INET_ADDRSTRLEN);
-                    LOG_INFO("[UDP] Blocking foreign QUIC from %s:%d to %s:%d", 
+                    LOG_INFO("[UDP] Blocking foreign QUIC from %s:%d to %s:%d (Sending ICMP Unreachable)", 
                         src_ip, ntohs(client_addr->sin_port),
                         dst_ip, dport);
+                    
+                    // Send ICMP Port Unreachable to trigger fast fallback to TCP
+                    WinPkFilterDriver::instance().send_icmp_port_unreachable(
+                        client_addr->sin_addr.s_addr, 
+                        client_addr->sin_port, 
+                        dest->ip, 
+                        dest->port
+                    );
                     return; 
                 }
             }

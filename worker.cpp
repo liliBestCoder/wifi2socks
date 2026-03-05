@@ -429,31 +429,39 @@ bool WorkerPool::sendto_async(SOCKET s, const uint8_t* data, size_t len, const s
     if (len == 0) return true;
     auto ctx = find_context(s);
     if (ctx && !ctx->closing) {
-        IO_CONTEXT* io = acquire_io_context();
-        io->type = IO_WRITE;
-        io->sock = ctx->sock;
-        io->parent = ctx;
+        size_t remaining = len;
+        size_t offset = 0;
 
-        size_t copy_len = (std::min)(len, sizeof(io->buf));
-        memcpy(io->buf, data, copy_len);
-        io->data_len = copy_len;
-        io->total_bytes_submitted = copy_len;
-        io->remote_addr = to;
-        io->remote_addr_len = sizeof(to);
+        while (remaining > 0) {
+            IO_CONTEXT* io = acquire_io_context();
+            io->type = IO_WRITE;
+            io->sock = ctx->sock;
+            io->parent = ctx;
 
-        WSABUF w;
-        w.buf = (char*)io->buf;
-        w.len = (ULONG)io->data_len;
-        io->wsa_bufs.push_back(w);
+            size_t chunk = (std::min)(remaining, sizeof(io->buf));
+            memcpy(io->buf, data + offset, chunk);
+            io->data_len = chunk;
+            io->total_bytes_submitted = chunk;
+            io->remote_addr = to;
+            io->remote_addr_len = sizeof(to);
 
-        DWORD bytes = 0;
-        int ret = WSASendTo(ctx->sock, io->wsa_bufs.data(), (DWORD)io->wsa_bufs.size(), &bytes, 0, (const sockaddr*)&io->remote_addr, io->remote_addr_len, &io->overlapped, NULL);
+            WSABUF w;
+            w.buf = (char*)io->buf;
+            w.len = (ULONG)io->data_len;
+            io->wsa_bufs.push_back(w);
 
-        if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-            LOG_ERROR("[WorkerPool] WSASendTo failed: %d", WSAGetLastError());
-            if (ctx->on_write) ctx->on_write(-1, io->write_buffers);
-            release_io_context(io);
-            return false;
+            DWORD bytes = 0;
+            int ret = WSASendTo(ctx->sock, io->wsa_bufs.data(), (DWORD)io->wsa_bufs.size(), &bytes, 0, (const sockaddr*)&io->remote_addr, io->remote_addr_len, &io->overlapped, NULL);
+
+            if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+                LOG_ERROR("[WorkerPool] WSASendTo chunk failed: %d", WSAGetLastError());
+                if (ctx->on_write) ctx->on_write(-1, io->write_buffers);
+                release_io_context(io);
+                return false;
+            }
+
+            remaining -= chunk;
+            offset += chunk;
         }
         return true;
     }
@@ -604,28 +612,37 @@ void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, std::vect
 void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, const uint8_t* data, size_t len) {
     if (!ctx || ctx->closing || len == 0) return;
 
-    IO_CONTEXT* io = acquire_io_context();
-    io->type = IO_WRITE;
-    io->sock = ctx->sock;
-    io->parent = ctx;
+    size_t remaining = len;
+    size_t offset = 0;
 
-    size_t copy_len = (std::min)(len, sizeof(io->buf));
-    memcpy(io->buf, data, copy_len);
-    io->data_len = copy_len;
-    io->total_bytes_submitted = copy_len;
+    while (remaining > 0) {
+        IO_CONTEXT* io = acquire_io_context();
+        io->type = IO_WRITE;
+        io->sock = ctx->sock;
+        io->parent = ctx;
 
-    WSABUF w;
-    w.buf = (char*)io->buf;
-    w.len = (ULONG)io->data_len;
-    io->wsa_bufs.push_back(w);
+        size_t chunk = (std::min)(remaining, sizeof(io->buf));
+        memcpy(io->buf, data + offset, chunk);
+        io->data_len = chunk;
+        io->total_bytes_submitted = chunk;
 
-    DWORD bytes = 0;
-    int ret = WSASend(ctx->sock, io->wsa_bufs.data(), (DWORD)io->wsa_bufs.size(), &bytes, 0, &io->overlapped, NULL);
+        WSABUF w;
+        w.buf = (char*)io->buf;
+        w.len = (ULONG)io->data_len;
+        io->wsa_bufs.push_back(w);
 
-    if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-        LOG_ERROR("[WorkerPool] WSASend failed: %d", WSAGetLastError());
-        if (ctx->on_write) ctx->on_write(-1, io->write_buffers);
-        release_io_context(io);
+        DWORD bytes = 0;
+        int ret = WSASend(ctx->sock, io->wsa_bufs.data(), 1, &bytes, 0, &io->overlapped, NULL);
+
+        if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+            LOG_ERROR("[WorkerPool] WSASend chunk failed: %d", WSAGetLastError());
+            if (ctx->on_write) ctx->on_write(-1, io->write_buffers);
+            release_io_context(io);
+            break;
+        }
+
+        remaining -= chunk;
+        offset += chunk;
     }
 }
 

@@ -87,7 +87,6 @@ int main() {
     PacketPool::instance().init(1024 * 512);
 
     std::string adapter_name = find_best_wifi_direct_adapter();
-    static WinPkFilterDriver pk_driver;
     
     int worker_count = std::thread::hardware_concurrency();
     if (worker_count == 0) worker_count = 4;
@@ -98,7 +97,7 @@ int main() {
 
     if (!adapter_name.empty()) {
         LOG_INFO("[CORE] Adapter found: %s", adapter_name.c_str());
-        if (!pk_driver.start_batch(adapter_name, [](std::vector<WinPkFilterDriver::Packet>&&) {})) {
+        if (!WinPkFilterDriver::instance().start_batch(adapter_name, [](std::vector<WinPkFilterDriver::Packet>&&) {})) {
             LOG_ERROR("[CORE] Failed to start WinPkFilter driver with internal NAT.");
         } else {
             LOG_INFO("[CORE] WinPkFilter driver started with internal NAT.");

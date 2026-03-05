@@ -41,6 +41,10 @@
 class WinPkFilterDriver {
 
 public:
+    static WinPkFilterDriver& instance() {
+        static WinPkFilterDriver inst;
+        return inst;
+    }
 
     struct Packet {
         RawPacketPtr data;
@@ -62,6 +66,7 @@ public:
 
     bool send_to_adapter(const char* packet, size_t length);
     bool send_to_mstcp(const char* packet, size_t length);
+    void send_icmp_port_unreachable(uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint16_t dst_port);
     void send_ipv6_tcp_rst(const char* original_packet, size_t length);
     bool get_adapter_mac(const std::string& adapter_name, uint8_t* mac);
     void send_dhcp_response(const uint8_t* client_mac, const uint32_t src_ip, const DhcpResponse& dhcp_r, const uint8_t* m_adapter_mac);

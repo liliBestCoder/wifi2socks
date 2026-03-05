@@ -38,7 +38,7 @@ struct IO_CONTEXT {
     SOCKET sock;
     int error_code; // Added error_code
     std::function<void()> task; 
-    uint8_t buf[131072]; // 128KB fixed buffer to avoid vector allocations/zeroing
+    
     size_t data_len;
     sockaddr_in remote_addr;
     int remote_addr_len;
@@ -48,6 +48,8 @@ struct IO_CONTEXT {
     std::vector<std::shared_ptr<std::vector<char>>> write_buffers;
     std::vector<WSABUF> wsa_bufs;
     size_t total_bytes_submitted;
+
+    uint8_t buf[131072]; // 128KB fixed buffer - MOVED TO THE END for safety
 
     IO_CONTEXT() : type(IO_READ), sock(INVALID_SOCKET), error_code(0), data_len(0), remote_addr_len(0), parent(nullptr), total_bytes_submitted(0) {
         memset(&overlapped, 0, sizeof(OVERLAPPED));

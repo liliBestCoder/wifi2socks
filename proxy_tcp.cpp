@@ -93,6 +93,8 @@ ProxyTCP::ProxyTCP(SOCKET client_socket, OriginalDestination dest)
     m_last_access_time = GetTickCount64();
 
     if (m_client_socket != INVALID_SOCKET) {
+        int optval = 1;
+        setsockopt(m_client_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&optval, sizeof(optval));
         enable_keepalive(m_client_socket);
     }
 }

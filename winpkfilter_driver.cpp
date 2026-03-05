@@ -856,3 +856,77 @@ void  WinPkFilterDriver::send_dhcp_response(const uint8_t* client_mac, const uin
     // --- 发送 ---
     this->send_to_adapter((const char*)frame.data(), frame.size());
 }
+
+void WinPkFilterDriver::send_icmp_port_unreachable(uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint16_t dst_port) {
+    if (m_adapter_handle == NULL) return;
+
+    // ICMP Destination Unreachable packet:
+    // [Ethernet] [IP Header] [ICMP Header] [Original IP Header] [Original UDP Header (8 bytes)]
+    
+    const size_t ip_len = 20;
+    const size_t icmp_len = 8; 
+    const size_t original_payload_len = 20 + 8; // Original IP + 8 bytes of UDP
+    const size_t total_payload_len = icmp_len + original_payload_len;
+    const size_t total_packet_size = 14 + ip_len + total_payload_len; 
+
+    uint8_t packet[256];
+    if (total_packet_size > sizeof(packet)) return;
+    memset(packet, 0, total_packet_size);
+
+    // 1. Ethernet Header
+    memset(packet, 0xFF, 6); 
+    memcpy(packet + 6, m_adapter_mac, 6); 
+    packet[12] = 0x08; packet[13] = 0x00; // IPv4
+
+    // 2. IP Header
+    uint8_t* ip_ptr = packet + 14;
+    ip_ptr[0] = 0x45;
+    ip_ptr[1] = 0x00;
+    uint16_t total_len_val = (uint16_t)(ip_len + total_payload_len);
+    uint16_t total_len_net = htons(total_len_val);
+    memcpy(ip_ptr + 2, &total_len_net, 2);
+    ip_ptr[8] = 128; // TTL
+    ip_ptr[9] = 1;   // Protocol = ICMP
+    
+    // IP addresses for ICMP reply
+    // src_ip/port are client's
+    // dst_ip/port are original target's
+    memcpy(ip_ptr + 12, &dst_ip, 4); // Source of ICMP = Original Dst IP
+    memcpy(ip_ptr + 16, &src_ip, 4); // Destination of ICMP = Original Src IP
+
+    // 3. ICMP Header
+    uint8_t* icmp_ptr = packet + 14 + ip_len;
+    icmp_ptr[0] = 3; // Type: Destination Unreachable
+    icmp_ptr[1] = 3; // Code: Port Unreachable
+
+    // 4. Original Packet snippet (IP Header + 8 bytes of UDP)
+    uint8_t* orig_ip_ptr = icmp_ptr + 8;
+    orig_ip_ptr[0] = 0x45;
+    orig_ip_ptr[9] = 17; // UDP
+    memcpy(orig_ip_ptr + 12, &src_ip, 4);
+    memcpy(orig_ip_ptr + 16, &dst_ip, 4);
+    
+    uint16_t* orig_udp = (uint16_t*)(orig_ip_ptr + 20);
+    orig_udp[0] = src_port;
+    orig_udp[1] = dst_port;
+
+    // 5. Calculate Checksums
+    auto calc_checksum = [](uint8_t* hdr, int len) -> uint16_t {
+        uint32_t sum = 0;
+        for (int i = 0; i < len; i += 2) {
+            sum += (hdr[i] << 8) | hdr[i + 1];
+        }
+        if (len % 2) sum += (hdr[len - 1] << 8);
+        while (sum >> 16) sum = (sum & 0xFFFF) + (sum >> 16);
+        return (uint16_t)(~sum);
+    };
+
+    uint16_t ip_cksum = htons(calc_checksum(ip_ptr, 20));
+    memcpy(ip_ptr + 10, &ip_cksum, 2);
+
+    uint16_t icmp_cksum = htons(calc_checksum(icmp_ptr, (int)total_payload_len));
+    memcpy(icmp_ptr + 2, &icmp_cksum, 2);
+
+    // 6. Send to Adapter
+    this->send_to_adapter((const char*)packet, total_packet_size);
+}

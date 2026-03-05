@@ -17,9 +17,7 @@ public:
         OVERLAPPED overlapped;
         IO_TYPE type; // Must be IO_PROXY_BUFFER to match worker check
 
-        uint8_t buffer[131072]; // 128KB inline buffer to reduce fragmentation and overhead
         WSABUF wsa_buf;    // For WSARecv/WSASend
-
         size_t capacity;
         size_t total_bytes; // Bytes read (valid data)
         size_t written_bytes; // Bytes written (progress)
@@ -33,11 +31,12 @@ public:
         IoBuffer* next_in_batch{ nullptr };
         DWORD flags{ 0 }; // Must be persistent for async IO
 
+        uint8_t buffer[131072]; // 128KB inline buffer - MOVED TO THE END for safety
+
         IoBuffer() : type(IO_PROXY_BUFFER), capacity(sizeof(buffer)),
             total_bytes(0), written_bytes(0), state(IO_READING),
             socket(INVALID_SOCKET), flags(0) {
             memset(&overlapped, 0, sizeof(OVERLAPPED));
-            memset(buffer, 0, sizeof(buffer));
             wsa_buf.buf = (char*)buffer;
             wsa_buf.len = (ULONG)capacity;
         }
