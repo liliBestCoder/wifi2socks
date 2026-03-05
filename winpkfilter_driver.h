@@ -15,6 +15,7 @@
 #include <memory>
 #include <atomic>
 #include <chrono>
+#include <immintrin.h> // For _mm_pause optimization
 
 #ifndef JUMBO_FRAME_SUPPORTED
 #define JUMBO_FRAME_SUPPORTED 1
@@ -96,7 +97,9 @@ private:
     struct WorkerQueue {
         // Prevent False Sharing: keep producer and consumer indices on separate cache lines
         alignas(64) std::atomic<uint32_t> head{ 0 };
+        char _pad1[64]; // Extra padding
         alignas(64) std::atomic<uint32_t> tail{ 0 };
+        char _pad2[64];
         
         // Ensure data array starts on a new cache line as well
         alignas(64) PINTERMEDIATE_BUFFER ring[QUEUE_SIZE];
