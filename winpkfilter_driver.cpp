@@ -874,7 +874,12 @@ void WinPkFilterDriver::send_icmp_port_unreachable(uint32_t src_ip, uint16_t src
     memset(packet, 0, total_packet_size);
 
     // 1. Ethernet Header
-    memset(packet, 0xFF, 6); 
+    // Use DHCP cache to get the client MAC address (most efficient)
+    if (g_dhcp_server_ptr && g_dhcp_server_ptr->get_mac_by_ip(src_ip, packet)) {
+        // MAC already copied into packet[0..5]
+    } else {
+        memset(packet, 0xFF, 6); // Fallback to broadcast
+    }
     memcpy(packet + 6, m_adapter_mac, 6); 
     packet[12] = 0x08; packet[13] = 0x00; // IPv4
 

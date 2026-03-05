@@ -153,6 +153,20 @@ uint32_t DhcpServer::get_requested_ip(const char* buffer) {
     return 0;
 }
 
+bool DhcpServer::get_mac_by_ip(uint32_t ip, uint8_t* mac) {
+    std::lock_guard<std::mutex> lock(mtx_);
+    uint32_t ip_h = ntohl(ip);
+    for (auto const& [client_mac, lease] : leases_) {
+        if (lease.ip == ip_h) {
+            if (client_mac.size() >= 6) {
+                memcpy(mac, client_mac.data(), 6);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 uint32_t DhcpServer::find_available_ip(const std::vector<uint8_t>& mac) {
     std::lock_guard<std::mutex> lock(mtx_);
     auto now = std::chrono::steady_clock::now();
