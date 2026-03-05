@@ -6,6 +6,7 @@
 #include <functional>
 #include <string>
 #include "worker.h"
+#include "connection_pool.h"
 
 class DnsOverTcpProxy : public std::enable_shared_from_this<DnsOverTcpProxy> {
 public:
@@ -42,4 +43,5 @@ private:
     // For DNS-over-TCP, we expect exactly one response
     uint16_t m_expected_len;
     bool m_len_received;
+    bool m_should_reuse;
 };

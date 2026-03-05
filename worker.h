@@ -23,6 +23,7 @@ enum IO_TYPE {
     IO_CONNECT, 
     IO_ACCEPT,  // Added IO_ACCEPT
     IO_REMOVE,
+    IO_DETACH,  // Added IO_DETACH for socket reuse
     IO_TASK,     // 通过 IOCP 投递的控制任务
     IO_PROXY_BUFFER // Custom IoBuffer for ProxyTCP
 };
@@ -98,6 +99,7 @@ public:
     // 全局控制方法，现在它们会将任务投递给共享 IOCP
     void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp = false, std::function<void()> on_init = nullptr, int concurrent_reads = CONCURRENT_READ_COUNT);
     void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
+    void detach_socket(SOCKET s, std::function<void()> on_done = nullptr);
     void accept_async(SOCKET listen_sock, std::function<void(SOCKET, sockaddr_in&)> on_accepted);
     void connect_async(SOCKET s, sockaddr_in addr, std::function<void()> on_connect, 
                       std::function<void(char*, int, sockaddr_in*)> on_read = nullptr,

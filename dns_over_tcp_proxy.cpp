@@ -15,7 +15,8 @@ DnsOverTcpProxy::DnsOverTcpProxy(const std::vector<uint8_t>& query_payload, Resp
       m_query_payload(query_payload),
       m_callback(callback),
       m_expected_len(0),
-      m_len_received(false)
+      m_len_received(false),
+      m_should_reuse(false)
 {
 }
 
@@ -26,6 +27,24 @@ DnsOverTcpProxy::~DnsOverTcpProxy() {
 }
 
 void DnsOverTcpProxy::start() {
+    std::string target = g_config.proxy_dns_server + ":53";
+    m_socket = ConnectionPool::instance().acquire(target);
+
+    if (m_socket != INVALID_SOCKET) {
+        LOG_DEBUG("[DoT] Reusing existing connection for %s", target.c_str());
+        m_state = DNS_QUERY;
+        
+        auto self = shared_from_this();
+        WorkerPool::instance().add_socket(
+            m_socket,
+            [self](char* buf, int len, sockaddr_in*) { self->on_read(buf, len); },
+            nullptr
+        );
+
+        send_dns_query();
+        return;
+    }
+
     m_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (m_socket == INVALID_SOCKET) {
         LOG_DEBUG("[DoT] Failed to create socket.");
@@ -140,6 +159,7 @@ void DnsOverTcpProxy::handle_dns_response() {
                 m_len_received = false;
                 m_expected_len = 0;
 
+                m_should_reuse = true;
                 on_close();
                 break;
             } else {
@@ -156,7 +176,13 @@ void DnsOverTcpProxy::on_close() {
     if (m_state == CLOSED) return;
     m_state = CLOSED;
     if (m_socket != INVALID_SOCKET) {
-        WorkerPool::instance().remove_socket(m_socket);
+        if (m_should_reuse) {
+            std::string target = g_config.proxy_dns_server + ":53";
+            WorkerPool::instance().detach_socket(m_socket);
+            ConnectionPool::instance().release(target, m_socket);
+        } else {
+            WorkerPool::instance().remove_socket(m_socket);
+        }
         m_socket = INVALID_SOCKET;
     }
 }

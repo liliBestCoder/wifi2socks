@@ -223,6 +223,13 @@ public:
     };
 
     void handle_data(SOCKET listener_socket, const char* data, int len, const sockaddr_in* client_addr, const OriginalDestination* dest) {
+        uint64_t now = GetTickCount64();
+        if (now - m_last_cleanup > 30000) { // 30 seconds
+            std::lock_guard<std::mutex> lock(m_mutex);
+            cleanup_sessions(now);
+            m_last_cleanup = now;
+        }
+
         uint16_t dport = ntohs(dest->port);
         bool is_dns = (dport == 53);
 
@@ -365,7 +372,6 @@ private:
                 SOCKET s = it->second.sock;
                 m_socket_to_flow.erase(s);
                 WorkerPool::instance().remove_socket(s);
-                closesocket(s);
                 m_sessions.erase(it);
                 // Continue to create a new session below
             }
@@ -493,7 +499,6 @@ private:
                 SOCKET s = it->second.sock;
                 m_socket_to_flow.erase(s);
                 WorkerPool::instance().remove_socket(s);
-                closesocket(s);
                 it = m_sessions.erase(it);
             } else {
                 ++it;

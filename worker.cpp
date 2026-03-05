@@ -160,6 +160,24 @@ void Worker::loop() {
             continue;
         }
 
+        if (io->type == IO_DETACH) {
+            std::shared_ptr<SocketContext> ctx = WorkerPool::instance().find_context(io->sock);
+            if (ctx) {
+                ctx->closing = true;
+                ctx->on_remove_done = io->task;
+                WorkerPool::instance().unregister_context(io->sock);
+                // Do NOT closesocket here.
+                if (ctx.use_count() == 1) {
+                    if (ctx->on_remove_done) ctx->on_remove_done();
+                }
+            }
+            else if (io->task) {
+                io->task();
+            }
+            release_io_context(io);
+            continue;
+        }
+
         std::shared_ptr<SocketContext> ctx = io->parent;
         if (!ctx) {
             release_io_context(io);
@@ -265,6 +283,14 @@ void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in
 void WorkerPool::remove_socket(SOCKET s, std::function<void()> on_done) {
     IO_CONTEXT* io = acquire_io_context();
     io->type = IO_REMOVE;
+    io->sock = s;
+    io->task = on_done;
+    PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io);
+}
+
+void WorkerPool::detach_socket(SOCKET s, std::function<void()> on_done) {
+    IO_CONTEXT* io = acquire_io_context();
+    io->type = IO_DETACH;
     io->sock = s;
     io->task = on_done;
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io);
