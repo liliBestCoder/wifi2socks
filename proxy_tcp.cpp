@@ -13,6 +13,19 @@ static std::mutex g_proxy_buf_mtx;
 static ProxyTCP::IoBuffer* g_proxy_buf_stack[2048]; // Use a fixed-size stack for faster access
 static int g_proxy_buf_top = 0;
 
+static void enable_keepalive(SOCKET s) {
+    int optval = 1;
+    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, (char*)&optval, sizeof(optval));
+
+    // Windows specific: Configure keepalive intervals
+    tcp_keepalive keepalive;
+    keepalive.onoff = 1;
+    keepalive.keepalivetime = 60000;    // 60 seconds idle before first probe
+    keepalive.keepaliveinterval = 10000; // 10 seconds between probes
+    DWORD bytes;
+    WSAIoctl(s, SIO_KEEPALIVE_VALS, &keepalive, sizeof(keepalive), NULL, 0, &bytes, NULL, NULL);
+}
+
 ProxyTCP::IoBuffer* ProxyTCP::alloc_buffer(size_t size) {
     ProxyTCP::IoBuffer* buf = nullptr;
     {

@@ -88,14 +88,14 @@ void NatManager::create_tcp_mapping(uint64_t key, const OriginalDestination& des
         std::shared_lock<std::shared_mutex> lock(m_global_mtx);
         auto it = m_tcp_map.find(key);
         if (it != m_tcp_map.end()) {
-            _InterlockedExchange64((volatile long long*)&it->second.last_access, now);
+            it->second.last_access.store(now, std::memory_order_relaxed);
             return;
         }
     }
 
     // Slow path: Create new entry with unique lock
     std::unique_lock<std::shared_mutex> lock(m_global_mtx);
-    m_tcp_map[key] = { dest, now, {}, 0 };
+    m_tcp_map[key] = MappingEntry(dest, now, {}, 0);
     m_tcp_map[key].dest.worker_id = worker_id;
 }
 
@@ -112,9 +112,9 @@ void NatManager::create_or_update_udp_mapping(const UdpKey4& key, const Original
         std::shared_lock<std::shared_mutex> lock(m_global_mtx);
         auto it = m_udp_map.find(key);
         if (it != m_udp_map.end()) {
-            _InterlockedExchange64((volatile long long*)&it->second.last_access, now);
+            it->second.last_access.store(now, std::memory_order_relaxed);
             if (it->second.vport != 0) {
-                _InterlockedExchange64((volatile long long*)&m_vport_to_udp[it->second.vport].last_access, now);
+                m_vport_to_udp[it->second.vport].last_access.store(now, std::memory_order_relaxed);
             }
             return;
         }
@@ -122,7 +122,7 @@ void NatManager::create_or_update_udp_mapping(const UdpKey4& key, const Original
 
     // Slow path: Create with unique lock
     std::unique_lock<std::shared_mutex> lock(m_global_mtx);
-    MappingEntry entry = { dest, now, key, 0 };
+    MappingEntry entry(dest, now, key, 0);
     entry.dest.worker_id = worker_id;
     m_udp_map[key] = entry;
 }
@@ -135,8 +135,8 @@ uint16_t NatManager::allocate_udp_virtual_port(const UdpKey4& key, const Origina
         std::shared_lock<std::shared_mutex> lock(m_global_mtx);
         auto it = m_udp_map.find(key);
         if (it != m_udp_map.end() && it->second.vport != 0) {
-            _InterlockedExchange64((volatile long long*)&it->second.last_access, now);
-            _InterlockedExchange64((volatile long long*)&m_vport_to_udp[it->second.vport].last_access, now);
+            it->second.last_access.store(now, std::memory_order_relaxed);
+            m_vport_to_udp[it->second.vport].last_access.store(now, std::memory_order_relaxed);
             return it->second.vport;
         }
     }
@@ -146,8 +146,8 @@ uint16_t NatManager::allocate_udp_virtual_port(const UdpKey4& key, const Origina
     // Re-check under unique lock to avoid race
     auto it = m_udp_map.find(key);
     if (it != m_udp_map.end() && it->second.vport != 0) {
-        it->second.last_access = now;
-        m_vport_to_udp[it->second.vport].last_access = now;
+        it->second.last_access.store(now, std::memory_order_relaxed);
+        m_vport_to_udp[it->second.vport].last_access.store(now, std::memory_order_relaxed);
         return it->second.vport;
     }
 
@@ -160,8 +160,8 @@ uint16_t NatManager::allocate_udp_virtual_port(const UdpKey4& key, const Origina
     uint16_t vport = m_free_vports.front();
     m_free_vports.pop_front();
 
-    m_udp_map[key] = { dest, now, key, vport };
-    m_vport_to_udp[vport] = { key, now, true };
+    m_udp_map[key] = MappingEntry(dest, now, key, vport);
+    m_vport_to_udp[vport] = VPortEntry(key, now, true);
 
     return vport;
 }
@@ -173,10 +173,10 @@ std::optional<UdpKey4> NatManager::get_udp_key_by_virtual_port(uint16_t vport) {
     if (it != m_vport_to_udp.end()) {
         uint64_t now = GetTickCount64();
         // Atomic update timestamp without unique lock
-        _InterlockedExchange64((volatile long long*)&it->second.last_access, now);
+        it->second.last_access.store(now, std::memory_order_relaxed);
         auto it_u = m_udp_map.find(it->second.key);
         if (it_u != m_udp_map.end()) {
-            _InterlockedExchange64((volatile long long*)&it_u->second.last_access, now);
+            it_u->second.last_access.store(now, std::memory_order_relaxed);
         }
         return it->second.key;
     }
