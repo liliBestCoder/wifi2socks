@@ -239,32 +239,27 @@ void WorkerPool::init(int count) {
 }
 
 void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp, std::function<void()> on_init, int concurrent_reads) {
-    IO_CONTEXT* io = acquire_io_context();
-    io->type = IO_TASK;
-    io->task = [this, s, on_read, on_write, is_udp, on_init, concurrent_reads]() {
-        std::shared_ptr<SocketContext> ctx = find_context(s);
-        if (!ctx) {
-            ctx = std::make_shared<SocketContext>();
-            ctx->sock = s;
-            register_context(s, ctx);
-            CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx.get(), 0);
-        }
-        ctx->on_read = on_read;
-        ctx->on_write = on_write;
-        ctx->is_udp = is_udp;
-        ctx->concurrent_reads = concurrent_reads;
+    std::shared_ptr<SocketContext> ctx = find_context(s);
+    if (!ctx) {
+        ctx = std::make_shared<SocketContext>();
+        ctx->sock = s;
+        register_context(s, ctx);
+        CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx.get(), 0);
+    }
+    ctx->on_read = on_read;
+    ctx->on_write = on_write;
+    ctx->is_udp = is_udp;
+    ctx->concurrent_reads = concurrent_reads;
 
-        if (on_init) {
-            on_init();
-        }
+    if (on_init) {
+        on_init();
+    }
 
-        if (on_read) {
-            for (int i = 0; i < ctx->concurrent_reads; ++i) {
-                post_read(ctx);
-            }
+    if (on_read) {
+        for (int i = 0; i < ctx->concurrent_reads; ++i) {
+            post_read(ctx);
         }
-        };
-    PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io);
+    }
 }
 
 void WorkerPool::remove_socket(SOCKET s, std::function<void()> on_done) {
@@ -276,17 +271,17 @@ void WorkerPool::remove_socket(SOCKET s, std::function<void()> on_done) {
 }
 
 void WorkerPool::accept_async(SOCKET listen_sock, std::function<void(SOCKET, sockaddr_in&)> on_accepted) {
+    std::shared_ptr<SocketContext> ctx = find_context(listen_sock);
+    if (!ctx) {
+        ctx = std::make_shared<SocketContext>();
+        ctx->sock = listen_sock;
+        register_context(listen_sock, ctx);
+        CreateIoCompletionPort((HANDLE)listen_sock, m_shared_iocp, (ULONG_PTR)ctx.get(), 0);
+    }
+
     IO_CONTEXT* init_task = acquire_io_context();
     init_task->type = IO_TASK;
-    init_task->task = [this, listen_sock, on_accepted]() {
-        std::shared_ptr<SocketContext> ctx = find_context(listen_sock);
-        if (!ctx) {
-            ctx = std::make_shared<SocketContext>();
-            ctx->sock = listen_sock;
-            register_context(listen_sock, ctx);
-            CreateIoCompletionPort((HANDLE)listen_sock, m_shared_iocp, (ULONG_PTR)ctx.get(), 0);
-        }
-
+    init_task->task = [this, listen_sock, on_accepted, ctx]() {
         LPFN_ACCEPTEX AcceptExPtr = nullptr;
         GUID guid = WSAID_ACCEPTEX;
         DWORD bytes = 0;
@@ -352,30 +347,31 @@ void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()>
     std::function<void(char*, int, sockaddr_in*)> on_read,
     std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write,
     std::function<void()> on_init) {
+    
+    struct sockaddr_in bindAddr;
+    memset(&bindAddr, 0, sizeof(bindAddr));
+    bindAddr.sin_family = AF_INET;
+    bindAddr.sin_addr.s_addr = INADDR_ANY;
+    bindAddr.sin_port = 0;
+    bind(s, (sockaddr*)&bindAddr, sizeof(bindAddr));
+
+    std::shared_ptr<SocketContext> ctx = find_context(s);
+    if (!ctx) {
+        ctx = std::make_shared<SocketContext>();
+        ctx->sock = s;
+        register_context(s, ctx);
+        CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx.get(), 0);
+    }
+    ctx->on_read = on_read;
+    ctx->on_write = on_write;
+
+    if (on_init) {
+        on_init();
+    }
+
     IO_CONTEXT* init_task = acquire_io_context();
     init_task->type = IO_TASK;
-    init_task->task = [this, s, addr, on_connect, on_read, on_write, on_init]() {
-        struct sockaddr_in bindAddr;
-        memset(&bindAddr, 0, sizeof(bindAddr));
-        bindAddr.sin_family = AF_INET;
-        bindAddr.sin_addr.s_addr = INADDR_ANY;
-        bindAddr.sin_port = 0;
-        bind(s, (sockaddr*)&bindAddr, sizeof(bindAddr));
-
-        std::shared_ptr<SocketContext> ctx = find_context(s);
-        if (!ctx) {
-            ctx = std::make_shared<SocketContext>();
-            ctx->sock = s;
-            register_context(s, ctx);
-            CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx.get(), 0);
-        }
-        ctx->on_read = on_read;
-        ctx->on_write = on_write;
-
-        if (on_init) {
-            on_init();
-        }
-
+    init_task->task = [this, s, addr, on_connect, ctx]() {
         LPFN_CONNECTEX ConnectExPtr = nullptr;
         GUID guid = WSAID_CONNECTEX;
         DWORD bytes = 0;
@@ -396,7 +392,7 @@ void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()>
         else {
             LOG_ERROR("[WorkerPool] Failed to get ConnectEx pointer.");
         }
-        };
+    };
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)init_task);
 }
 
@@ -425,6 +421,7 @@ bool WorkerPool::sendto_async(SOCKET s, const uint8_t* data, size_t len, const s
         int ret = WSASendTo(ctx->sock, io->wsa_bufs.data(), (DWORD)io->wsa_bufs.size(), &bytes, 0, (const sockaddr*)&io->remote_addr, io->remote_addr_len, &io->overlapped, NULL);
 
         if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+            LOG_ERROR("[WorkerPool] WSASendTo failed: %d", WSAGetLastError());
             if (ctx->on_write) ctx->on_write(-1, io->write_buffers);
             release_io_context(io);
             return false;
@@ -568,6 +565,7 @@ void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, std::vect
     int ret = WSASend(ctx->sock, io->wsa_bufs.data(), (DWORD)io->wsa_bufs.size(), &bytes, 0, &io->overlapped, NULL);
 
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+        LOG_ERROR("[WorkerPool] WSASend failed: %d", WSAGetLastError());
         if (ctx->on_write) ctx->on_write(-1, io->write_buffers);
         release_io_context(io);
     }
@@ -596,6 +594,7 @@ void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, const uin
     int ret = WSASend(ctx->sock, io->wsa_bufs.data(), (DWORD)io->wsa_bufs.size(), &bytes, 0, &io->overlapped, NULL);
 
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+        LOG_ERROR("[WorkerPool] WSASend failed: %d", WSAGetLastError());
         if (ctx->on_write) ctx->on_write(-1, io->write_buffers);
         release_io_context(io);
     }
