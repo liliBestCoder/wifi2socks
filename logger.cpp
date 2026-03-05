@@ -30,6 +30,8 @@ void AsyncLogger::init(const std::string& filename) {
     m_file.open(filename, std::ios::app);
 }
 
+static std::atomic<size_t> g_dropped_count{ 0 };
+
 void AsyncLogger::log(LogLevel level, const char* format, ...) {
     if (level < m_min_level) return;
 
@@ -46,8 +48,11 @@ void AsyncLogger::log(LogLevel level, const char* format, ...) {
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_queue.size() < 10000) { // Limit queue size
+        if (m_queue.size() < 50000) { // Increased limit
             m_queue.push_back(std::move(item));
+        }
+        else {
+            g_dropped_count++;
         }
     }
     m_cv.notify_one();
@@ -55,7 +60,7 @@ void AsyncLogger::log(LogLevel level, const char* format, ...) {
 
 void AsyncLogger::worker_loop() {
     std::vector<LogItem> local_queue;
-    local_queue.reserve(256);
+    local_queue.reserve(1024);
 
     while (m_running || !m_queue.empty()) {
         {
@@ -65,6 +70,15 @@ void AsyncLogger::worker_loop() {
             if (m_queue.empty() && !m_running) break;
             
             m_queue.swap(local_queue);
+        }
+
+        // Check if we dropped logs
+        size_t dropped = g_dropped_count.exchange(0);
+        if (dropped > 0) {
+            char warn_msg[128];
+            int wlen = snprintf(warn_msg, sizeof(warn_msg), "[WARNING] Logger dropped %zu messages due to queue full\n", dropped);
+            fputs(warn_msg, stdout);
+            if (m_file.is_open()) m_file.write(warn_msg, wlen);
         }
 
         for (const auto& item : local_queue) {
@@ -85,27 +99,18 @@ void AsyncLogger::worker_loop() {
             char time_buf[64];
             std::strftime(time_buf, sizeof(time_buf), "%H:%M:%S", &tm_now);
 
-            // Print formatted log to string first
             char final_msg[4096];
             int len = snprintf(final_msg, sizeof(final_msg), "[%s.%03lld] %s %s\n", 
                                time_buf, (long long)ms.count(), level_str, item.message.c_str());
 
             if (len > 0) {
-                // Print to Console
+                size_t write_len = (len >= (int)sizeof(final_msg)) ? (sizeof(final_msg) - 1) : (size_t)len;
                 fputs(final_msg, stdout);
-                
-                // Write to File
-                if (m_file.is_open()) {
-                    m_file.write(final_msg, len);
-                }
+                if (m_file.is_open()) m_file.write(final_msg, write_len);
             }
         }
         
-        // Batch flush
-        if (m_file.is_open()) {
-            m_file.flush();
-        }
-        
+        if (m_file.is_open()) m_file.flush();
         local_queue.clear();
     }
 }

@@ -32,7 +32,7 @@ NatManager::~NatManager() {
 void NatManager::cleanup_loop() {
     while (m_cleanup_running) {
         std::unique_lock<std::mutex> lock(m_cleanup_mtx);
-        m_cleanup_cv.wait_for(lock, std::chrono::seconds(10), [this] { return !m_cleanup_running; });
+        m_cleanup_cv.wait_for(lock, std::chrono::seconds(60), [this] { return !m_cleanup_running; });
         if (!m_cleanup_running) break;
 
         std::unique_lock<std::shared_mutex> global_lock(m_global_mtx);
