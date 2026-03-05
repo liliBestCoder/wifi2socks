@@ -322,7 +322,7 @@ public:
                     char dst_ip[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &client_addr->sin_addr, src_ip, INET_ADDRSTRLEN);
                     inet_ntop(AF_INET, &dest->ip, dst_ip, INET_ADDRSTRLEN);
-                    LOG_INFO("[UDP] Blocking foreign QUIC from %s:%d to %s:%d (Sending ICMP Unreachable)", 
+                    LOG_INFO("[UDP] Blocking foreign QUIC from %s:%d to %s:%d", 
                         src_ip, ntohs(client_addr->sin_port),
                         dst_ip, dport);
                     

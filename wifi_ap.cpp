@@ -81,6 +81,10 @@ void WiFiAPManager::CheckKeepAlive() {
 
 void WiFiAPManager::SetIP(const std::string& targetIp) {
     ForceSetStaticIP(targetIp);
+    std::thread([]() {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        StopICSService();
+     }).detach();
 }
 
 void WiFiAPManager::Start() {
