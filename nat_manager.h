@@ -88,15 +88,34 @@ private:
 
     struct MappingEntry {
         OriginalDestination dest;
-        uint64_t last_access;
+        std::atomic<uint64_t> last_access;
         UdpKey4 udp_key;
         uint16_t vport = 0; // Add virtual port reference
+
+        MappingEntry() : last_access(0), vport(0) {}
+        MappingEntry(const MappingEntry& o) : dest(o.dest), last_access(o.last_access.load()), udp_key(o.udp_key), vport(o.vport) {}
+        MappingEntry& operator=(const MappingEntry& o) {
+            dest = o.dest;
+            last_access.store(o.last_access.load());
+            udp_key = o.udp_key;
+            vport = o.vport;
+            return *this;
+        }
     };
 
     struct VPortEntry {
         UdpKey4 key;
-        uint64_t last_access;
+        std::atomic<uint64_t> last_access;
         bool active = false;
+
+        VPortEntry() : last_access(0), active(false) {}
+        VPortEntry(const VPortEntry& o) : key(o.key), last_access(o.last_access.load()), active(o.active) {}
+        VPortEntry& operator=(const VPortEntry& o) {
+            key = o.key;
+            last_access.store(o.last_access.load());
+            active = o.active;
+            return *this;
+        }
     };
 
     void cleanup_expired(uint64_t now);

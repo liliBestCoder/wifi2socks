@@ -360,12 +360,23 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
         };
 
     while (m_running) {
-        // Wait for packets if queue is empty
-        {
+        // Hybrid Spin-Wait Strategy: Spin for a short duration before sleeping
+        bool has_work = false;
+        for (int spin = 0; spin < 2000; ++spin) {
+            if (m_worker_queues[worker_id]->head.load(std::memory_order_acquire) != 
+                m_worker_queues[worker_id]->tail.load(std::memory_order_relaxed)) {
+                has_work = true;
+                break;
+            }
+            if (spin > 100) std::this_thread::yield(); // Gentle spin
+        }
+
+        if (!has_work && m_running) {
             std::unique_lock<std::mutex> lock(m_worker_queues[worker_id]->mtx);
             m_worker_queues[worker_id]->cv.wait(lock, [&] {
-                return !m_running || (m_worker_queues[worker_id]->head.load(std::memory_order_relaxed) != m_worker_queues[worker_id]->tail.load(std::memory_order_relaxed));
-                });
+                return !m_running || (m_worker_queues[worker_id]->head.load(std::memory_order_acquire) != 
+                                     m_worker_queues[worker_id]->tail.load(std::memory_order_relaxed));
+            });
         }
 
         if (!m_running) break;
@@ -537,18 +548,19 @@ void WinPkFilterDriver::reader_loop() {
             m_read_request->dwPacketsNumber = BATCH_SIZE;
             if (m_ndis_api.ReadPackets(m_read_request)) {
                 if (m_read_request->dwPacketsSuccess > 0) {
-                    bool worker_notified[128] = { false }; // Keep track of which workers to wake
+                    uint32_t worker_packet_counts[128] = { 0 };
+                    uint32_t packet_worker_ids[BATCH_SIZE];
+                    uint32_t packet_original_indices[BATCH_SIZE];
+                    uint32_t ready_to_dispatch = 0;
 
                     for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
                         PINTERMEDIATE_BUFFER b = m_read_request->EthPacket[i].Buffer;
-                        if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) { // Outbound from local stack (Upload)
+                        if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) {
                             m_stat_ul_pkts++; m_stat_ul_bytes += b->m_Length;
-                        }
-                        else { // Inbound from network (Download)
+                        } else {
                             m_stat_dl_pkts++; m_stat_dl_bytes += b->m_Length;
                         }
 
-                        // --- Fast Path ---
                         bool handled = false;
                         if (b->m_Length >= 14) {
                             unsigned char* buffer = b->m_IBuffer;
@@ -563,83 +575,77 @@ void WinPkFilterDriver::reader_loop() {
                                             if (tcp->Flags & 0x02) this->send_ipv6_tcp_rst((const char*)buffer, b->m_Length);
                                         }
                                     }
-                                    handled = true; // Dropped (buffer reused)
-                                }
-                                else if (ether_type == ETHERTYPE_ARP && b->m_Length >= 14 + sizeof(ARP_HEADER)) {
+                                    handled = true;
+                                } else if (ether_type == ETHERTYPE_ARP && b->m_Length >= 14 + sizeof(ARP_HEADER)) {
                                     PARP_HEADER arp = (PARP_HEADER)(buffer + 14);
                                     if (ntohs(arp->OpCode) == 1 && arp->DstIp == m_gateway_ip && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND) {
-                                        memcpy(buffer, buffer + 6, 6);
-                                        memcpy(buffer + 6, m_adapter_mac, 6);
-                                        arp->OpCode = htons(2);
-                                        memcpy(arp->DstMac, arp->SrcMac, 6);
-                                        arp->DstIp = arp->SrcIp;
-                                        memcpy(arp->SrcMac, m_adapter_mac, 6);
-                                        arp->SrcIp = m_gateway_ip;
-                                        this->send_to_adapter((const char*)buffer, b->m_Length);
-                                        handled = true; // Buffer reused
+                                        memcpy(buffer, buffer + 6, 6); memcpy(buffer + 6, m_adapter_mac, 6); arp->OpCode = htons(2);
+                                        memcpy(arp->DstMac, arp->SrcMac, 6); arp->DstIp = arp->SrcIp; memcpy(arp->SrcMac, m_adapter_mac, 6); arp->SrcIp = m_gateway_ip;
+                                        this->send_to_adapter((const char*)buffer, b->m_Length); handled = true;
                                     }
-                                }
-                                else if (ether_type == 0x888E) { // EAPOL
+                                } else if (ether_type == 0x888E) { // EAPOL
                                     if (b->m_dwDeviceFlags == PACKET_FLAG_ON_SEND) this->send_to_adapter((const char*)buffer, b->m_Length);
                                     else this->send_to_mstcp((const char*)buffer, b->m_Length);
                                     handled = true;
                                 }
-                            }
-                            else if (b->m_Length >= 34) {
+                            } else if (b->m_Length >= 34) {
                                 PIP_HEADER ip = (PIP_HEADER)(buffer + 14);
-                                if (ip->SrcAddr == 0x0189A8C0) handled = true; // Block ICS
                                 if (ip->Proto == IPPROTO_ICMP && b->m_dwDeviceFlags != PACKET_FLAG_ON_SEND && b->m_Length >= 14 + ((ip->Ver_HLen & 0x0F) * 4) + sizeof(ICMP_HEADER)) {
                                     PICMP_HEADER icmp = (PICMP_HEADER)(buffer + 14 + ((ip->Ver_HLen & 0x0F) * 4));
                                     if (icmp->Type == 8) {
                                         uint8_t tmac[6]; memcpy(tmac, buffer, 6); memcpy(buffer, buffer + 6, 6); memcpy(buffer + 6, tmac, 6);
                                         ULONG tip = ip->SrcAddr; ip->SrcAddr = ip->DstAddr; ip->DstAddr = tip; icmp->Type = 0;
                                         recalculate_ip_checksum(ip); recalculate_tcp_udp_checksum(ip);
-                                        this->send_to_adapter((const char*)buffer, b->m_Length);
-                                        handled = true;
+                                        this->send_to_adapter((const char*)buffer, b->m_Length); handled = true;
                                     }
-                                }
-                                else if (ip->Proto == IPPROTO_UDP) {
+                                } else if (ip->Proto == IPPROTO_UDP) {
                                     PUDP_HEADER udp = (PUDP_HEADER)((char*)ip + ((ip->Ver_HLen & 0x0F) * 4));
                                     USHORT sp = ntohs(udp->SrcPort), dp = ntohs(udp->DstPort);
                                     if (sp == 67 || dp == 67 || sp == 68 || dp == 68) {
                                         DhcpResponse dhcp_r = g_dhcp_server_ptr->handle_request_buffer((const char*)udp + sizeof(UDP_HEADER), b->m_Length);
                                         if (dhcp_r.length > 0) this->send_dhcp_response(((uint8_t*)ip) - 8, m_gateway_ip, dhcp_r, m_adapter_mac);
                                         handled = true;
-                                    }
-                                    else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353 || sp == 137 || dp == 137 || sp == 138 || dp == 138) handled = true;
+                                    } else if (sp == 1900 || dp == 1900 || sp == 5353 || dp == 5353 || sp == 137 || dp == 137 || sp == 138 || dp == 138) handled = true;
                                 }
                             }
                         }
 
                         if (!handled) {
                             uint32_t target = get_target_worker((char*)b->m_IBuffer, b->m_Length, b->m_dwDeviceFlags, m_num_workers);
-                            if (m_worker_queues[target]->push(b)) {
-                                m_read_request->EthPacket[i].Buffer = nullptr; // Transferred
-                                worker_notified[target] = true;
-                            }
-                            else {
-                                // Queue full, reused in-place (packet dropped)
-                                m_stat_dropped_pkts++;
-                            }
+                            packet_worker_ids[ready_to_dispatch] = target;
+                            packet_original_indices[ready_to_dispatch] = i;
+                            worker_packet_counts[target]++;
+                            ready_to_dispatch++;
                         }
                     }
 
-                    // Batch Refill
-                    unsigned int refill_needed = 0;
-                    for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess; ++i) {
-                        if (m_read_request->EthPacket[i].Buffer == nullptr) refill_needed++;
-                    }
-                    if (refill_needed > 0) {
-                        PINTERMEDIATE_BUFFER next_bufs[BATCH_SIZE];
-                        size_t got = PacketPool::instance().acquire_batch(next_bufs, refill_needed);
-                        unsigned int n = 0;
-                        for (unsigned int i = 0; i < m_read_request->dwPacketsSuccess && n < got; ++i) {
-                            if (m_read_request->EthPacket[i].Buffer == nullptr) m_read_request->EthPacket[i].Buffer = next_bufs[n++];
-                        }
+                    // Bucketized Dispatch O(N)
+                    uint32_t worker_offsets[129]; worker_offsets[0] = 0;
+                    for (unsigned int w = 0; w < m_num_workers; ++w) worker_offsets[w + 1] = worker_offsets[w] + worker_packet_counts[w];
+
+                    PINTERMEDIATE_BUFFER sorted_buffers[BATCH_SIZE];
+                    uint32_t sorted_indices[BATCH_SIZE];
+                    uint32_t current_worker_pos[128];
+                    memcpy(current_worker_pos, worker_offsets, sizeof(uint32_t) * 128);
+
+                    for (uint32_t i = 0; i < ready_to_dispatch; ++i) {
+                        uint32_t target = packet_worker_ids[i];
+                        uint32_t pos = current_worker_pos[target]++;
+                        sorted_buffers[pos] = m_read_request->EthPacket[packet_original_indices[i]].Buffer;
+                        sorted_indices[pos] = packet_original_indices[i];
                     }
 
-                    for (unsigned int i = 0; i < m_num_workers; ++i) {
-                        if (worker_notified[i]) m_worker_queues[i]->cv.notify_one();
+                    for (unsigned int w = 0; w < m_num_workers; ++w) {
+                        uint32_t count = worker_packet_counts[w];
+                        if (count > 0) {
+                            uint32_t offset = worker_offsets[w];
+                            size_t actual = m_worker_queues[w]->push_batch(&sorted_buffers[offset], count);
+                            if (actual > 0) {
+                                for (size_t j = 0; j < actual; ++j) m_read_request->EthPacket[sorted_indices[offset + j]].Buffer = nullptr;
+                                m_worker_queues[w]->cv.notify_one();
+                            }
+                            if (actual < count) m_stat_dropped_pkts += (count - actual);
+                        }
                     }
                 }
                 else {
