@@ -516,11 +516,11 @@ void WinPkFilterDriver::worker_loop(unsigned int worker_id) {
                 if (b_raw) {
                     if (to_adapter) {
                         to_adapter_req->EthPacket[to_adapter_req->dwPacketsNumber++].Buffer = b_raw;
-                        if (to_adapter_req->dwPacketsNumber >= BATCH_SIZE) flush_packets(to_adapter_req, true);
+                        if (to_adapter_req->dwPacketsNumber >= 64) flush_packets(to_adapter_req, true);
                     }
                     else {
                         to_stack_req->EthPacket[to_stack_req->dwPacketsNumber++].Buffer = b_raw;
-                        if (to_stack_req->dwPacketsNumber >= BATCH_SIZE) flush_packets(to_stack_req, false);
+                        if (to_stack_req->dwPacketsNumber >= 64) flush_packets(to_stack_req, false);
                     }
                 }
             }

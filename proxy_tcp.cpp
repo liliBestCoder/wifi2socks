@@ -206,6 +206,8 @@ void ProxyTCP::on_remote_connect() {
 }
 
 void ProxyTCP::on_io_complete(IoBuffer* buffer, DWORD bytes_transferred, int error) {
+    auto self = shared_from_this(); // Pin the object to ensure it survives throughout this call
+
     if (m_state == CLOSING) {
         free_buffer(buffer);
         return;
@@ -704,11 +706,20 @@ void ProxyTCP::close_session_internal() {
     }
 
     auto clean_safe = [this](std::deque<IoBuffer*>& q) {
-        for (auto* buf : q) {
-            if (buf->state == IoBuffer::IO_READY || buf->state == IoBuffer::IO_DROPPED || buf->state == IoBuffer::IO_EOF) free_buffer(buf);
+        std::vector<IoBuffer*> to_free;
+        while (!q.empty()) {
+            IoBuffer* buf = q.front();
+            q.pop_front();
+            // Only free buffers that don't have a pending IO operation.
+            // Buffers in IO_READING or IO_WRITING will be freed in on_io_complete when their callbacks fire.
+            if (buf->state == IoBuffer::IO_READY || buf->state == IoBuffer::IO_DROPPED || buf->state == IoBuffer::IO_EOF) {
+                to_free.push_back(buf);
+            }
         }
-        q.clear();
-        };
+        for (auto* buf : to_free) {
+            free_buffer(buf);
+        }
+    };
     clean_safe(m_client_write_queue);
     clean_safe(m_remote_write_queue);
 }
