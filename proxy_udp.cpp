@@ -354,16 +354,21 @@ private:
         uint64_t now = GetTickCount64();
         std::lock_guard<std::mutex> lock(m_mutex);
 
-        // Periodic cleanup (every 30 seconds)
-        if (now - m_last_cleanup > 30000) {
-            cleanup_sessions(now);
-            m_last_cleanup = now;
-        }
-
         auto it = m_sessions.find(flow);
         if (it != m_sessions.end()) {
-            it->second.last_access = now;
-            return it->second.sock;
+            const uint64_t timeout = 300000; // 300 seconds (5 minutes)
+            if (now - it->second.last_access < timeout) {
+                it->second.last_access = now;
+                return it->second.sock;
+            } else {
+                // Lazy cleanup: session expired
+                SOCKET s = it->second.sock;
+                m_socket_to_flow.erase(s);
+                WorkerPool::instance().remove_socket(s);
+                closesocket(s);
+                m_sessions.erase(it);
+                // Continue to create a new session below
+            }
         }
 
         // Create new socket for this flow
