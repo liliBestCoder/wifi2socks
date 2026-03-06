@@ -309,37 +309,42 @@ public:
         // For foreign QUIC traffic, we DROP the packets to force apps to fallback to TCP (HTTPS).
         // Domestic QUIC is allowed to go DIRECT for speed.
         if (dport == 443) {
-            uint32_t ip_h = ntohl(dest->ip);
-            bool is_cn = GeoChecker::instance().is_cn_ip(ip_h);
-            
-            if (!is_cn) {
-                // Check if it's a known Tencent IP range even if geoip fails
-                uint8_t first = (uint8_t)(ip_h >> 24);
-                if (first == 113 || first == 183 || first == 125 || first == 157) {
-                    // Tencent Bypass
-                } else {
-                    char src_ip[INET_ADDRSTRLEN];
-                    char dst_ip[INET_ADDRSTRLEN];
-                    inet_ntop(AF_INET, &client_addr->sin_addr, src_ip, INET_ADDRSTRLEN);
-                    inet_ntop(AF_INET, &dest->ip, dst_ip, INET_ADDRSTRLEN);
-                    LOG_INFO("[UDP] Blocking foreign QUIC from %s:%d to %s:%d", 
-                        src_ip, ntohs(client_addr->sin_port),
-                        dst_ip, dport);
-                    
-                    // Send ICMP Port Unreachable to trigger fast fallback to TCP
-                    WinPkFilterDriver::instance().send_icmp_port_unreachable(
-                        client_addr->sin_addr.s_addr, 
-                        client_addr->sin_port, 
-                        dest->ip, 
-                        dest->port
-                    );
-                    return; 
-                }
-            }
+            //uint32_t ip_h = ntohl(dest->ip);
+            //bool is_cn = GeoChecker::instance().is_cn_ip(ip_h);
+            //
+            //if (!is_cn) {
+            //    // Check if it's a known Tencent IP range even if geoip fails
+            //    uint8_t first = (uint8_t)(ip_h >> 24);
+            //    if (first == 113 || first == 183 || first == 125 || first == 157) {
+            //        // Tencent Bypass
+            //    } else {
+            //        char src_ip[INET_ADDRSTRLEN];
+            //        char dst_ip[INET_ADDRSTRLEN];
+            //        inet_ntop(AF_INET, &client_addr->sin_addr, src_ip, INET_ADDRSTRLEN);
+            //        inet_ntop(AF_INET, &dest->ip, dst_ip, INET_ADDRSTRLEN);
+            //        LOG_INFO("[UDP] Blocking foreign QUIC from %s:%d to %s:%d", 
+            //            src_ip, ntohs(client_addr->sin_port),
+            //            dst_ip, dport);
+            //        
+            //        // Send ICMP Port Unreachable to trigger fast fallback to TCP
+            //        WinPkFilterDriver::instance().send_icmp_port_unreachable(
+            //            client_addr->sin_addr.s_addr, 
+            //            client_addr->sin_port, 
+            //            dest->ip, 
+            //            dest->port
+            //        );
+            //        return; 
+            //    }
+            //}
         }
 
         // --- 3. Flow Matching & Forwarding (Direct Relay) ---
         FlowKey flow = { client_addr->sin_addr.s_addr, client_addr->sin_port, dest->ip, dest->port };
+        if (!is_dns) {
+            LOG_INFO("[UDP-Out] Received packet for flow %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u",
+                flow.src_ip & 0xFF, (flow.src_ip >> 8) & 0xFF, (flow.src_ip >> 16) & 0xFF, (flow.src_ip >> 24) & 0xFF, ntohs(flow.src_port),
+                flow.dst_ip & 0xFF, (flow.dst_ip >> 8) & 0xFF, (flow.dst_ip >> 16) & 0xFF, (flow.dst_ip >> 24) & 0xFF, ntohs(flow.dst_port));
+        }
         
         sockaddr_in target_addr = {};
         target_addr.sin_family = AF_INET;
@@ -480,6 +485,10 @@ private:
                 found = true;
             }
         }
+
+        LOG_INFO("[UDP-IN] Received packet for flow %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u",
+            flow.dst_ip & 0xFF, (flow.dst_ip >> 8) & 0xFF, (flow.dst_ip >> 16) & 0xFF, (flow.dst_ip >> 24) & 0xFF, ntohs(flow.dst_port),
+            flow.src_ip & 0xFF, (flow.src_ip >> 8) & 0xFF, (flow.src_ip >> 16) & 0xFF, (flow.src_ip >> 24) & 0xFF, ntohs(flow.src_port));
 
         if (found) {
             SOCKET listener = (SOCKET)AppListener::instance().get_udp_socket();
