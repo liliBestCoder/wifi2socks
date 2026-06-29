@@ -12,7 +12,12 @@ class DnsOverTcpProxy : public std::enable_shared_from_this<DnsOverTcpProxy> {
 public:
     using ResponseCallback = std::function<void(const char* data, int len)>;
 
-    DnsOverTcpProxy(const std::vector<uint8_t>& query_payload, ResponseCallback callback);
+    DnsOverTcpProxy(
+        const std::vector<uint8_t>& query_payload,
+        ResponseCallback callback,
+        const std::string& dns_server = "",
+        bool via_proxy = true
+    );
     ~DnsOverTcpProxy();
 
     void start();
@@ -44,4 +49,6 @@ private:
     uint16_t m_expected_len;
     bool m_len_received;
     bool m_should_reuse;
+    std::string m_dns_server;
+    bool m_via_proxy;
 };

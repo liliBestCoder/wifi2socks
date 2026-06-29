@@ -7,6 +7,7 @@
 #include "traffic_manager.h"
 #include "rule_manager.h"
 #include "wifi_ap.h"
+#include "geo_checker.h"
 #include <iostream>
 #include <sstream>
 #include <vector>
@@ -70,13 +71,13 @@ void SimpleHttpServer::stop() {
         m_listen_socket = INVALID_SOCKET;
     }
 
-    // ֪ͨ�̳߳�����߳��˳�
+    // ֪ͨ�̳߳�����߳��˳�?
     m_queue_cv.notify_all();
 
     // �ȴ� worker_loop �߳��˳�
     if (m_thread.joinable()) m_thread.join();
 
-    // ȷ���̳߳�����߳��˳��� join
+    // ȷ���̳߳�����߳��˳���?join
     for (auto& t : m_workers) {
         if (t.joinable()) t.join();
     }
@@ -111,7 +112,7 @@ void SimpleHttpServer::worker_loop() {
         m_workers.emplace_back([this]() { this->worker_thread_loop(); });
     }
 
-    // 2. Accept ѭ����ֻ��ӣ��������߳�
+    // 2. Accept ѭ����ֻ��ӣ��������߳�?
     while (m_running) {
         sockaddr_in client_addr;
         int len = sizeof(client_addr);
@@ -122,7 +123,7 @@ void SimpleHttpServer::worker_loop() {
             continue;
         }
 
-        // ���ͻ��˷����������
+        // ���ͻ��˷����������?
         {
             std::lock_guard<std::mutex> lock(m_queue_mtx);
             m_task_queue.push(client_sock);
@@ -147,6 +148,46 @@ static std::vector<std::string> split_str(const std::string& str, char delimiter
         tokens.push_back(token);
     }
     return tokens;
+}
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+        switch (c) {
+        case '\\': out += "\\\\"; break;
+        case '"': out += "\\\""; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out += c; break;
+        }
+    }
+    return out;
+}
+
+
+static const char* route_action_name(RouteAction action) {
+    switch (action) {
+    case RouteAction::DIRECT: return "DIRECT";
+    case RouteAction::PROXY: return "PROXY";
+    case RouteAction::BLOCK: return "BLOCK";
+    case RouteAction::PASS: return "PASS";
+    default: return "UNKNOWN";
+    }
+}
+static std::string query_param(const std::string& path, const std::string& key) {
+    size_t q = path.find('?');
+    if (q == std::string::npos) return "";
+    std::string needle = key + "=";
+    size_t pos = q + 1;
+    while (pos < path.size()) {
+        size_t next = path.find('&', pos);
+        std::string part = path.substr(pos, next == std::string::npos ? std::string::npos : next - pos);
+        if (part.rfind(needle, 0) == 0) return part.substr(needle.size());
+        if (next == std::string::npos) break;
+        pos = next + 1;
+    }
+    return "";
 }
 
 void SimpleHttpServer::handle_client(uint64_t s) {
@@ -194,6 +235,9 @@ void SimpleHttpServer::handle_client(uint64_t s) {
     }
     else if (req.path == "/check") {
         resp = handle_proxy_check();
+    }
+    else if (req.path.rfind("/geoip", 0) == 0) {
+        resp = handle_geoip_query(req.path);
     }
     else if (req.path == "/logs") {
         resp = handle_logs_get();
@@ -359,6 +403,39 @@ std::string SimpleHttpServer::handle_proxy_check() {
     return "{\"state\":\"down\",\"error\":\"target_no_response\"}";
 }
 
+std::string SimpleHttpServer::handle_geoip_query(const std::string& path) {
+    std::string ip = query_param(path, "ip");
+    if (ip.empty()) {
+        return "{\"error\":\"missing_ip\",\"usage\":\"/geoip?ip=150.109.29.169\"}";
+    }
+
+    IN_ADDR addr = {};
+    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) {
+        return "{\"error\":\"invalid_ipv4\",\"ip\":\"" + json_escape(ip) + "\"}";
+    }
+
+    std::string ip_bytes((const char*)&addr.S_un.S_addr, 4);
+    uint32_t ip_host = ntohl(addr.S_un.S_addr);
+    std::string tag = GeoChecker::instance().query_ip(ip_bytes);
+    bool is_private = GeoChecker::is_private_ip(ip_host);
+    bool is_tencent = GeoChecker::instance().is_tencent_ip(ip_host);
+    bool is_cn = GeoChecker::instance().is_cn_ip(ip_host);
+    RouteAction rule = RuleManager::instance().match_ip(ip_host);
+
+    std::stringstream ss;
+    ss << "{";
+    ss << "\"ip\":\"" << json_escape(ip) << "\",";
+    ss << "\"geoip_tag\":\"" << json_escape(tag) << "\",";
+    ss << "\"is_private\":" << (is_private ? "true" : "false") << ",";
+    ss << "\"is_tencent_ip\":" << (is_tencent ? "true" : "false") << ",";
+    ss << "\"is_cn_ip\":" << (is_cn ? "true" : "false") << ",";
+    ss << "\"rule\":\"" << route_action_name(rule) << "\",";
+    const char* effective = (rule == RouteAction::DIRECT || rule == RouteAction::PROXY || rule == RouteAction::BLOCK) ? route_action_name(rule) : (is_cn ? "DIRECT" : "PROXY");
+    ss << "\"route_effective\":\"" << effective << "\",";
+    ss << "\"route_default\":\"" << (is_cn ? "DIRECT" : "PROXY") << "\"";
+    ss << "}";
+    return ss.str();
+}
 std::string SimpleHttpServer::handle_logs_get() {
     std::ifstream file("wifi2socks.log", std::ios::binary);
     if (!file) return "[]";

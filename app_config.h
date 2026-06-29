@@ -5,6 +5,8 @@
 #include <cstdint>
 #include "logger.h" // Include logger.h for LogLevel and AsyncLogger
 
+static constexpr const char* WIFI_AP_GATEWAY_IP = "192.168.137.1";
+
 // --- Configuration Struct ---
 struct AppConfig {
     std::string gateway_ip; // Previously tap_ip
@@ -17,6 +19,10 @@ struct AppConfig {
     
     uint16_t http_api_port;
     std::string log_level; // New field
+    std::string ap_mode; // wifi_ap or wired_ap
+    std::string wired_ap_gateway_ip;
+    std::string wired_adapter_hint; // Optional friendly name/description/GUID substring
+    std::vector<uint16_t> server_first_eager_ports;
 
     // WiFi settings
     std::string wifi_ssid;
@@ -32,7 +38,7 @@ struct AppConfig {
 
     // Defaults
     AppConfig() {
-        gateway_ip = "192.168.11.1"; // Updated default to match user preference
+        gateway_ip = WIFI_AP_GATEWAY_IP;
         
         upstream_ip = "127.0.0.1";
         upstream_port = 2080;
@@ -42,6 +48,10 @@ struct AppConfig {
         
         http_api_port = 8080;
         log_level = "info"; // Default log level
+        ap_mode = "wifi_ap";
+        wired_ap_gateway_ip = "192.168.102.1";
+        wired_adapter_hint = "";
+        server_first_eager_ports = { 22, 8022, 3306, 63306 };
 
         wifi_ssid = "wifi2socks_ap";
         wifi_password = "password123";

@@ -106,25 +106,21 @@ RouteAction RuleManager::match_ip(uint32_t ip) {
     // Why? Security/Blocklist usually comes first.
     // Direct/Proxy order depends on user intent, usually explicit Direct overrides Proxy.
     
-    /*std::lock_guard<std::mutex> lock(m_mtx);
+    std::lock_guard<std::mutex> lock(m_mtx);
     if (cidr_match(ip, m_block_cidrs)) return RouteAction::BLOCK;
     if (cidr_match(ip, m_direct_cidrs)) return RouteAction::DIRECT;
     if (cidr_match(ip, m_proxy_cidrs)) return RouteAction::PROXY;
     
-    return RouteAction::PASS;*/
-
-    return RouteAction::DIRECT;
+    return RouteAction::PASS;
 }
 
 RouteAction RuleManager::match_domain(const std::string& domain) {
-    /*std::lock_guard<std::mutex> lock(m_mtx);
+    std::lock_guard<std::mutex> lock(m_mtx);
     if (domain_match_set(domain, m_block_domains)) return RouteAction::BLOCK;
     if (domain_match_set(domain, m_direct_domains)) return RouteAction::DIRECT;
     if (domain_match_set(domain, m_proxy_domains)) return RouteAction::PROXY;
     
-    return RouteAction::PASS;*/
-
-    return RouteAction::DIRECT;
+    return RouteAction::PASS;
 }
 
 void RuleManager::update_direct_list(const std::vector<std::string>& ips, const std::vector<std::string>& domains) {

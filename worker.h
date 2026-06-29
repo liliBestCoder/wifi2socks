@@ -13,6 +13,7 @@
 #include <functional>
 #include <unordered_map>
 #include <atomic>
+#include <string>
 
 constexpr int CONCURRENT_READ_COUNT = 1;
 
@@ -66,6 +67,7 @@ struct SocketContext {
     std::atomic<bool> closing;          
     bool is_udp;
     int concurrent_reads;
+    std::string debug_name;
     
     void* user_data;                    
 
@@ -99,7 +101,7 @@ public:
     void init(int count);
     
     // 全局控制方法，现在它们会将任务投递给共享 IOCP
-    void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp = false, std::function<void()> on_init = nullptr, int concurrent_reads = CONCURRENT_READ_COUNT);
+    void add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp = false, std::function<void()> on_init = nullptr, int concurrent_reads = CONCURRENT_READ_COUNT, const std::string& origin = "");
     void remove_socket(SOCKET s, std::function<void()> on_done = nullptr);
     void detach_socket(SOCKET s, std::function<void()> on_done = nullptr);
     void accept_async(SOCKET listen_sock, std::function<void(SOCKET, sockaddr_in&)> on_accepted);

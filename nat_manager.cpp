@@ -88,13 +88,31 @@ void NatManager::create_tcp_mapping(uint64_t key, const OriginalDestination& des
         std::shared_lock<std::shared_mutex> lock(m_global_mtx);
         auto it = m_tcp_map.find(key);
         if (it != m_tcp_map.end()) {
-            it->second.last_access.store(now, std::memory_order_relaxed);
-            return;
+            bool same_dest =
+                it->second.dest.ip == dest.ip &&
+                it->second.dest.port == dest.port &&
+                it->second.dest.original_client_ip == dest.original_client_ip;
+            if (same_dest) {
+                it->second.last_access.store(now, std::memory_order_relaxed);
+                return;
+            }
         }
     }
 
-    // Slow path: Create new entry with unique lock
+    // Slow path: Create or replace stale entry with unique lock.
     std::unique_lock<std::shared_mutex> lock(m_global_mtx);
+    auto it = m_tcp_map.find(key);
+    if (it != m_tcp_map.end() &&
+        (it->second.dest.ip != dest.ip ||
+            it->second.dest.port != dest.port ||
+            it->second.dest.original_client_ip != dest.original_client_ip)) {
+        unsigned char* old_ip = (unsigned char*)&it->second.dest.ip;
+        unsigned char* new_ip = (unsigned char*)&dest.ip;
+        LOG_DEBUG("[NAT] Replace stale TCP mapping key=%llu old=%u.%u.%u.%u:%u new=%u.%u.%u.%u:%u",
+            (unsigned long long)key,
+            old_ip[0], old_ip[1], old_ip[2], old_ip[3], ntohs(it->second.dest.port),
+            new_ip[0], new_ip[1], new_ip[2], new_ip[3], ntohs(dest.port));
+    }
     m_tcp_map[key] = MappingEntry(dest, now, {}, 0);
     m_tcp_map[key].dest.worker_id = worker_id;
 }

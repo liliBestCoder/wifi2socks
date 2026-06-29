@@ -20,4 +20,7 @@ public:
 
     // Stops the UDP proxy manager and cleans up resources.
     static void shutdown();
+
+    // Emits aggregate UDP/DNS health counters for runtime diagnosis.
+    static void log_global_stats();
 };

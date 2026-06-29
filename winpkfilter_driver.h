@@ -16,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <immintrin.h> // For _mm_pause optimization
+#include <array>
 
 #ifndef JUMBO_FRAME_SUPPORTED
 #define JUMBO_FRAME_SUPPORTED 1
@@ -61,7 +62,7 @@ public:
     ~WinPkFilterDriver();
 
     bool start(const std::string& adapter_name, PacketHandler handler, std::function<void()> on_before_batch = nullptr, std::function<void()> on_after_batch = nullptr);
-    bool start_batch(const std::string& adapter_name, BatchPacketHandler handler);
+    bool start_batch(const std::string& adapter_name, BatchPacketHandler handler, bool pass_ics_control = false);
     void stop();
 
     bool send_to_adapter(const char* packet, size_t length);
@@ -174,6 +175,14 @@ private:
     };
     // Use unique_ptr to handle mutex non-copyable issue (C2280)
     std::vector<std::unique_ptr<WorkerQueue>> m_worker_queues;
+    static const unsigned int MAX_WORKERS = 128;
+    std::array<std::atomic<uint64_t>, MAX_WORKERS> m_stat_worker_in_pkts{};
+    std::array<std::atomic<uint64_t>, MAX_WORKERS> m_stat_worker_out_pkts{};
+    std::array<std::atomic<uint64_t>, MAX_WORKERS> m_stat_worker_loops{};
+    std::array<std::atomic<uint32_t>, MAX_WORKERS> m_stat_worker_stage{};
+    std::array<std::atomic<uint64_t>, MAX_WORKERS> m_stat_worker_stage_ms{};
+    std::array<std::atomic<uint64_t>, MAX_WORKERS> m_stat_worker_seen_ms{};
+    std::array<std::atomic<uint32_t>, MAX_WORKERS> m_stat_worker_batch{};
 
     // Statistics counters (Pure atomic, no logging overhead in worker loop)
     std::atomic<uint64_t> m_stat_dl_pkts{0};
@@ -182,6 +191,20 @@ private:
     std::atomic<uint64_t> m_stat_ul_bytes{0};
     std::atomic<uint64_t> m_stat_work_time_us{0};
     std::atomic<uint64_t> m_stat_dropped_pkts{ 0 };
+    std::atomic<uint64_t> m_stat_arp_pass{ 0 };
+    std::atomic<uint64_t> m_stat_eapol_pass{ 0 };
+    std::atomic<uint64_t> m_stat_ipv6_drop{ 0 };
+    std::atomic<uint64_t> m_stat_dhcp_pass{ 0 };
+    std::atomic<uint64_t> m_stat_dhcp_patch{ 0 };
+    std::atomic<uint64_t> m_stat_lan_discovery_pass{ 0 };
+    std::atomic<uint64_t> m_stat_pressure_udp_drop{ 0 };
+    std::atomic<uint64_t> m_stat_ics_drop{ 0 };
+    std::atomic<uint64_t> m_stat_icmp_reply{ 0 };
+    std::atomic<uint64_t> m_stat_worker_dispatch{ 0 };
+    std::atomic<uint64_t> m_stat_send_adapter_fail{ 0 };
+    std::atomic<uint64_t> m_stat_send_stack_fail{ 0 };
+    std::atomic<uint64_t> m_stat_batch_adapter_fail{ 0 };
+    std::atomic<uint64_t> m_stat_batch_stack_fail{ 0 };
     std::chrono::steady_clock::time_point m_last_stat_time;
 
     // --- End of new members ---
@@ -196,4 +219,6 @@ private:
 
     uint8_t m_adapter_mac[6];
     uint32_t m_gateway_ip;
+    uint32_t m_ics_gateway_ip;
+    bool m_pass_ics_control;
 };

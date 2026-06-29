@@ -1,0 +1,34 @@
+# Visual Studio build output directories
+x64/
+[Dd]ebug/
+[Rr]elease/
+
+# Build artifacts (within any directory)
+*.obj
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
+*.recipe
+*.tlog/
+*.lastbuildstate
+*.FileListAbsolute.txt
+*.idb
+*.bsc
+*.sbr
+*.suo
+*.sdf
+*.opendb
+vcpkg.applocal.log
+
+# Visual Studio user files
+*.vcxproj.user
+
+# JetBrains IDE
+.idea/
+
+# Log files (generated at runtime)
+*.log
+
+# Temp/scratch files
+query

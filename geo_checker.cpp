@@ -265,51 +265,49 @@ bool GeoChecker::is_private_ip(const uint32_t ip_h) {
 }
 
 bool GeoChecker::is_cn_ip(uint32_t ip_host) {
-    //if (is_private_ip(ip_host)) return true;
-    //
-    //// 1. 检查缓存
-    //{
-    //    std::shared_lock<std::shared_mutex> lock(m_cache_mtx);
-    //    auto it = m_ip_cn_cache.find(ip_host);
-    //    if (it != m_ip_cn_cache.end()) return it->second;
-    //}
+    if (is_private_ip(ip_host)) return true;
+    
+    // 1. 检查缓存
+    {
+        std::shared_lock<std::shared_mutex> lock(m_cache_mtx);
+        auto it = m_ip_cn_cache.find(ip_host);
+        if (it != m_ip_cn_cache.end()) return it->second;
+    }
 
-    //bool result = false;
-    //auto perform_lookup = [&]() {
-    //    // 快速判断：如果是腾讯 IP，直接认为是 CN (直连)
-    //    if (is_tencent_ip(ip_host)) return true;
+    bool result = false;
+    auto perform_lookup = [&]() {
+        // 快速判断：如果是腾讯 IP，直接认为是 CN (直连)
+        if (is_tencent_ip(ip_host)) return true;
 
-    //    // 如果数据库准备好了且有 CN 索引，先查数据库
-    //    if (m_ready && cn_ip_idx_ != 0xFFFF) {
-    //        std::shared_lock<std::shared_mutex> lock(m_mtx);
-    //        // 使用 std::lower_bound 查找第一个 end_ip >= ip_host 的区间
-    //        auto it = std::lower_bound(ip_ranges_.begin(), ip_ranges_.end(), ip_host, 
-    //            [](const GeoIPRange& r, uint32_t val) { 
-    //                return r.end_ip < val; 
-    //            });
+        // 如果数据库准备好了且有 CN 索引，先查数据库
+        if (m_ready && cn_ip_idx_ != 0xFFFF) {
+            std::shared_lock<std::shared_mutex> lock(m_mtx);
+            // 使用 std::lower_bound 查找第一个 end_ip >= ip_host 的区间
+            auto it = std::lower_bound(ip_ranges_.begin(), ip_ranges_.end(), ip_host, 
+                [](const GeoIPRange& r, uint32_t val) { 
+                    return r.end_ip < val; 
+                });
 
-    //        if (it != ip_ranges_.end() && ip_host >= it->start_ip && ip_host <= it->end_ip) {
-    //            return it->code_index == cn_ip_idx_;
-    //        }
-    //    }
+            if (it != ip_ranges_.end() && ip_host >= it->start_ip && ip_host <= it->end_ip) {
+                return it->code_index == cn_ip_idx_;
+            }
+        }
 
-    //    // 数据库未命中或数据库未加载时的兜底逻辑
-    //    return is_common_cn_range(ip_host);
-    //};
+        // 数据库未命中或数据库未加载时的兜底逻辑
+        return is_common_cn_range(ip_host);
+    };
 
-    //result = perform_lookup();
+    result = perform_lookup();
 
-    //// 2. 写入缓存 (限额 10000 条以防内存溢出)
-    //{
-    //    std::unique_lock<std::shared_mutex> lock(m_cache_mtx);
-    //    if (m_ip_cn_cache.size() < 10000) {
-    //        m_ip_cn_cache[ip_host] = result;
-    //    }
-    //}
+    // 2. 写入缓存 (限额 10000 条以防内存溢出)
+    {
+        std::unique_lock<std::shared_mutex> lock(m_cache_mtx);
+        if (m_ip_cn_cache.size() < 10000) {
+            m_ip_cn_cache[ip_host] = result;
+        }
+    }
 
-    //return result;
-
-    return true;
+    return result;
 }
 
 std::string GeoChecker::query_domain(const std::string& domain) {
@@ -400,8 +398,7 @@ uint32_t GeoChecker::get_domain_flags(const std::string& domain) {
 }
 
 bool GeoChecker::is_cn_domain(const std::string& domain) {
-    //return get_domain_flags(domain) & FLAG_CN;
-    return true;
+    return (get_domain_flags(domain) & FLAG_CN) != 0;
 }
 
 bool GeoChecker::is_google_domain(const std::string& domain) {

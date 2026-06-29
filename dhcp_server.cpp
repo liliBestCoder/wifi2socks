@@ -167,6 +167,18 @@ bool DhcpServer::get_mac_by_ip(uint32_t ip, uint8_t* mac) {
     return false;
 }
 
+std::vector<uint32_t> DhcpServer::get_active_clients() {
+    std::lock_guard<std::mutex> lock(mtx_);
+    auto now = std::chrono::steady_clock::now();
+    std::vector<uint32_t> active;
+    for (auto const& [mac, lease] : leases_) {
+        if (lease.expires > now) {
+            active.push_back(lease.ip);
+        }
+    }
+    return active;
+}
+
 uint32_t DhcpServer::find_available_ip(const std::vector<uint8_t>& mac) {
     std::lock_guard<std::mutex> lock(mtx_);
     auto now = std::chrono::steady_clock::now();

@@ -4,6 +4,7 @@
 #include "proxy_tcp.h"
 #include <iostream>
 #include <algorithm>
+#include <sstream>
 
 
 
@@ -17,6 +18,37 @@ struct ThreadLocalIoPool {
 };
 
 static thread_local ThreadLocalIoPool t_io_pool;
+
+static bool socket_is_udp(SOCKET s, bool fallback) {
+    int type = 0;
+    int len = sizeof(type);
+    if (getsockopt(s, SOL_SOCKET, SO_TYPE, (char*)&type, &len) == 0) {
+        return type == SOCK_DGRAM;
+    }
+    return fallback;
+}
+
+static std::string endpoint_string(SOCKET s) {
+    sockaddr_in local_addr = {};
+    sockaddr_in peer_addr = {};
+    int local_len = sizeof(local_addr);
+    int peer_len = sizeof(peer_addr);
+    char local_ip[INET_ADDRSTRLEN] = "unknown";
+    char peer_ip[INET_ADDRSTRLEN] = "unconnected";
+    int local_port = 0;
+    int peer_port = 0;
+    if (getsockname(s, (sockaddr*)&local_addr, &local_len) == 0) {
+        inet_ntop(AF_INET, &local_addr.sin_addr, local_ip, sizeof(local_ip));
+        local_port = ntohs(local_addr.sin_port);
+    }
+    if (getpeername(s, (sockaddr*)&peer_addr, &peer_len) == 0) {
+        inet_ntop(AF_INET, &peer_addr.sin_addr, peer_ip, sizeof(peer_ip));
+        peer_port = ntohs(peer_addr.sin_port);
+    }
+    std::ostringstream os;
+    os << local_ip << ":" << local_port << "->" << peer_ip << ":" << peer_port;
+    return os.str();
+}
 
 IO_CONTEXT* acquire_io_context() {
     IO_CONTEXT* io = nullptr;
@@ -32,10 +64,15 @@ IO_CONTEXT* acquire_io_context() {
     // 必须在锁外重置成员，因为清理 std::function 或 shared_ptr 可能触发析构，
     // 如果析构函数又调用了 remove_socket，会产生递归死锁。
     memset(&io->overlapped, 0, sizeof(OVERLAPPED));
+    io->type = IO_READ;
+    io->sock = INVALID_SOCKET;
     io->task = nullptr;
     io->parent = nullptr;
     io->data_len = 0;
     io->error_code = 0;
+    memset(&io->remote_addr, 0, sizeof(io->remote_addr));
+    io->remote_addr_len = 0;
+    io->total_bytes_submitted = 0;
     io->write_buffers.clear();
     io->wsa_bufs.clear();
     return io;
@@ -47,6 +84,9 @@ void release_io_context(IO_CONTEXT* io) {
     // 在入池前清理成员（锁外执行）
     io->task = nullptr;
     io->parent = nullptr;
+    io->sock = INVALID_SOCKET;
+    memset(&io->remote_addr, 0, sizeof(io->remote_addr));
+    io->remote_addr_len = 0;
     io->write_buffers.clear();
     io->wsa_bufs.clear();
 
@@ -145,15 +185,19 @@ void Worker::loop() {
         }
 
         if (io->type == IO_REMOVE) {
-            std::shared_ptr<SocketContext> ctx = WorkerPool::instance().find_context(io->sock);
+            std::shared_ptr<SocketContext> ctx = io->parent ? io->parent : WorkerPool::instance().find_context(io->sock);
             if (ctx) {
                 ctx->closing = true;
                 ctx->on_remove_done = io->task;
                 WorkerPool::instance().unregister_context(io->sock);
-                closesocket(io->sock);
+                closesocket(ctx->sock);
 
-                if (ctx.use_count() == 1) {
-                    if (ctx->on_remove_done) ctx->on_remove_done();
+                if (ctx.use_count() <= 2) {
+                    if (ctx->on_remove_done) {
+                        auto cb = std::move(ctx->on_remove_done);
+                        ctx->on_remove_done = nullptr;
+                        cb();
+                    }
                 }
             }
             else if (io->task) {
@@ -164,14 +208,18 @@ void Worker::loop() {
         }
 
         if (io->type == IO_DETACH) {
-            std::shared_ptr<SocketContext> ctx = WorkerPool::instance().find_context(io->sock);
+            std::shared_ptr<SocketContext> ctx = io->parent ? io->parent : WorkerPool::instance().find_context(io->sock);
             if (ctx) {
                 ctx->closing = true;
                 ctx->on_remove_done = io->task;
                 WorkerPool::instance().unregister_context(io->sock);
                 // Do NOT closesocket here.
-                if (ctx.use_count() == 1) {
-                    if (ctx->on_remove_done) ctx->on_remove_done();
+                if (ctx.use_count() <= 2) {
+                    if (ctx->on_remove_done) {
+                        auto cb = std::move(ctx->on_remove_done);
+                        ctx->on_remove_done = nullptr;
+                        cb();
+                    }
                 }
             }
             else if (io->task) {
@@ -232,7 +280,11 @@ void Worker::loop() {
         release_io_context(io);
 
         if (ctx->closing && ctx.use_count() == 1) {
-            if (ctx->on_remove_done) ctx->on_remove_done();
+            if (ctx->on_remove_done) {
+                auto cb = std::move(ctx->on_remove_done);
+                ctx->on_remove_done = nullptr;
+                cb();
+            }
         }
     }
 }
@@ -259,17 +311,28 @@ void WorkerPool::init(int count) {
     }
 }
 
-void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp, std::function<void()> on_init, int concurrent_reads) {
+void WorkerPool::add_socket(SOCKET s, std::function<void(char*, int, sockaddr_in*)> on_read, std::function<void(int, const std::vector<std::shared_ptr<std::vector<char>>>&)> on_write, bool is_udp, std::function<void()> on_init, int concurrent_reads, const std::string& origin) {
     std::shared_ptr<SocketContext> ctx = find_context(s);
+    if (ctx && ctx->closing) {
+        unregister_context(s);
+        ctx.reset();
+    }
     if (!ctx) {
         ctx = std::make_shared<SocketContext>();
         ctx->sock = s;
         register_context(s, ctx);
         CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx.get(), 0);
     }
+    ctx->debug_name = (origin.empty() ? "add_socket" : origin) + std::string(" ") + endpoint_string(s);
     ctx->on_read = on_read;
     ctx->on_write = on_write;
-    ctx->is_udp = is_udp;
+    ctx->is_udp = socket_is_udp(s, is_udp);
+    if (ctx->is_udp != is_udp) {
+        LOG_WARN("[WorkerPool] corrected socket type in add_socket: requested_udp=%d actual_udp=%d sock=%llu",
+            is_udp ? 1 : 0,
+            ctx->is_udp ? 1 : 0,
+            (unsigned long long)s);
+    }
     ctx->concurrent_reads = concurrent_reads;
 
     if (on_init) {
@@ -288,6 +351,12 @@ void WorkerPool::remove_socket(SOCKET s, std::function<void()> on_done) {
     io->type = IO_REMOVE;
     io->sock = s;
     io->task = on_done;
+    auto ctx = find_context(s);
+    if (ctx) {
+        ctx->closing = true;
+        unregister_context(s);
+        io->parent = ctx;
+    }
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io);
 }
 
@@ -296,11 +365,21 @@ void WorkerPool::detach_socket(SOCKET s, std::function<void()> on_done) {
     io->type = IO_DETACH;
     io->sock = s;
     io->task = on_done;
+    auto ctx = find_context(s);
+    if (ctx) {
+        ctx->closing = true;
+        unregister_context(s);
+        io->parent = ctx;
+    }
     PostQueuedCompletionStatus(m_shared_iocp, 0, 0, (LPOVERLAPPED)io);
 }
 
 void WorkerPool::accept_async(SOCKET listen_sock, std::function<void(SOCKET, sockaddr_in&)> on_accepted) {
     std::shared_ptr<SocketContext> ctx = find_context(listen_sock);
+    if (ctx && ctx->closing) {
+        unregister_context(listen_sock);
+        ctx.reset();
+    }
     if (!ctx) {
         ctx = std::make_shared<SocketContext>();
         ctx->sock = listen_sock;
@@ -385,14 +464,25 @@ void WorkerPool::connect_async(SOCKET s, sockaddr_in addr, std::function<void()>
     bind(s, (sockaddr*)&bindAddr, sizeof(bindAddr));
 
     std::shared_ptr<SocketContext> ctx = find_context(s);
+    if (ctx && ctx->closing) {
+        unregister_context(s);
+        ctx.reset();
+    }
     if (!ctx) {
         ctx = std::make_shared<SocketContext>();
         ctx->sock = s;
         register_context(s, ctx);
         CreateIoCompletionPort((HANDLE)s, m_shared_iocp, (ULONG_PTR)ctx.get(), 0);
     }
+    ctx->debug_name = std::string("connect_async ") + endpoint_string(s);
     ctx->on_read = on_read;
     ctx->on_write = on_write;
+    ctx->is_udp = socket_is_udp(s, false);
+    if (ctx->is_udp) {
+        LOG_WARN("[WorkerPool] connect_async received UDP socket unexpectedly: sock=%llu",
+            (unsigned long long)s);
+    }
+    ctx->concurrent_reads = CONCURRENT_READ_COUNT;
 
     if (on_init) {
         on_init();
@@ -429,6 +519,7 @@ bool WorkerPool::sendto_async(SOCKET s, const uint8_t* data, size_t len, const s
     if (len == 0) return true;
     auto ctx = find_context(s);
     if (ctx && !ctx->closing) {
+        ctx->is_udp = socket_is_udp(ctx->sock, ctx->is_udp);
         size_t remaining = len;
         size_t offset = 0;
 
@@ -472,6 +563,7 @@ bool WorkerPool::send_async(SOCKET s, const uint8_t* data, size_t len) {
     if (len == 0) return true;
     auto ctx = find_context(s);
     if (ctx && !ctx->closing) {
+        ctx->is_udp = socket_is_udp(ctx->sock, ctx->is_udp);
         post_write(ctx, data, len);
         return true;
     }
@@ -487,6 +579,7 @@ bool WorkerPool::send_async(SOCKET s, std::shared_ptr<std::vector<char>> buffer)
     if (!buffer || buffer->empty()) return true;
     auto ctx = find_context(s);
     if (ctx && !ctx->closing) {
+        ctx->is_udp = socket_is_udp(ctx->sock, ctx->is_udp);
         std::vector<std::shared_ptr<std::vector<char>>> buffers;
         buffers.push_back(buffer);
         post_write(ctx, std::move(buffers));
@@ -499,6 +592,7 @@ bool WorkerPool::send_batch_async(SOCKET s, std::vector<std::shared_ptr<std::vec
     if (buffers.empty()) return true;
     auto ctx = find_context(s);
     if (ctx && !ctx->closing) {
+        ctx->is_udp = socket_is_udp(ctx->sock, ctx->is_udp);
         post_write(ctx, std::move(buffers));
         return true;
     }
@@ -575,6 +669,11 @@ void WorkerPool::post_read(const std::shared_ptr<SocketContext>& ctx) {
     }
 
     if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+        int err = WSAGetLastError();
+        LOG_ERROR("[WorkerPool] %s post_read failed: err=%d sock=%llu",
+            ctx->is_udp ? "UDP" : "TCP",
+            err,
+            (unsigned long long)ctx->sock);
         release_io_context(io);
     }
 }
@@ -635,7 +734,27 @@ void WorkerPool::post_write(const std::shared_ptr<SocketContext>& ctx, const uin
         int ret = WSASend(ctx->sock, io->wsa_bufs.data(), 1, &bytes, 0, &io->overlapped, NULL);
 
         if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
-            LOG_ERROR("[WorkerPool] WSASend chunk failed: %d", WSAGetLastError());
+            int err = WSAGetLastError();
+            sockaddr_in local_addr = {};
+            sockaddr_in peer_addr = {};
+            int local_len = sizeof(local_addr);
+            int peer_len = sizeof(peer_addr);
+            char local_ip[INET_ADDRSTRLEN] = "unknown";
+            char peer_ip[INET_ADDRSTRLEN] = "unknown";
+            int local_port = 0;
+            int peer_port = 0;
+            bool actual_udp = socket_is_udp(ctx->sock, ctx->is_udp);
+            if (getsockname(ctx->sock, (sockaddr*)&local_addr, &local_len) == 0) {
+                inet_ntop(AF_INET, &local_addr.sin_addr, local_ip, sizeof(local_ip));
+                local_port = ntohs(local_addr.sin_port);
+            }
+            if (getpeername(ctx->sock, (sockaddr*)&peer_addr, &peer_len) == 0) {
+                inet_ntop(AF_INET, &peer_addr.sin_addr, peer_ip, sizeof(peer_ip));
+                peer_port = ntohs(peer_addr.sin_port);
+            }
+            LOG_ERROR("[WorkerPool] WSASend chunk failed: err=%d sock=%llu udp=%d actual_udp=%d local=%s:%d peer=%s:%d len=%zu origin=%s",
+                err, (unsigned long long)ctx->sock, ctx->is_udp ? 1 : 0, actual_udp ? 1 : 0, local_ip, local_port, peer_ip, peer_port, chunk,
+                ctx->debug_name.c_str());
             if (ctx->on_write) ctx->on_write(-1, io->write_buffers);
             release_io_context(io);
             break;

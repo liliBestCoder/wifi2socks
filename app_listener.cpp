@@ -138,11 +138,33 @@ void AppListener::udp_listener_thread() {
 
     WorkerPool::instance().add_socket(listen_socket, [this, listen_socket](char* data, int len, sockaddr_in* from) {
         if (len > 0 && from) {
-            uint64_t key = NatManager::make_key(from->sin_addr.s_addr, from->sin_port);
-            auto dest = NatManager::instance().get_mapping(key);
-
-            if (dest) {
-                UdpProxy::handle_client_data(listen_socket, data, len, from, &(*dest));
+            // UDP packets are redirected with a NatManager-assigned virtual source port.
+            // Resolve strictly through the UDP vport table to avoid collisions with TCP client ports.
+            uint16_t vport = ntohs(from->sin_port);
+            auto udp_key = NatManager::instance().get_udp_key_by_virtual_port(vport);
+            if (udp_key) {
+                auto dest = NatManager::instance().get_udp_mapping(*udp_key);
+                if (dest) {
+                    uint32_t upstream_nbo = 0;
+                    inet_pton(AF_INET, g_config.upstream_ip.c_str(), &upstream_nbo);
+                    if (ntohs(dest->port) == g_config.upstream_port ||
+                        dest->ip == upstream_nbo ||
+                        dest->ip == htonl(INADDR_LOOPBACK)) {
+                        LOG_DEBUG("[AppListener] UDP mapping trace vport=%u from=%s:%u dest=%u.%u.%u.%u:%u dest_raw=%08X:%04X upstream_match=%d loopback=%d original_client=%u.%u.%u.%u",
+                            vport,
+                            inet_ntoa(from->sin_addr),
+                            ntohs(from->sin_port),
+                            dest->ip & 0xFF, (dest->ip >> 8) & 0xFF,
+                            (dest->ip >> 16) & 0xFF, (dest->ip >> 24) & 0xFF,
+                            ntohs(dest->port),
+                            ntohl(dest->ip), ntohs(dest->port),
+                            (dest->ip == upstream_nbo && ntohs(dest->port) == g_config.upstream_port) ? 1 : 0,
+                            dest->ip == htonl(INADDR_LOOPBACK) ? 1 : 0,
+                            dest->original_client_ip & 0xFF, (dest->original_client_ip >> 8) & 0xFF,
+                            (dest->original_client_ip >> 16) & 0xFF, (dest->original_client_ip >> 24) & 0xFF);
+                    }
+                    UdpProxy::handle_client_data(listen_socket, data, len, from, &(*dest));
+                }
             }
         }
         
@@ -150,7 +172,7 @@ void AppListener::udp_listener_thread() {
         if (m_running) {
             WorkerPool::instance().read_async(listen_socket);
         }
-    }, nullptr, true, nullptr, 16); // 16 concurrent reads for the listener
+    }, nullptr, true, nullptr, 16, "app_listener_udp"); // 16 concurrent reads for the listener
 
     while (m_running) {
         Sleep(100);

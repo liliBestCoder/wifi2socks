@@ -57,6 +57,8 @@ void WiFiAPManager::CheckKeepAlive() {
         if (_connectedDevices.empty()) return;
 
         for (auto& pair : _connectedDevices) {
+            // Skip null entries (registered via fallback when FromIdAsync failed)
+            if (!pair.second) continue;
             ComPtr<EndpointPairCollection> endpointPairs;
             HRESULT hr = pair.second->GetConnectionEndpointPairs(endpointPairs.GetAddressOf());
             if (FAILED(hr)) {
@@ -137,6 +139,7 @@ void WiFiAPManager::Start() {
 }
 
 void WiFiAPManager::StartListener() {
+    LOG_INFO("[WIFI] StartListener called, registering ConnectionRequested handler");
     // Fix: Remove previous event handler if listener exists to prevent duplicate callbacks
     if (_connectionListener) {
         _connectionListener->remove_ConnectionRequested(_connectionRequestedToken);
@@ -144,38 +147,75 @@ void WiFiAPManager::StartListener() {
     }
 
     Windows::Foundation::ActivateInstance(HStringReference(RuntimeClass_Windows_Devices_WiFiDirect_WiFiDirectConnectionListener).Get(), &_connectionListener);
-    /*_connectionListener->add_ConnectionRequested(Callback<ConnectionRequestedHandler>([this](IWiFiDirectConnectionListener* sender, IWiFiDirectConnectionRequestedEventArgs* args) -> HRESULT {
+    _connectionListener->add_ConnectionRequested(Callback<ConnectionRequestedHandler>([this](IWiFiDirectConnectionListener* sender, IWiFiDirectConnectionRequestedEventArgs* args) -> HRESULT {
         ComPtr<IWiFiDirectConnectionRequest> request;
         ComPtr<IDeviceInformation> deviceInfo;
         HString deviceId;
         ComPtr<IWiFiDirectDeviceStatics> wfdStatics;
 
-        args->GetConnectionRequest(request.GetAddressOf());
-        request->get_DeviceInformation(deviceInfo.GetAddressOf());
-        GetActivationFactory(HStringReference(RuntimeClass_Windows_Devices_WiFiDirect_WiFiDirectDevice).Get(), &wfdStatics);
-        deviceInfo->get_Id(deviceId.GetAddressOf());
+        HRESULT hr = args->GetConnectionRequest(request.GetAddressOf());
+        if (FAILED(hr) || !request) { return S_OK; }
+        
+        hr = request->get_DeviceInformation(deviceInfo.GetAddressOf());
+        if (FAILED(hr) || !deviceInfo) { return S_OK; }
+
+        hr = GetActivationFactory(HStringReference(RuntimeClass_Windows_Devices_WiFiDirect_WiFiDirectDevice).Get(), &wfdStatics);
+        if (FAILED(hr) || !wfdStatics) { return S_OK; }
+
+        hr = deviceInfo->get_Id(deviceId.GetAddressOf());
+        if (FAILED(hr)) { return S_OK; }
+
+        PCWSTR rawDevId = deviceId.GetRawBuffer(nullptr);
+        std::wstring devIdStr = rawDevId ? rawDevId : L"";
+        LOG_INFO("[WIFI] Connection request device id: %ls", devIdStr.c_str());
 
         ComPtr<IAsyncOperation<WiFiDirectDevice*>> asyncAction;
-        wfdStatics->FromIdAsync(deviceId.Get(), &asyncAction);
-        asyncAction->put_Completed(Callback<FromIdAsyncHandler>([this](IAsyncOperation<WiFiDirectDevice*>* pHandler, AsyncStatus status) -> HRESULT {
-            if (status == AsyncStatus::Completed) {
-                ComPtr<IWiFiDirectDevice> wfdDevice;
-                pHandler->GetResults(wfdDevice.GetAddressOf());
-                HString dId;
-                wfdDevice->get_DeviceId(dId.GetAddressOf());
-                
-                {
-                    std::lock_guard<std::mutex> lock(_devicesMutex);
-                    _connectedDevices[dId.GetRawBuffer(nullptr)] = wfdDevice;
+        hr = wfdStatics->FromIdAsync(deviceId.Get(), &asyncAction);
+        if (SUCCEEDED(hr) && asyncAction) {
+            asyncAction->put_Completed(Callback<FromIdAsyncHandler>([this, devIdStr](IAsyncOperation<WiFiDirectDevice*>* pHandler, AsyncStatus status) -> HRESULT {
+                if (status == AsyncStatus::Completed) {
+                    ComPtr<IWiFiDirectDevice> wfdDevice;
+                    if (SUCCEEDED(pHandler->GetResults(wfdDevice.GetAddressOf())) && wfdDevice) {
+                        HString dId;
+                        wfdDevice->get_DeviceId(dId.GetAddressOf());
+                        {
+                            std::lock_guard<std::mutex> lock(_devicesMutex);
+                            _connectedDevices[dId.GetRawBuffer(nullptr)] = wfdDevice;
+                        }
+                        LOG_INFO("[WIFI] Device registered via FromIdAsync");
+                        if (_listener) _listener->OnDeviceConnected(L"Connected Device");
+                        return S_OK;
+                    }
                 }
-
-                if (_listener) _listener->OnDeviceConnected(L"Connected Device");
-               
-            }
-            return S_OK;
+                // Even if FromIdAsync fails, the device is already connected via P2P GO
+                // Register it anyway to prevent Windows 2-minute timeout
+                LOG_INFO("[WIFI] FromIdAsync status=%d, registering device anyway", (int)status);
+                if (!devIdStr.empty()) {
+                    std::lock_guard<std::mutex> lock(_devicesMutex);
+                    if (_connectedDevices.find(devIdStr) == _connectedDevices.end()) {
+                        _connectedDevices[devIdStr] = nullptr;
+                        LOG_INFO("[WIFI] Device registered (fallback) to prevent timeout");
+                        if (_listener) _listener->OnDeviceConnected(L"Connected Device (fallback)");
+                    }
+                }
+                return S_OK;
             }).Get());
+        } else {
+            // FromIdAsync failed to start - device is still connected via P2P GO
+            LOG_INFO("[WIFI] FromIdAsync failed: 0x%08X, registering device (fallback)", hr);
+            std::wstring devIdStr2 = deviceId.GetRawBuffer(nullptr) ? deviceId.GetRawBuffer(nullptr) : L"";
+            if (!devIdStr2.empty()) {
+                std::lock_guard<std::mutex> lock(_devicesMutex);
+                if (_connectedDevices.find(devIdStr2) == _connectedDevices.end()) {
+                    _connectedDevices[devIdStr2] = nullptr;
+                    LOG_INFO("[WIFI] Device registered (fallback) to prevent timeout");
+                    if (_listener) _listener->OnDeviceConnected(L"Connected Device (fallback)");
+                }
+            }
+        }
+
         return S_OK;
-        }).Get(), &_connectionRequestedToken);*/
+        }).Get(), &_connectionRequestedToken);
 }
 
 void WiFiAPManager::Reset() {

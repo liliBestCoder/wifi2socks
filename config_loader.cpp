@@ -29,6 +29,17 @@ static std::vector<std::string> split(const std::string& str, char delimiter) {
     return tokens;
 }
 
+static std::vector<uint16_t> split_ports(const std::string& str, char delimiter) {
+    std::vector<uint16_t> ports;
+    for (const auto& token : split(str, delimiter)) {
+        int port = std::stoi(token);
+        if (port > 0 && port <= 65535) {
+            ports.push_back((uint16_t)port);
+        }
+    }
+    return ports;
+}
+
 bool load_config(const char* filepath) {
     std::ifstream file(filepath);
     if (!file.is_open()) {
@@ -58,6 +69,11 @@ bool load_config(const char* filepath) {
             else if (key == "wifi_ssid") g_config.wifi_ssid = value;
             else if (key == "wifi_password") g_config.wifi_password = value;
             else if (key == "log_level") g_config.log_level = value;
+            else if (key == "ap_mode") g_config.ap_mode = value;
+            else if (key == "wired_ap_gateway_ip") g_config.wired_ap_gateway_ip = value;
+            else if (key == "wired_adapter_hint") g_config.wired_adapter_hint = value;
+            else if (key == "server_first_eager_ports") g_config.server_first_eager_ports = split_ports(value, ',');
+            else if (key == "ssh_eager_ports") g_config.server_first_eager_ports = split_ports(value, ',');
             
             // Rules
             else if (key == "direct_ip_list") g_config.direct_ip_list = split(value, ',');
@@ -85,6 +101,17 @@ static std::string join(const std::vector<std::string>& vec, char delimiter) {
     return ss.str();
 }
 
+static std::string join_ports(const std::vector<uint16_t>& vec, char delimiter) {
+    std::stringstream ss;
+    for (size_t i = 0; i < vec.size(); ++i) {
+        ss << vec[i];
+        if (i != vec.size() - 1) {
+            ss << delimiter << " ";
+        }
+    }
+    return ss.str();
+}
+
 bool save_config(const char* filepath) {
     std::ofstream file(filepath);
     if (!file.is_open()) return false;
@@ -101,6 +128,10 @@ bool save_config(const char* filepath) {
     file << "wifi_ssid = " << g_config.wifi_ssid << "\n";
     file << "wifi_password = " << g_config.wifi_password << "\n";
     file << "log_level = " << g_config.log_level << "\n\n";
+    file << "ap_mode = " << g_config.ap_mode << "\n";
+    file << "wired_ap_gateway_ip = " << g_config.wired_ap_gateway_ip << "\n";
+    file << "wired_adapter_hint = " << g_config.wired_adapter_hint << "\n";
+    file << "server_first_eager_ports = " << join_ports(g_config.server_first_eager_ports, ',') << "\n\n";
 
     file << "[Rules]\n";
     file << "direct_ip_list = " << join(g_config.direct_ip_list, ',') << "\n";

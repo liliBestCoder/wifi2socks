@@ -9,14 +9,20 @@
 #include <algorithm>
 
 
-DnsOverTcpProxy::DnsOverTcpProxy(const std::vector<uint8_t>& query_payload, ResponseCallback callback)
+DnsOverTcpProxy::DnsOverTcpProxy(
+    const std::vector<uint8_t>& query_payload,
+    ResponseCallback callback,
+    const std::string& dns_server,
+    bool via_proxy)
     : m_state(CONNECTING),
       m_socket(INVALID_SOCKET),
       m_query_payload(query_payload),
       m_callback(callback),
       m_expected_len(0),
       m_len_received(false),
-      m_should_reuse(false)
+      m_should_reuse(false),
+      m_dns_server(dns_server.empty() ? g_config.proxy_dns_server : dns_server),
+      m_via_proxy(via_proxy)
 {
 }
 
@@ -27,7 +33,7 @@ DnsOverTcpProxy::~DnsOverTcpProxy() {
 }
 
 void DnsOverTcpProxy::start() {
-    std::string target = g_config.proxy_dns_server + ":53";
+    std::string target = std::string(m_via_proxy ? "proxy:" : "direct:") + m_dns_server + ":53";
     m_socket = ConnectionPool::instance().acquire(target);
 
     if (m_socket != INVALID_SOCKET) {
@@ -38,7 +44,11 @@ void DnsOverTcpProxy::start() {
         WorkerPool::instance().add_socket(
             m_socket,
             [self](char* buf, int len, sockaddr_in*) { self->on_read(buf, len); },
-            nullptr
+            nullptr,
+            false,
+            nullptr,
+            CONCURRENT_READ_COUNT,
+            "dns_tcp_reuse"
         );
 
         send_dns_query();
@@ -60,8 +70,13 @@ void DnsOverTcpProxy::start() {
     
     sockaddr_in proxy_addr;
     proxy_addr.sin_family = AF_INET;
-    inet_pton(AF_INET, g_config.upstream_ip.c_str(), &proxy_addr.sin_addr);
-    proxy_addr.sin_port = htons(g_config.upstream_port);
+    if (m_via_proxy) {
+        inet_pton(AF_INET, g_config.upstream_ip.c_str(), &proxy_addr.sin_addr);
+        proxy_addr.sin_port = htons(g_config.upstream_port);
+    } else {
+        inet_pton(AF_INET, m_dns_server.c_str(), &proxy_addr.sin_addr);
+        proxy_addr.sin_port = htons(53);
+    }
 
     auto self = shared_from_this();
     WorkerPool::instance().connect_async(
@@ -81,12 +96,16 @@ void DnsOverTcpProxy::on_connect() {
         on_close();
         return;
     }
-    send_http_connect();
+    if (m_via_proxy) {
+        send_http_connect();
+    } else {
+        send_dns_query();
+    }
 }
 
 void DnsOverTcpProxy::send_http_connect() {
     m_state = HTTP_CONNECT_SENT;
-    std::string target = g_config.proxy_dns_server + ":53";
+    std::string target = m_dns_server + ":53";
     std::string req = "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n\r\n";
     WorkerPool::instance().send_async(m_socket, (char*)req.data(), (int)req.length());
 }
@@ -177,7 +196,7 @@ void DnsOverTcpProxy::on_close() {
     m_state = CLOSED;
     if (m_socket != INVALID_SOCKET) {
         if (m_should_reuse) {
-            std::string target = g_config.proxy_dns_server + ":53";
+            std::string target = std::string(m_via_proxy ? "proxy:" : "direct:") + m_dns_server + ":53";
             WorkerPool::instance().detach_socket(m_socket);
             ConnectionPool::instance().release(target, m_socket);
         } else {

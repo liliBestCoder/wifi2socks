@@ -7,6 +7,7 @@
 #include <atomic>
 #include <deque>
 #include <mutex>
+#include <unordered_set>
 
 #include "worker.h"
 #include "nat_manager.h"
@@ -76,10 +77,38 @@ private:
     SOCKET m_client_socket;
     SOCKET m_remote_socket;
     OriginalDestination m_original_dest;
+    uint64_t m_nat_key{ 0 };
+    bool m_has_nat_key{ false };
 
     std::vector<uint8_t> m_initial_buffer; // Buffer for data received before ESTABLISHED (still needed for handshake parsing)
     std::string m_detected_domain;
+    std::string m_initial_http_first_line;
+    std::string m_dns_hint_domain;
+    std::string m_probe_class;
+    std::string m_probe_proto;
     bool m_is_direct;
+    bool m_is_netcheck_flow{ false };
+    bool m_is_youtube_flow{ false };
+    bool m_is_http_probe_miss{ false };
+    uint64_t m_session_id{ 0 };
+    uint64_t m_start_time{ 0 };
+    uint64_t m_connect_start_time{ 0 };
+    uint64_t m_remote_connected_time{ 0 };
+    uint64_t m_proxy_connect_ok_time{ 0 };
+    uint64_t m_first_client_byte_time{ 0 };
+    uint64_t m_first_remote_byte_time{ 0 };
+    uint64_t m_first_remote_payload_time{ 0 };
+    uint64_t m_last_client_payload_time{ 0 };
+    uint64_t m_last_remote_payload_time{ 0 };
+    uint64_t m_last_probe_stat_time{ 0 };
+    uint64_t m_last_probe_c2r_bytes{ 0 };
+    uint64_t m_last_probe_r2c_bytes{ 0 };
+    uint64_t m_last_youtube_stat_time{ 0 };
+    uint64_t m_last_youtube_c2r_bytes{ 0 };
+    uint64_t m_last_youtube_r2c_bytes{ 0 };
+    std::atomic<uint64_t> m_client_to_remote_bytes{ 0 };
+    std::atomic<uint64_t> m_remote_to_client_bytes{ 0 };
+    std::string m_close_reason;
 
     // Handlers
     void handle_client_read_complete(IoBuffer* buffer);
@@ -89,6 +118,8 @@ private:
 
     void process_write_queue(SOCKET socket);
     void post_reads(SOCKET socket);
+    void set_close_reason_unlocked(const std::string& reason);
+    void log_probe_unlocked(const char* stage, int error = 0, const char* detail = nullptr);
 
     // Write Queues (for Backpressure)
     std::deque<IoBuffer*> m_client_write_queue;
@@ -108,12 +139,11 @@ private:
     size_t m_client_write_queue_size{ 0 };
     size_t m_remote_write_queue_size{ 0 };
 
-    // Flow control watermarks (Optimized for high speed)
-    static const size_t HIGH_WATER_MARK = 16 * 1024 * 1024; // 32MB - 提高水线以支持更高速度
-    static const size_t LOW_WATER_MARK = 4 * 1024 * 1024;  // 8MB
-    static const int MAX_PENDING_READS = 16; // 增加预读数量
-    static const int MAX_PENDING_WRITES = 16; // 增加并发写入数，提高吞吐量
-    static const int MAX_GATHER_BATCH = 32;  // 增加单次 WSASend 的批处理数量
+    static size_t high_water_mark();
+    static size_t low_water_mark();
+    static const int MAX_PENDING_READS = 4;
+    static const int MAX_PENDING_WRITES = 4;
+    static const int MAX_GATHER_BATCH = 8;
 
     // Flow control flags
     bool m_remote_read_paused{ false };
@@ -127,8 +157,9 @@ private:
 
     // Activity tracking to prevent zombie sessions
     std::atomic<uint64_t> m_last_access_time{ 0 };
+    std::atomic<uint64_t> m_half_close_start_time{ 0 };
     static const uint64_t IDLE_TIMEOUT_MS = 600000; // 10 minutes
-    static const uint64_t FIN_WAIT_TIMEOUT_MS = 30000; // 30 seconds wait for the other side's FIN
+    static const uint64_t FIN_WAIT_TIMEOUT_MS = 10000; // Short grace period after either side starts closing
 
     // Handshake special handling
     std::vector<char> m_proxy_response_buffer;
@@ -136,11 +167,31 @@ private:
     // Static registry for periodic cleanup
     static std::mutex g_sessions_mtx;
     static std::vector<std::weak_ptr<ProxyTCP>> g_sessions;
+    static std::atomic<size_t> g_client_queue_bytes;
+    static std::atomic<size_t> g_remote_queue_bytes;
+    static std::atomic<int> g_pressure_level;
+    static std::atomic<uint64_t> g_pressure_reject_tcp;
 public:
     static void check_all_timeouts();
+    static void log_global_stats();
+    static int pressure_level();
+    static bool pressure_high();
+    static bool pressure_critical();
 private:
+
+    void add_client_queue_bytes(size_t bytes);
+    void sub_client_queue_bytes(size_t bytes);
+    void add_remote_queue_bytes(size_t bytes);
+    void sub_remote_queue_bytes(size_t bytes);
+    void reset_queue_pressure_bytes();
 
     // Cleanup
     void free_buffer(IoBuffer* buffer);
+    bool detach_buffer(IoBuffer* buffer);
+    bool detach_buffer_if_releasable(IoBuffer* buffer);
+    void recycle_buffer(IoBuffer* buffer);
     IoBuffer* alloc_buffer(size_t size = 8192);
+
+    std::mutex m_buffer_mutex;
+    std::unordered_set<IoBuffer*> m_live_buffers;
 };

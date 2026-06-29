@@ -33,6 +33,7 @@ private:
     HRESULT _hr;
 };
 
+
 // Listener interface
 class IWiFiAPListener
 {

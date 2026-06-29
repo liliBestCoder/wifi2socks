@@ -5,6 +5,12 @@
 
 const std::chrono::minutes IDLE_TIMEOUT(5);
 
+static bool is_stream_socket(SOCKET s) {
+    int type = 0;
+    int len = sizeof(type);
+    return getsockopt(s, SOL_SOCKET, SO_TYPE, (char*)&type, &len) == 0 && type == SOCK_STREAM;
+}
+
 ConnectionPool& ConnectionPool::instance() {
     static ConnectionPool pool;
     return pool;
@@ -42,6 +48,12 @@ SOCKET ConnectionPool::acquire(const std::string& destination) {
         while (!socket_list.empty()) {
             SocketEntry entry = socket_list.front();
             socket_list.pop_front();
+
+            if (!is_stream_socket(entry.first)) {
+                LOG_WARN("[ConnPool] Dropping non-TCP socket from pool for %s.", destination.c_str());
+                closesocket(entry.first);
+                continue;
+            }
             
             // Check if the connection is still valid using a non-blocking read
             char buf;
@@ -69,6 +81,11 @@ SOCKET ConnectionPool::acquire(const std::string& destination) {
 
 void ConnectionPool::release(const std::string& destination, SOCKET socket) {
     if (socket == INVALID_SOCKET) {
+        return;
+    }
+    if (!is_stream_socket(socket)) {
+        LOG_WARN("[ConnPool] Refusing to pool non-TCP socket for %s.", destination.c_str());
+        closesocket(socket);
         return;
     }
     std::lock_guard<std::mutex> lock(m_mutex);
