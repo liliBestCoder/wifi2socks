@@ -263,7 +263,6 @@ wifi2socks 支持两种网关模式：
 ## 🔗 相关项目与生态
 
 - 🌟 **[Ghost Proxifier Pro](https://github.com/liliBestCoder/ghost-proxifier-pro)**：Windows 原生进程级透明代理工具，完整支持 TCP/UDP 双协议转发。免驱动/虚拟网卡、不改路由表，支持拖拽程序及子进程全自动追踪接管。
-- 📊 **[Ghost Proxifier Monitor](https://github.com/liliBestCoder/ghost-proxifier-monitor)**：Ghost Proxifier Pro 客户端配套的实时数据监控大屏与活跃分析后台。
 
 ---
 
