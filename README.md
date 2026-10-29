@@ -1,5 +1,9 @@
 # wifi2socks
 
+[![License: GPL v3 with WinPkFilter Exception](https://img.shields.io/badge/License-GPLv3%20with%20Linking%20Exception-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20x64-brightgreen.svg)]()
+[![C++](https://img.shields.io/badge/Standard-C%2B%2B17-blue.svg)]()
+
 > **Windows 硬件级硬核软路由与透明代理网关**  
 > 基于 C++ 与 Windows NDIS Filter 驱动（WinPkFilter）从零构建，支持全透明 TCP/UDP 流量劫持、SOCKS5 转发、GeoIP/GeoSite 智能分流与自带 WiFi 热点/有线网卡网关。
 
@@ -251,4 +255,7 @@ wifi2socks 支持两种网关模式：
 
 ## 📄 开源许可证
 
-本项目源码基于开源协议分发，详情请参阅代码库相应许可声明。
+本项目核心源码基于 **[GNU General Public License v3.0 (GPL-3.0)](LICENSE)** 协议开源，并附加针对 **WinPkFilter (NT KERNEL)** 驱动库的 **Linking Exception**（链接豁免条款）。
+
+- **代码自由与防商业套壳**：基于 GPLv3，任何基于本项目修改、二次分发或集成的衍生程序，必须以同等开源许可证公开其源码；
+- **驱动库链接豁免**：根据 GPLv3 第 7 条授权，允许本项目与 WinPkFilter（`ndisapi.h`, `ndisapidll.dll`, `ndisapilib.lib` 等 NT KERNEL 专有 SDK 库）链接并分发二进制程序。
