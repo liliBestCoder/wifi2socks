@@ -3,12 +3,25 @@
 [![License: GPL v3 with WinPkFilter Exception](https://img.shields.io/badge/License-GPLv3%20with%20Linking%20Exception-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-brightgreen.svg)]()
 [![C++](https://img.shields.io/badge/Standard-C%2B%2B17-blue.svg)]()
-[![Related: ghost-proxifier-pro](https://img.shields.io/badge/Related%20Project-ghost--proxifier--pro-orange.svg)](https://github.com/liliBestCoder/ghost-proxifier-pro)
+[![Release](https://img.shields.io/github/v/release/liliBestCoder/wifi2socks?color=orange)](https://github.com/liliBestCoder/wifi2socks/releases)
+[![Sister Project: Ghost Proxifier Pro](https://img.shields.io/badge/%F0%9F%9A%80%20%E5%BC%BA%E5%8A%9B%E6%8E%A8%E8%8D%90-Ghost%20Proxifier%20Pro-ff4081?style=for-the-badge&logo=windows)](https://github.com/liliBestCoder/ghost-proxifier-pro)
 
 > **Windows 硬件级硬核软路由与透明代理网关**  
 > 基于 C++ 与 Windows NDIS Filter 驱动（WinPkFilter）从零构建，支持全透明 TCP/UDP 流量劫持、HTTP 代理转发（HTTP CONNECT 隧道）、GeoIP/GeoSite 智能分流与自带 WiFi 热点/有线网卡网关。
+
+> [!TIP]
+> ### 🚀 姊妹项目引流推荐：[Ghost Proxifier Pro](https://github.com/liliBestCoder/ghost-proxifier-pro) —— Windows 高性能进程级透明代理引擎
 >
-> 💡 **姊妹项目推荐**：如果你需要针对 Windows 本机进程的精细化透明代理与规则分流客户端，欢迎体验 [**ghost-proxifier-pro**](https://github.com/liliBestCoder/ghost-proxifier-pro)！
+> 如果你正在寻找针对 **Windows 本机单个软件/游戏加速、精准单进程分流、防封禁与多应用代理隔离**，强烈推荐体验作者的另一款王牌客户端：
+>
+> | 功能对比 | **wifi2socks**（本项目） | [**Ghost Proxifier Pro**](https://github.com/liliBestCoder/ghost-proxifier-pro) 🌟 |
+> | :--- | :--- | :--- |
+> | **应用场景** | **局域网多设备软路由**（手机 / 电视 / 主机） | **Windows 本机特定程序**（游戏 / 浏览器 / 专属工具） |
+> | **核心技术** | **NDIS 驱动层**（Layer 2 物理级抓包拦截） | **MinHook API 拦截**（Winsock 进程级注入与延迟握手） |
+> | **客户端配置** | **局域网全免配**（连上 WiFi 热点即可直接翻墙） | **免修改全局路由表**（仅让指定 exe 进程流量走代理） |
+> | **特色亮点** | 自带 DHCP、WiFi AP 托管、QUIC 降级优化 | **「全家桶」子进程链式自动追踪**、反检测、多代理零冲突 |
+>
+> 👉 **[立即前往访问 Ghost Proxifier Pro 源码仓库 ➔](https://github.com/liliBestCoder/ghost-proxifier-pro)** 欢迎 Star 收藏！
 
 ---
 
@@ -253,6 +266,13 @@ wifi2socks 支持两种网关模式：
 ## 📚 教程与技术文档
 
 项目 `articles/` 目录下收录了完整的 **33 篇硬核实战专栏文章**，从以太网数据帧结构、NDIS 驱动内核交互、手写轻量级 TCP 状态机、TLS SNI 解析到高并发连接池与软路由调优，欢迎阅读与交流！
+
+---
+
+## 🔗 相关项目与生态
+
+- 🌟 **[Ghost Proxifier Pro](https://github.com/liliBestCoder/ghost-proxifier-pro)**：专为 Windows 平台打造的高性能进程级透明代理引擎，支持母子进程自动追踪、防作弊检测与精准分流。
+- 📊 **[Ghost Proxifier Monitor](https://github.com/liliBestCoder/ghost-proxifier-monitor)**：Ghost Proxifier Pro 客户端配套的实时数据监控大屏与活跃分析后台。
 
 ---
 
