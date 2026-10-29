@@ -1,170 +1,195 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <Filter Include="源文件">
+    <Filter Include="core">
       <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
-      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+      <Extensions>cpp;c;cc;cxx;h;hh;hpp</Extensions>
     </Filter>
-    <Filter Include="头文件">
+    <Filter Include="driver">
       <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
-      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+      <Extensions>cpp;c;cc;cxx;h;hh;hpp;lib;dll</Extensions>
     </Filter>
-    <Filter Include="资源文件">
+    <Filter Include="proxy">
       <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
-      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+      <Extensions>cpp;c;cc;cxx;h;hh;hpp</Extensions>
+    </Filter>
+    <Filter Include="rules">
+      <UniqueIdentifier>{A1B2C3D4-E5F6-4A7B-8C9D-0E1F2A3B4C5D}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;h;hh;hpp;proto</Extensions>
+    </Filter>
+    <Filter Include="services">
+      <UniqueIdentifier>{B2C3D4E5-F6A7-4B8C-9D0E-1F2A3B4C5D6E}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;h;hh;hpp</Extensions>
+    </Filter>
+    <Filter Include="utils">
+      <UniqueIdentifier>{C3D4E5F6-A7B8-4C9D-0E1F-2A3B4C5D6E7F}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;h;hh;hpp</Extensions>
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="wifi2socks.cpp">
-      <Filter>源文件</Filter>
+    <!-- Core -->
+    <ClCompile Include="src\core\wifi2socks.cpp">
+      <Filter>core</Filter>
     </ClCompile>
-    <ClCompile Include="common.pb.cc">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\core\main_dispatcher.cpp">
+      <Filter>core</Filter>
     </ClCompile>
-    <ClCompile Include="config_loader.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\core\worker.cpp">
+      <Filter>core</Filter>
     </ClCompile>
-    <ClCompile Include="connection_pool.cpp">
-      <Filter>源文件</Filter>
+    <!-- Driver -->
+    <ClCompile Include="src\driver\winpkfilter_driver.cpp">
+      <Filter>driver</Filter>
     </ClCompile>
-    <ClCompile Include="dhcp_server.cpp">
-      <Filter>源文件</Filter>
+    <!-- Proxy -->
+    <ClCompile Include="src\proxy\proxy_tcp.cpp">
+      <Filter>proxy</Filter>
     </ClCompile>
-    <ClCompile Include="geo_checker.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\proxy\proxy_udp.cpp">
+      <Filter>proxy</Filter>
     </ClCompile>
-    <ClCompile Include="http_server.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\proxy\nat_manager.cpp">
+      <Filter>proxy</Filter>
     </ClCompile>
-    <ClCompile Include="logger.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\proxy\connection_pool.cpp">
+      <Filter>proxy</Filter>
     </ClCompile>
-    <ClCompile Include="main_dispatcher.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\proxy\packet_pool.cpp">
+      <Filter>proxy</Filter>
     </ClCompile>
-    <ClCompile Include="nat_manager.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\proxy\tls_parser.cpp">
+      <Filter>proxy</Filter>
     </ClCompile>
-
-    <ClCompile Include="packet_pool.cpp">
-      <Filter>源文件</Filter>
+    <!-- Rules -->
+    <ClCompile Include="src\rules\rule_manager.cpp">
+      <Filter>rules</Filter>
     </ClCompile>
-    <ClCompile Include="adapter.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\rules\geo_checker.cpp">
+      <Filter>rules</Filter>
     </ClCompile>
-    <ClCompile Include="proxy_tcp.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\rules\common.pb.cc">
+      <Filter>rules</Filter>
     </ClCompile>
-    <ClCompile Include="proxy_udp.cpp">
-      <Filter>源文件</Filter>
+    <!-- Services -->
+    <ClCompile Include="src\services\dhcp_server.cpp">
+      <Filter>services</Filter>
     </ClCompile>
-    <ClCompile Include="rule_manager.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\services\dns_over_tcp_proxy.cpp">
+      <Filter>services</Filter>
     </ClCompile>
-    <ClCompile Include="tls_parser.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\services\wifi_ap.cpp">
+      <Filter>services</Filter>
     </ClCompile>
-    <ClCompile Include="traffic_manager.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\services\wifi_ap_listener.cpp">
+      <Filter>services</Filter>
     </ClCompile>
-    <ClCompile Include="wifi_ap.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\services\http_server.cpp">
+      <Filter>services</Filter>
     </ClCompile>
-    <ClCompile Include="wifi_ap_listener.cpp">
-      <Filter>源文件</Filter>
+    <!-- Utils -->
+    <ClCompile Include="src\utils\config_loader.cpp">
+      <Filter>utils</Filter>
     </ClCompile>
-    <ClCompile Include="winpkfilter_driver.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\utils\app_listener.cpp">
+      <Filter>utils</Filter>
     </ClCompile>
-    <ClCompile Include="worker.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\utils\adapter.cpp">
+      <Filter>utils</Filter>
     </ClCompile>
-    <ClCompile Include="app_listener.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\utils\traffic_manager.cpp">
+      <Filter>utils</Filter>
     </ClCompile>
-    <ClCompile Include="dns_over_tcp_proxy.cpp">
-      <Filter>源文件</Filter>
+    <ClCompile Include="src\utils\logger.cpp">
+      <Filter>utils</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="common.pb.h">
-      <Filter>头文件</Filter>
+    <!-- Core -->
+    <ClInclude Include="src\core\main_dispatcher.h">
+      <Filter>core</Filter>
     </ClInclude>
-    <ClInclude Include="config_loader.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\core\worker.h">
+      <Filter>core</Filter>
     </ClInclude>
-    <ClInclude Include="connection_pool.h">
-      <Filter>头文件</Filter>
+    <!-- Driver -->
+    <ClInclude Include="src\driver\winpkfilter_driver.h">
+      <Filter>driver</Filter>
     </ClInclude>
-    <ClInclude Include="dhcp_server.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\driver\ndisapi.h">
+      <Filter>driver</Filter>
     </ClInclude>
-    <ClInclude Include="dns_cache.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\driver\Common.h">
+      <Filter>driver</Filter>
     </ClInclude>
-    <ClInclude Include="geo_checker.h">
-      <Filter>头文件</Filter>
+    <!-- Proxy -->
+    <ClInclude Include="src\proxy\proxy_tcp.h">
+      <Filter>proxy</Filter>
     </ClInclude>
-    <ClInclude Include="http_server.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\proxy\proxy_udp.h">
+      <Filter>proxy</Filter>
     </ClInclude>
-    <ClInclude Include="logger.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\proxy\nat_manager.h">
+      <Filter>proxy</Filter>
     </ClInclude>
-    <ClInclude Include="main_dispatcher.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\proxy\connection_pool.h">
+      <Filter>proxy</Filter>
     </ClInclude>
-    <ClInclude Include="nat_manager.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\proxy\packet_pool.h">
+      <Filter>proxy</Filter>
     </ClInclude>
-
-    <ClInclude Include="packet_pool.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\proxy\tls_parser.h">
+      <Filter>proxy</Filter>
     </ClInclude>
-    <ClInclude Include="adapter.h">
-      <Filter>头文件</Filter>
+    <!-- Rules -->
+    <ClInclude Include="src\rules\rule_manager.h">
+      <Filter>rules</Filter>
     </ClInclude>
-    <ClInclude Include="proxy_tcp.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\rules\geo_checker.h">
+      <Filter>rules</Filter>
     </ClInclude>
-    <ClInclude Include="proxy_udp.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\rules\common.pb.h">
+      <Filter>rules</Filter>
     </ClInclude>
-    <ClInclude Include="rule_manager.h">
-      <Filter>头文件</Filter>
+    <!-- Services -->
+    <ClInclude Include="src\services\dhcp_server.h">
+      <Filter>services</Filter>
     </ClInclude>
-    <ClInclude Include="tls_parser.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\services\dns_over_tcp_proxy.h">
+      <Filter>services</Filter>
     </ClInclude>
-    <ClInclude Include="traffic_manager.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\services\dns_cache.h">
+      <Filter>services</Filter>
     </ClInclude>
-    <ClInclude Include="wifi_ap.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\services\dns_probe_tracker.h">
+      <Filter>services</Filter>
     </ClInclude>
-    <ClInclude Include="wifi_ap_listener.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\services\wifi_ap.h">
+      <Filter>services</Filter>
     </ClInclude>
-    <ClInclude Include="winpkfilter_driver.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\services\wifi_ap_listener.h">
+      <Filter>services</Filter>
     </ClInclude>
-    <ClInclude Include="worker.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\services\http_server.h">
+      <Filter>services</Filter>
     </ClInclude>
-    <ClInclude Include="app_config.h">
-      <Filter>头文件</Filter>
+    <!-- Utils -->
+    <ClInclude Include="src\utils\config_loader.h">
+      <Filter>utils</Filter>
     </ClInclude>
-    <ClInclude Include="app_listener.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\utils\app_config.h">
+      <Filter>utils</Filter>
     </ClInclude>
-    <ClInclude Include="dns_over_tcp_proxy.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\utils\app_listener.h">
+      <Filter>utils</Filter>
     </ClInclude>
-    <ClInclude Include="ndisapi.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\utils\adapter.h">
+      <Filter>utils</Filter>
     </ClInclude>
-    <ClInclude Include="Common.h">
-      <Filter>头文件</Filter>
+    <ClInclude Include="src\utils\traffic_manager.h">
+      <Filter>utils</Filter>
+    </ClInclude>
+    <ClInclude Include="src\utils\logger.h">
+      <Filter>utils</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

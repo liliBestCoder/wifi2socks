@@ -76,20 +76,13 @@ if !errorlevel! neq 0 (
     exit /b !errorlevel!
 )
 
-echo.
-echo [INFO] Building diag_tool.vcxproj (%CONFIG%^|%PLATFORM%)...
-"!MSBUILD!" diag_tool.vcxproj /p:Configuration=%CONFIG% /p:Platform=%PLATFORM% /m
-if !errorlevel! neq 0 (
-    echo [WARN] diag_tool build finished with warnings/errors.
-)
-
 :: 6. Copy runtime data files to output directory
 set "OUT_DIR=%~dp0%PLATFORM%\%CONFIG%"
 if exist "%OUT_DIR%" (
     if exist "%~dp0geoip.dat" copy /y "%~dp0geoip.dat" "%OUT_DIR%\" >nul
     if exist "%~dp0geosite.dat" copy /y "%~dp0geosite.dat" "%OUT_DIR%\" >nul
     if exist "%~dp0config.ini" copy /y "%~dp0config.ini" "%OUT_DIR%\" >nul
-    if exist "%~dp0ndisapidll.dll" copy /y "%~dp0ndisapidll.dll" "%OUT_DIR%\" >nul
+    if exist "%~dp0src\driver\ndisapidll.dll" copy /y "%~dp0src\driver\ndisapidll.dll" "%OUT_DIR%\" >nul
 )
 
 echo.

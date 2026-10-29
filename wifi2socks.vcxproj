@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -78,17 +78,17 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)lwip\src\include;$(ProjectDir)lwip-contrib\ports\win32\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\core;$(ProjectDir)src\driver;$(ProjectDir)src\proxy;$(ProjectDir)src\rules;$(ProjectDir)src\services;$(ProjectDir)src\utils;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(ProjectDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(ProjectDir)src\driver;$(ProjectDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>ndisapidll.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y /d "$(ProjectDir)ndisapidll.dll" "$(OutDir)"</Command>
+      <Command>xcopy /y /d "$(ProjectDir)src\driver\ndisapidll.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -100,17 +100,17 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)lwip\src\include;$(ProjectDir)lwip-contrib\ports\win32\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\core;$(ProjectDir)src\driver;$(ProjectDir)src\proxy;$(ProjectDir)src\rules;$(ProjectDir)src\services;$(ProjectDir)src\utils;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(ProjectDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(ProjectDir)src\driver;$(ProjectDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>ndisapidll.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y /d "$(ProjectDir)ndisapidll.dll" "$(OutDir)"</Command>
+      <Command>xcopy /y /d "$(ProjectDir)src\driver\ndisapidll.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -120,17 +120,17 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)lwip\src\include;$(ProjectDir)lwip-contrib\ports\win32\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\core;$(ProjectDir)src\driver;$(ProjectDir)src\proxy;$(ProjectDir)src\rules;$(ProjectDir)src\services;$(ProjectDir)src\utils;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(ProjectDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(ProjectDir)src\driver;$(ProjectDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>ndisapidll.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y /d "$(ProjectDir)ndisapidll.dll" "$(OutDir)"</Command>
+      <Command>xcopy /y /d "$(ProjectDir)src\driver\ndisapidll.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -142,70 +142,84 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)lwip\src\include;$(ProjectDir)lwip-contrib\ports\win32\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)src\core;$(ProjectDir)src\driver;$(ProjectDir)src\proxy;$(ProjectDir)src\rules;$(ProjectDir)src\services;$(ProjectDir)src\utils;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalLibraryDirectories>$(ProjectDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(ProjectDir)src\driver;$(ProjectDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>ndisapidll.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PostBuildEvent>
-      <Command>xcopy /y /d "$(ProjectDir)ndisapidll.dll" "$(OutDir)"</Command>
+      <Command>xcopy /y /d "$(ProjectDir)src\driver\ndisapidll.dll" "$(OutDir)"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="wifi2socks.cpp" />
-    <ClCompile Include="config_loader.cpp" />
-    <ClCompile Include="traffic_manager.cpp" />
-    <ClCompile Include="rule_manager.cpp" />
-    <ClCompile Include="http_server.cpp" />
-    <ClCompile Include="logger.cpp" />
-    <ClCompile Include="common.pb.cc" />
-    <ClCompile Include="worker.cpp" />
-    <ClCompile Include="geo_checker.cpp" />
-    <ClCompile Include="tls_parser.cpp" />
-    <ClCompile Include="dhcp_server.cpp" />
-    <ClCompile Include="winpkfilter_driver.cpp" />
-    <ClCompile Include="proxy_tcp.cpp" />
-    <ClCompile Include="proxy_udp.cpp" />
-    <ClCompile Include="wifi_ap.cpp" />
-    <ClCompile Include="wifi_ap_listener.cpp" />
-    <ClCompile Include="main_dispatcher.cpp" />
-    <ClCompile Include="connection_pool.cpp" />
-    <ClCompile Include="packet_pool.cpp" />
-    <ClCompile Include="adapter.cpp" />
-    <ClCompile Include="nat_manager.cpp" />
-    <ClCompile Include="app_listener.cpp" />
-    <ClCompile Include="dns_over_tcp_proxy.cpp" />
+    <!-- Core -->
+    <ClCompile Include="src\core\wifi2socks.cpp" />
+    <ClCompile Include="src\core\main_dispatcher.cpp" />
+    <ClCompile Include="src\core\worker.cpp" />
+    <!-- Driver -->
+    <ClCompile Include="src\driver\winpkfilter_driver.cpp" />
+    <!-- Proxy -->
+    <ClCompile Include="src\proxy\proxy_tcp.cpp" />
+    <ClCompile Include="src\proxy\proxy_udp.cpp" />
+    <ClCompile Include="src\proxy\nat_manager.cpp" />
+    <ClCompile Include="src\proxy\connection_pool.cpp" />
+    <ClCompile Include="src\proxy\packet_pool.cpp" />
+    <ClCompile Include="src\proxy\tls_parser.cpp" />
+    <!-- Rules -->
+    <ClCompile Include="src\rules\rule_manager.cpp" />
+    <ClCompile Include="src\rules\geo_checker.cpp" />
+    <ClCompile Include="src\rules\common.pb.cc" />
+    <!-- Services -->
+    <ClCompile Include="src\services\dhcp_server.cpp" />
+    <ClCompile Include="src\services\dns_over_tcp_proxy.cpp" />
+    <ClCompile Include="src\services\wifi_ap.cpp" />
+    <ClCompile Include="src\services\wifi_ap_listener.cpp" />
+    <ClCompile Include="src\services\http_server.cpp" />
+    <!-- Utils -->
+    <ClCompile Include="src\utils\config_loader.cpp" />
+    <ClCompile Include="src\utils\app_listener.cpp" />
+    <ClCompile Include="src\utils\adapter.cpp" />
+    <ClCompile Include="src\utils\traffic_manager.cpp" />
+    <ClCompile Include="src\utils\logger.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="common.pb.h" />
-    <ClInclude Include="config_loader.h" />
-    <ClInclude Include="dns_cache.h" />
-    <ClInclude Include="traffic_manager.h" />
-    <ClInclude Include="rule_manager.h" />
-    <ClInclude Include="http_server.h" />
-    <ClInclude Include="geo_checker.h" />
-    <ClInclude Include="worker.h" />
-    <ClInclude Include="app_config.h" />
-    <ClInclude Include="logger.h" />
-    <ClInclude Include="tls_parser.h" />
-    <ClInclude Include="dhcp_server.h" />
-    <ClInclude Include="winpkfilter_driver.h" />
-    <ClInclude Include="ndisapi.h" />
-    <ClInclude Include="Common.h" />
-    <ClInclude Include="proxy_tcp.h" />
-    <ClInclude Include="proxy_udp.h" />
-    <ClInclude Include="wifi_ap.h" />
-    <ClInclude Include="wifi_ap_listener.h" />
-    <ClInclude Include="connection_pool.h" />
-    <ClInclude Include="packet_pool.h" />
-    <ClInclude Include="adapter.h" />
-    <ClInclude Include="nat_manager.h" />
-    <ClInclude Include="app_listener.h" />
-    <ClInclude Include="dns_over_tcp_proxy.h" />
+    <!-- Core -->
+    <ClInclude Include="src\core\main_dispatcher.h" />
+    <ClInclude Include="src\core\worker.h" />
+    <!-- Driver -->
+    <ClInclude Include="src\driver\winpkfilter_driver.h" />
+    <ClInclude Include="src\driver\ndisapi.h" />
+    <ClInclude Include="src\driver\Common.h" />
+    <!-- Proxy -->
+    <ClInclude Include="src\proxy\proxy_tcp.h" />
+    <ClInclude Include="src\proxy\proxy_udp.h" />
+    <ClInclude Include="src\proxy\nat_manager.h" />
+    <ClInclude Include="src\proxy\connection_pool.h" />
+    <ClInclude Include="src\proxy\packet_pool.h" />
+    <ClInclude Include="src\proxy\tls_parser.h" />
+    <!-- Rules -->
+    <ClInclude Include="src\rules\rule_manager.h" />
+    <ClInclude Include="src\rules\geo_checker.h" />
+    <ClInclude Include="src\rules\common.pb.h" />
+    <!-- Services -->
+    <ClInclude Include="src\services\dhcp_server.h" />
+    <ClInclude Include="src\services\dns_over_tcp_proxy.h" />
+    <ClInclude Include="src\services\dns_cache.h" />
+    <ClInclude Include="src\services\dns_probe_tracker.h" />
+    <ClInclude Include="src\services\wifi_ap.h" />
+    <ClInclude Include="src\services\wifi_ap_listener.h" />
+    <ClInclude Include="src\services\http_server.h" />
+    <!-- Utils -->
+    <ClInclude Include="src\utils\config_loader.h" />
+    <ClInclude Include="src\utils\app_config.h" />
+    <ClInclude Include="src\utils\app_listener.h" />
+    <ClInclude Include="src\utils\adapter.h" />
+    <ClInclude Include="src\utils\traffic_manager.h" />
+    <ClInclude Include="src\utils\logger.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

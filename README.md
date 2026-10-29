@@ -11,7 +11,7 @@
 
 **wifi2socks** 旨在为 Windows 用户提供一套**开箱即用、双击即跑的硬件级软路由与透明代理系统**：
 - **全透明劫持**：在网络 Layer 2（NDIS 驱动层）实时捕获并转发数据包，局域网连接设备（手机、电视、主机）无需配置任何客户端、PAC 或证书。
-- **智能分流路由**：内置 V2Ray 格式离线规则库（`geoip.dat` 与 `geosite.dat`），结合 TLS SNI 域名嗅探，实现毫秒级国内直连、海外代理、广告恶意域名阻断。
+- **智能分流路由**：结合 V2Ray 格式离线规则库（`geoip.dat` 与 `geosite.dat`）与 TLS SNI 域名嗅探，实现毫秒级国内直连、海外代理、广告恶意域名阻断。
 - **QUIC 优化与快速降级**：针对移动端 App 频繁发起 QUIC 导致握手超时或黑屏的问题，对阻断的海外 QUIC 发送 ICMP Port Unreachable，促使客户端瞬时 fallback 到 TCP。
 - **高吞吐网络栈**：批量数据包读取（`ReadPackets`）、内存对象池（`PacketPool`、`ConnectionPool`）与 DNS-over-TCP 连接池加速。
 - **全套网络基础设施**：内置自研轻量级 DHCP 服务器、HTTP API 监控服务器以及 WiFi AP 虚拟热点管理（同时支持有线网卡模式）。
@@ -66,44 +66,80 @@
 
 ---
 
-## 📂 项目模块结构
+## 📂 模块化目录结构
 
-| 模块文件 | 功能职责 |
-|---|---|
-| `wifi2socks.cpp` | 程序主入口、工作模式识别（WiFi/Wired）、模块生命周期管理与优雅停机 |
-| `winpkfilter_driver.*` | WinPkFilter NDISAPI 驱动封装，负责驱动加载、网卡绑定、批量捕获与注入 |
-| `Common.h` | 内核与用户态共享的网络结构体（以太网头、IP 头、TCP/UDP 头、ICMP 头等） |
-| `packet_pool.*` | 预分配数据包内存池，极大消除高并发流量下的频繁 `malloc/free` 开销 |
-| `connection_pool.*` | TCP 连接池管理，复用与上游 SOCKS5 节点的通道 |
-| `nat_manager.*` | 软件 NAT 表，管理局域网客户端与主机的四元组映射与超时回收 |
-| `proxy_tcp.*` | TCP 透明代理核心，处理握手拦截、协议转换与 SOCKS5 转发 |
-| `proxy_udp.*` | UDP 代理、SOCKS5 UDP Associate、会话惰性清理与 QUIC ICMP 阻断策略 |
-| `dns_over_tcp_proxy.*` | DNS over TCP 转发与查询缓存，规避 UDP DNS 污染并提供连接池复用 |
-| `dns_probe_tracker.h` | DNS 探测行为分析与追踪器 |
-| `geo_checker.*` | 基于 Protobuf 解析 `geoip.dat` 与 `geosite.dat`，提供 O(1) 规则查询 |
-| `common.pb.*` | 规则库数据结构定义（通过 `protobuf-native` 运行时解析） |
-| `rule_manager.*` | 策略路由管理器（白名单、黑名单、直连列表、分流策略） |
-| `tls_parser.*` | TLS ClientHello 解析器，无损嗅探 SNI（Server Name Indication）域名 |
-| `dhcp_server.*` | 内置轻量级 DHCP 服务，自动为连接 WiFi/网口的客户端分配网段 IP 与网关 |
-| `wifi_ap.*` / `wifi_ap_listener.*` | Windows 托管网络（SoftAP）热点开启、状态监听与 SSID/密码配置 |
-| `adapter.*` | 本机网络适配器查询、IP/MAC 解析与网卡路由信息同步 |
-| `http_server.*` | 嵌入式 HTTP API 服务，提供运行状态监控、连接统计与动态管理 |
-| `logger.*` | 异步高性能日志记录器 |
-| `config_loader.*` / `app_config.h` | 配置文件 `config.ini` 解析器 |
-| `diag_tool.cpp` / `diag_tool.vcxproj` | 诊断排障工具，用于检测网卡状态、WinPkFilter 驱动、事件日志追踪 |
-| `articles/` | 完整的 30+ 篇《从0到1编写一个硬核软路由》技术专栏文章 |
+项目源码遵循清晰的分层架构组织：
+
+```text
+wifi2socks/
+├── src/
+│   ├── core/                  # 主程序入口与事件循环引擎
+│   │   ├── wifi2socks.cpp
+│   │   ├── main_dispatcher.cpp / .h
+│   │   └── worker.cpp / .h
+│   │
+│   ├── driver/                # NDIS 内核截包与 WinPkFilter 驱动交互
+│   │   ├── winpkfilter_driver.cpp / .h
+│   │   ├── ndisapi.h
+│   │   ├── ndisapilib.lib / ndisapidll.lib / ndisapidll.dll
+│   │   └── Common.h           # 协议头与内核交互结构体
+│   │
+│   ├── proxy/                 # 数据平面：透明代理与连接管理
+│   │   ├── proxy_tcp.cpp / .h
+│   │   ├── proxy_udp.cpp / .h
+│   │   ├── nat_manager.cpp / .h
+│   │   ├── connection_pool.cpp / .h
+│   │   ├── packet_pool.cpp / .h
+│   │   └── tls_parser.cpp / .h
+│   │
+│   ├── rules/                 # 规则引擎与 Geo 分流
+│   │   ├── rule_manager.cpp / .h
+│   │   ├── geo_checker.cpp / .h
+│   │   └── common.pb.cc / .h
+│   │
+│   ├── services/              # 嵌入式网络服务
+│   │   ├── dhcp_server.cpp / .h
+│   │   ├── dns_over_tcp_proxy.cpp / .h
+│   │   ├── dns_cache.h
+│   │   ├── dns_probe_tracker.h
+│   │   ├── wifi_ap.cpp / .h
+│   │   ├── wifi_ap_listener.cpp / .h
+│   │   └── http_server.cpp / .h
+│   │
+│   └── utils/                 # 通用工具、配置与日志
+│       ├── config_loader.cpp / .h
+│       ├── app_config.h
+│       ├── app_listener.cpp / .h
+│       ├── adapter.cpp / .h
+│       ├── traffic_manager.cpp / .h
+│       └── logger.cpp / .h
+│
+├── tools/
+│   └── diag_tool/             # 独立排障诊断工具
+│       ├── diag_tool.cpp
+│       └── diag_tool.vcxproj
+│
+├── articles/                  # 30+ 篇专栏技术文章
+├── build.bat                  # 一键构建脚本（集成依赖还原与构建）
+├── config.ini                 # 运行时配置文件
+├── packages.config            # NuGet 依赖配置（protobuf-native）
+├── wifi2socks.sln             # Visual Studio 解决方案
+├── wifi2socks.vcxproj         # 项目工程定义文件
+└── README.md
+```
 
 ---
 
-## ⚙️ 编译指南
+## ⚙️ 编译与构建指南
 
 ### 1. 环境准备
 - **操作系统**：Windows 10 / Windows 11 (64-bit)
 - **编译工具**：Visual Studio 2022（需安装 **使用 C++ 的桌面开发** 工作负荷，包含 MSVC v143 和 MSBuild）
 - **包管理器**：`nuget.exe`（项目内置一键脚本 `build.bat` 会自动检测并按需下载）
 
-### 2. 依赖项配置
-项目使用 NuGet 包 `protobuf-native (6.33.4.2)` 提供 Protobuf C++ 原生运行时库，WinPkFilter 依赖文件（`ndisapi.h`、`ndisapilib.lib`、`ndisapidll.dll`）已预置在工程根目录下。
+### 2. 外部依赖管理
+- **Protobuf C++ 运行时**：通过 NuGet 原生包 `protobuf-native (6.33.4.2)` 自动拉取与集成，无需手动编译源码或在 Git 中提交大体积二进制。
+- **GeoIP / GeoSite 规则库**：`build.bat` 在首次构建时会自动从官方源（`Loyalsoldier/v2ray-rules-dat`）拉取最新 Release 资产，避免二进制数据导致 Git 仓库历史膨胀。
 
 ### 3. 一键编译（推荐）
 在项目根目录下直接运行 `build.bat`：
@@ -120,9 +156,9 @@ build.bat Debug x64
 脚本将自动执行：
 1. 检测 Visual Studio 2022 编译环境（MSBuild）；
 2. 还原 NuGet 原生依赖包（`protobuf-native`）；
-3. 编译主程序 `wifi2socks.sln`；
-4. 编译配套诊断工具 `diag_tool.vcxproj`；
-5. 自动输出可执行程序至 `x64\Release\`。
+3. 检查并按需自动下载最新 `geoip.dat` 与 `geosite.dat`；
+4. 编译主程序 `wifi2socks.sln`（同时编译 `wifi2socks` 与 `diag_tool`）；
+5. 自动将所需可执行程序、驱动动态库、规则库与配置文件统一部署至 `x64\Release\`。
 
 ### 4. 使用 Visual Studio IDE 编译
 1. 双击打开 `wifi2socks.sln`；
