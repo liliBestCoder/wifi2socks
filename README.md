@@ -12,7 +12,7 @@
 > [!NOTE]
 > **💡 寻找 Windows 本机单应用 / 进程代理工具？**  
 > 本项目（wifi2socks）专注于**局域网网关与 WiFi 热点透明软路由**（多设备零配置接入）；  
-> 如果你需要让 **Windows 本机指定软件（如 Claude Desktop、Cursor、命令行开发工具或特定应用）走独立代理**，推荐使用作者的配套客户端：[**Ghost Proxifier Pro**](https://github.com/liliBestCoder/ghost-proxifier-pro) —— 免装虚拟网卡与驱动、不修改系统路由表，拖入 exe 即可自动接管该进程及其所有子进程流量，免费提供完整 GUI 界面。
+> 如果你需要让 **Windows 本机指定软件（如 Claude Desktop、Cursor、命令行开发工具或特定应用）走独立代理**，推荐使用作者的配套客户端：[**Ghost Proxifier Pro**](https://github.com/liliBestCoder/ghost-proxifier-pro) —— 原生图形界面，免装虚拟网卡与驱动、不修改系统路由表，拖入 exe 即可自动接管该进程及其所有子进程网络流量。
 
 ---
 
@@ -262,7 +262,7 @@ wifi2socks 支持两种网关模式：
 
 ## 🔗 相关项目与生态
 
-- 🌟 **[Ghost Proxifier Pro](https://github.com/liliBestCoder/ghost-proxifier-pro)**：Windows 原生进程级透明代理工具，完整支持 TCP/UDP 双协议转发。免驱动/虚拟网卡、不改路由表，支持拖拽程序及子进程全自动追踪接管，完全免费。
+- 🌟 **[Ghost Proxifier Pro](https://github.com/liliBestCoder/ghost-proxifier-pro)**：Windows 原生进程级透明代理工具，完整支持 TCP/UDP 双协议转发。免驱动/虚拟网卡、不改路由表，支持拖拽程序及子进程全自动追踪接管。
 - 📊 **[Ghost Proxifier Monitor](https://github.com/liliBestCoder/ghost-proxifier-monitor)**：Ghost Proxifier Pro 客户端配套的实时数据监控大屏与活跃分析后台。
 
 ---
