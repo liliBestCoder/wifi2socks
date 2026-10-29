@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -54,6 +54,7 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
+    <Import Project="$(ProjectDir)packages\protobuf-native.6.33.4.2\build\native\protobuf-native.props" Condition="Exists('$(ProjectDir)packages\protobuf-native.6.33.4.2\build\native\protobuf-native.props')" />
   </ImportGroup>
   <ImportGroup Label="Shared">
   </ImportGroup>
@@ -208,5 +209,6 @@
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="$(ProjectDir)packages\protobuf-native.6.33.4.2\build\native\protobuf-native.targets" Condition="Exists('$(ProjectDir)packages\protobuf-native.6.33.4.2\build\native\protobuf-native.targets')" />
   </ImportGroup>
 </Project>

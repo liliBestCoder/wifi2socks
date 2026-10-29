@@ -2,6 +2,9 @@
 x64/
 [Dd]ebug/
 [Rr]elease/
+wifi2socks/
+diag_tool/
+.vs/
 
 # Build artifacts (within any directory)
 *.obj
@@ -24,8 +27,17 @@ vcpkg.applocal.log
 # Visual Studio user files
 *.vcxproj.user
 
+# NuGet packages cache
+packages/*
+!packages/packages.config
+!packages.config
+
 # JetBrains IDE
 .idea/
+
+# Large rule datasets (auto-downloaded by build.bat / runtime)
+geoip.dat
+geosite.dat
 
 # Log files (generated at runtime)
 *.log
