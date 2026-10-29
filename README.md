@@ -3,9 +3,12 @@
 [![License: GPL v3 with WinPkFilter Exception](https://img.shields.io/badge/License-GPLv3%20with%20Linking%20Exception-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-brightgreen.svg)]()
 [![C++](https://img.shields.io/badge/Standard-C%2B%2B17-blue.svg)]()
+[![Related: ghost-proxifier-pro](https://img.shields.io/badge/Related%20Project-ghost--proxifier--pro-orange.svg)](https://github.com/liliBestCoder/ghost-proxifier-pro)
 
 > **Windows 硬件级硬核软路由与透明代理网关**  
 > 基于 C++ 与 Windows NDIS Filter 驱动（WinPkFilter）从零构建，支持全透明 TCP/UDP 流量劫持、SOCKS5 转发、GeoIP/GeoSite 智能分流与自带 WiFi 热点/有线网卡网关。
+>
+> 💡 **姊妹项目推荐**：如果你需要针对 Windows 本机进程的精细化透明代理与规则分流客户端，欢迎体验 [**ghost-proxifier-pro**](https://github.com/liliBestCoder/ghost-proxifier-pro)！
 
 ---
 
