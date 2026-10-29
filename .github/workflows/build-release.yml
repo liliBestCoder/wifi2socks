@@ -1,0 +1,99 @@
+name: Manual Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+      release_title:
+        description: 'Release Title'
+        required: false
+        default: 'wifi2socks v1.0.0'
+      draft:
+        description: 'Create as Draft Release'
+        type: boolean
+        required: false
+        default: false
+      prerelease:
+        description: 'Create as Pre-release'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Package (Windows x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      - name: Restore NuGet Packages
+        run: |
+          nuget restore wifi2socks.sln -PackagesDirectory packages
+
+      - name: Download GeoIP & GeoSite Databases
+        shell: pwsh
+        run: |
+          Write-Host "Downloading geoip.dat..."
+          Invoke-WebRequest -Uri "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat" -OutFile "geoip.dat"
+          Write-Host "Downloading geosite.dat..."
+          Invoke-WebRequest -Uri "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat" -OutFile "geosite.dat"
+
+      - name: Build Solution (Release|x64)
+        run: |
+          msbuild wifi2socks.sln /p:Configuration=Release /p:Platform=x64 /m
+
+      - name: Package Release ZIP
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag_name }}"
+          if (-not $tag) { $tag = "v1.0.0" }
+          $pkgName = "wifi2socks-${tag}-windows-x64"
+          $distDir = New-Item -ItemType Directory -Path $pkgName -Force
+
+          Copy-Item "x64\Release\wifi2socks.exe" -Destination "$pkgName\"
+          Copy-Item "x64\Release\diag_tool.exe" -Destination "$pkgName\"
+          Copy-Item "src\driver\ndisapidll.dll" -Destination "$pkgName\"
+          Copy-Item "config.ini" -Destination "$pkgName\"
+          Copy-Item "geoip.dat" -Destination "$pkgName\"
+          Copy-Item "geosite.dat" -Destination "$pkgName\"
+          Copy-Item "LICENSE" -Destination "$pkgName\"
+          Copy-Item "README.md" -Destination "$pkgName\"
+
+          $zipPath = "${pkgName}.zip"
+          Compress-Archive -Path "$pkgName\*" -DestinationPath $zipPath -Force
+          Write-Host "Package created: $zipPath"
+
+          "ZIP_FILE=$zipPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PKG_NAME=$pkgName" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG_NAME }}
+          path: ${{ env.ZIP_FILE }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag_name }}
+          name: ${{ github.event.inputs.release_title }}
+          draft: ${{ github.event.inputs.draft }}
+          prerelease: ${{ github.event.inputs.prerelease }}
+          files: ${{ env.ZIP_FILE }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
