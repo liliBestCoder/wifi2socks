@@ -4,24 +4,12 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-brightgreen.svg)]()
 [![C++](https://img.shields.io/badge/Standard-C%2B%2B17-blue.svg)]()
 [![Release](https://img.shields.io/github/v/release/liliBestCoder/wifi2socks?color=orange)](https://github.com/liliBestCoder/wifi2socks/releases)
-[![Sister Project: Ghost Proxifier Pro](https://img.shields.io/badge/%F0%9F%9A%80%20%E5%BC%BA%E5%8A%9B%E6%8E%A8%E8%8D%90-Ghost%20Proxifier%20Pro-ff4081?style=for-the-badge&logo=windows)](https://github.com/liliBestCoder/ghost-proxifier-pro)
+[![Client: Ghost Proxifier Pro](https://img.shields.io/badge/Client-Ghost%20Proxifier%20Pro-blueviolet.svg)](https://github.com/liliBestCoder/ghost-proxifier-pro)
 
 > **Windows 硬件级硬核软路由与透明代理网关**  
 > 基于 C++ 与 Windows NDIS Filter 驱动（WinPkFilter）从零构建，支持全透明 TCP/UDP 流量劫持、HTTP 代理转发（HTTP CONNECT 隧道）、GeoIP/GeoSite 智能分流与自带 WiFi 热点/有线网卡网关。
-
-> [!TIP]
-> ### 🚀 姊妹项目引流推荐：[Ghost Proxifier Pro](https://github.com/liliBestCoder/ghost-proxifier-pro) —— Windows 高性能进程级透明代理引擎
 >
-> 如果你正在寻找针对 **Windows 本机单个软件/游戏加速、精准单进程分流、防封禁与多应用代理隔离**，强烈推荐体验作者的另一款王牌客户端：
->
-> | 功能对比 | **wifi2socks**（本项目） | [**Ghost Proxifier Pro**](https://github.com/liliBestCoder/ghost-proxifier-pro) 🌟 |
-> | :--- | :--- | :--- |
-> | **应用场景** | **局域网多设备软路由**（手机 / 电视 / 主机） | **Windows 本机特定程序**（游戏 / 浏览器 / 专属工具） |
-> | **核心技术** | **NDIS 驱动层**（Layer 2 物理级抓包拦截） | **MinHook API 拦截**（Winsock 进程级注入与延迟握手） |
-> | **客户端配置** | **局域网全免配**（连上 WiFi 热点即可直接翻墙） | **免修改全局路由表**（仅让指定 exe 进程流量走代理） |
-> | **特色亮点** | 自带 DHCP、WiFi AP 托管、QUIC 降级优化 | **「全家桶」子进程链式自动追踪**、反检测、多代理零冲突 |
->
-> 👉 **[立即前往访问 Ghost Proxifier Pro 源码仓库 ➔](https://github.com/liliBestCoder/ghost-proxifier-pro)** 欢迎 Star 收藏！
+> 📌 *注：本项目专注于局域网/热点设备的免客户端网关代理。如需对 Windows 本机运行的指定进程（如游戏、特定工具、浏览器）进行单进程分流与防检测代理，推荐搭配使用 [**Ghost Proxifier Pro**](https://github.com/liliBestCoder/ghost-proxifier-pro)。*
 
 ---
 
