@@ -10,8 +10,9 @@
 > 基于 C++ 与 Windows NDIS Filter 驱动（WinPkFilter）从零构建，支持全透明 TCP/UDP 流量劫持、HTTP 代理转发（HTTP CONNECT 隧道）、GeoIP/GeoSite 智能分流与自带 WiFi 热点/有线网卡网关。
 
 > [!NOTE]
-> **💡 寻找 Windows 本机单进程代理客户端？**  
-> 本项目专注于**局域网网关 / WiFi 热点软路由**（设备零配置）；如果你需要针对 **Windows 本机运行的指定软件、游戏加速、多进程隔离与防检测代理**，推荐使用作者的配套客户端：[**Ghost Proxifier Pro**](https://github.com/liliBestCoder/ghost-proxifier-pro)（支持全家桶子进程追踪与延迟握手）。
+> **💡 寻找 Windows 本机单应用 / 进程代理工具？**  
+> 本项目（wifi2socks）专注于**局域网网关与 WiFi 热点透明软路由**（多设备零配置接入）；  
+> 如果你需要让 **Windows 本机指定软件（如 Claude Desktop、Cursor、命令行开发工具或特定应用）走独立代理**，推荐使用作者的配套客户端：[**Ghost Proxifier Pro**](https://github.com/liliBestCoder/ghost-proxifier-pro) —— 免装虚拟网卡与驱动、不修改系统路由表，拖入 exe 即可自动接管该进程及其所有子进程流量，免费提供完整 GUI 界面。
 
 ---
 
@@ -261,7 +262,7 @@ wifi2socks 支持两种网关模式：
 
 ## 🔗 相关项目与生态
 
-- 🌟 **[Ghost Proxifier Pro](https://github.com/liliBestCoder/ghost-proxifier-pro)**：专为 Windows 平台打造的高性能进程级透明代理引擎，支持母子进程自动追踪、防作弊检测与精准分流。
+- 🌟 **[Ghost Proxifier Pro](https://github.com/liliBestCoder/ghost-proxifier-pro)**：Windows 原生进程级透明代理工具，完整支持 TCP/UDP 双协议转发。免驱动/虚拟网卡、不改路由表，支持拖拽程序及子进程全自动追踪接管，完全免费。
 - 📊 **[Ghost Proxifier Monitor](https://github.com/liliBestCoder/ghost-proxifier-monitor)**：Ghost Proxifier Pro 客户端配套的实时数据监控大屏与活跃分析后台。
 
 ---
