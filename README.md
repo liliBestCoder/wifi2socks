@@ -6,7 +6,7 @@
 [![Related: ghost-proxifier-pro](https://img.shields.io/badge/Related%20Project-ghost--proxifier--pro-orange.svg)](https://github.com/liliBestCoder/ghost-proxifier-pro)
 
 > **Windows 硬件级硬核软路由与透明代理网关**  
-> 基于 C++ 与 Windows NDIS Filter 驱动（WinPkFilter）从零构建，支持全透明 TCP/UDP 流量劫持、SOCKS5 转发、GeoIP/GeoSite 智能分流与自带 WiFi 热点/有线网卡网关。
+> 基于 C++ 与 Windows NDIS Filter 驱动（WinPkFilter）从零构建，支持全透明 TCP/UDP 流量劫持、HTTP 代理转发（HTTP CONNECT 隧道）、GeoIP/GeoSite 智能分流与自带 WiFi 热点/有线网卡网关。
 >
 > 💡 **姊妹项目推荐**：如果你需要针对 Windows 本机进程的精细化透明代理与规则分流客户端，欢迎体验 [**ghost-proxifier-pro**](https://github.com/liliBestCoder/ghost-proxifier-pro)！
 
@@ -59,14 +59,14 @@
 │   |  5. 代理执行器:                                                   |   │
 │   |     ├── Direct (直连原路放行)                                     |   │
 │   |     ├── Block  (拦截 / QUIC 发送 ICMP Port Unreachable)           |   │
-│   |     └── Proxy  (转为 SOCKS5 握手并转发至 Upstream)                |   │
+│   |     └── Proxy  (通过 HTTP CONNECT 隧道转发至 Upstream)            |   │
 │   +───────────────────────────────────────────────────────────────────+   │
 +───────────────────────────────────────────────────────────────────────────+
                                          │
                     ┌────────────────────┴────────────────────┐
                     ▼                                         ▼
             +───────────────+                         +───────────────+
-            |  本地网络直连 |                         | SOCKS5 代理源 |
+            |  本地网络直连 |                         |  HTTP 代理源  |
             |  (国内流量)   |                         |  (海外流量)   |
             +───────────────+                         +───────────────+
 ```
@@ -190,7 +190,7 @@ build.bat Debug x64
 # 软路由自身作为网关的 IP
 gateway_ip = 192.168.102.1
 
-# 上游 SOCKS5 代理服务器地址与端口
+# 上游 HTTP 代理服务器地址与端口（支持 HTTP CONNECT 隧道的代理端，如 Clash/V2Ray/Xray 的 mixed-port 或 http-port）
 upstream_ip = 127.0.0.1
 upstream_port = 2080
 
